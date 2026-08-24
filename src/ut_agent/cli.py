@@ -57,7 +57,8 @@ def main(argv=None) -> int:
         print(format_table(results))
         ok = sum(1 for r in results if r["status"] == "OK")
         print(f"\n[batch] OK {ok}/{len(results)}", file=sys.stderr)
-        return 0
+        allowed = {"OK", "SKIP_EXEC"}
+        return 0 if results and all(r["status"] in allowed for r in results) else 1
 
     if a.cmd == "gen":
         from ut_agent.cases import boundary

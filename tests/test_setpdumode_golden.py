@@ -3,6 +3,7 @@
 对照物：examples/golden/CanIf_SetPduMode/testdata.csv（B01..B09 手工登记）
 与 docs/用例表与CSV格式规格.md。改动期望值须说明拍板出处。
 """
+import os
 from pathlib import Path
 
 import pytest
@@ -10,12 +11,18 @@ import pytest
 from ut_agent.parser import clang_parser
 
 ROOT = Path(__file__).resolve().parents[1]
-CP = ROOT / "examples" / "classic-platform"
+CP = Path(os.environ.get("UT_AGENT_CLASSIC_PLATFORM",
+                        str(ROOT / "examples" / "classic-platform")))
 CFG = ROOT / "examples" / "configs" / "cp_canif"
 SRC = CP / "communication" / "CanIf" / "src" / "CanIf.c"
 
 
 def build_ir(function="CanIf_SetPduMode"):
+    if not SRC.is_file():
+        pytest.skip(
+            "缺少外部 Classic Platform 基准源码；请设置 UT_AGENT_CLASSIC_PLATFORM "
+            "或准备 examples/classic-platform/"
+        )
     includes = [CP / "include", CP / "include" / "generic", CP / "base" / "compiler",
                 CP / "drivers" / "CanTrcv", CFG, CFG / "libc_stub"]
     includes += sorted(p for p in CP.rglob("inc") if p.is_dir())

@@ -96,9 +96,13 @@ def control_candidates(ir: FunctionIR) -> dict:
             cv = var_to_cv.get(a.var.replace(" ", ""))
             if cv is None:
                 continue
-            dom = (domain_of(a.var_type, ir.enums)
+            # Prefer the enum domain inferred from the actual boundary name.
+            # libclang often exposes an enum typedef as its underlying type
+            # (for example ``unsigned int``); using that type first would
+            # incorrectly widen a six-value enum to 0..UINT_MAX.
+            dom = (_resolve_enum_domain(ir, a.boundary_name)
                    or domain_of(cv.var_type, ir.enums)
-                   or _resolve_enum_domain(ir, a.boundary_name)
+                   or domain_of(a.var_type, ir.enums)
                    or _const_domain(a.boundary_name))
             if cv.name not in acc:
                 acc[cv.name] = (cv, [])

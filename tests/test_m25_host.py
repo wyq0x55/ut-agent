@@ -4,7 +4,6 @@ golden 手写的 17 行期待值（ret / PduMode_after / callcnt / ARG 记录）
 本测试证明：抽取 + stub + driver 编译执行得到的**实测值**与之一致。
 """
 import re
-from pathlib import Path
 
 import pytest
 
@@ -41,7 +40,6 @@ def _repo_defines() -> dict:
 @pytest.fixture(scope="module")
 def executed():
     tu, ir = build_tu_ir()
-    from ut_agent.cases import boundary as _b
     from ut_agent.winams.csv_render import build_columns
     cols, rows = boundary.enumerate_rows(ir)
     columns = build_columns(ir, boundary.control_candidates(ir))

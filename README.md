@@ -45,9 +45,22 @@ pip install -e ".[dev]"
 # 批量跑某个源文件
 ut-agent batch <source.c> -D MACRO=val --out .build/batch/<name> -I <include> ...
 
-# 回归测试
+# 回归测试（需要外部 Classic Platform 基准源码）
 pytest tests/
 ```
+
+### 测试基准源码
+
+仓库不包含体积较大的 `examples/classic-platform/` 基准源码。运行完整的
+CanIf golden/host 回归前，请将基准源码放置到该目录，或设置环境变量：
+
+```bash
+export UT_AGENT_CLASSIC_PLATFORM=/path/to/classic-platform
+pytest tests/
+```
+
+如果基准源码未准备，相关测试会明确跳过，不会伪装成通过；解析、枚举和
+跨平台运行器的独立回归测试仍会执行。
 
 ## 铁律
 

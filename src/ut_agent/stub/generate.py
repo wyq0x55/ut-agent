@@ -32,6 +32,8 @@ def table_stub_name(call) -> str:
 def render_stub_c(ir: FunctionIR, call_max: int = CALL_MAX_DEFAULT,
                   with_prelude: bool = True) -> str:
     """with_prelude=False：嵌入 host 执行器单 TU 用（不带文件头注释与 #include）。"""
+    if call_max <= 0:
+        raise ValueError("call_max 必须大于 0")
     out: list[str] = []
     if with_prelude:
         out += [
@@ -52,7 +54,6 @@ def render_stub_c(ir: FunctionIR, call_max: int = CALL_MAX_DEFAULT,
         out.append("")
     for call in ir.calls:
         k = f"{call.order:02d}"
-        ptr_params = [p for p in call.params if p.is_ptr]
         out.append(f"/* ---- 调用#{k}: {call.callee} ---- */")
         if call.ptr_call:
             if not call.table_base:
@@ -68,6 +69,7 @@ def render_stub_c(ir: FunctionIR, call_max: int = CALL_MAX_DEFAULT,
             out.append(f"static void {name}({sig})   /* 安装至 {call.table_base}"
                        f"{'.' + call.table_member if call.table_member else '[]'} */")
             out.append("{")
+            out.append(f"    if (callcnt{k} >= CALL_MAX) return;")
             for i, t in enumerate(call.arg_types):
                 if is_scalar_type(t, ir.enums):
                     out.append(f"    ARG{k}_arg{i}[callcnt{k}] = arg{i};")
@@ -103,6 +105,9 @@ def render_stub_c(ir: FunctionIR, call_max: int = CALL_MAX_DEFAULT,
         static_prefix = "static " if call.is_static else ""
         out.append(f"{static_prefix}{ret} {call.callee}({sig_params})")
         out.append("{")
+        out.append(f"    if (callcnt{k} >= CALL_MAX) {{")
+        out.append("        return;" if not has_ret else "        return 0;")
+        out.append("    }")
         for p in call.params:
             if not p.is_ptr:
                 out.append(f"    ARG{k}_{p.name}[callcnt{k}] = {p.name};")
@@ -119,7 +124,7 @@ def render_stub_c(ir: FunctionIR, call_max: int = CALL_MAX_DEFAULT,
             if ret_controls:
                 out.append(f"    return CALLRET{k}[callcnt{k} - 1];")
             else:
-                out.append(f"    return 0;   /* 返回值未参与分支判定: 不加 CALLRET, 返回类型零值 */")
+                out.append("    return 0;   /* 返回值未参与分支判定: 不加 CALLRET, 返回类型零值 */")
         out.append("}")
         out.append("")
     return "\n".join(out).rstrip() + "\n"

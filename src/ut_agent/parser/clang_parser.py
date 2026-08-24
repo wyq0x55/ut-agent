@@ -9,7 +9,6 @@
 """
 from __future__ import annotations
 
-import re
 from pathlib import Path
 from typing import Optional
 
@@ -449,13 +448,6 @@ def _collect_calls(body, tu, ir, macros) -> None:
                     ))
         seen[dedup] = site
     ir.calls = list(seen.values())
-
-
-def _macro_at(cur, macros):
-    for name, m in macros.items():
-        if _inside(cur, m):
-            return name
-    return None
 
 
 def _collect_branches(body, tu, ir, macros) -> None:

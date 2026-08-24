@@ -1,6 +1,6 @@
 /*
  * 自动生成 stub —— 被测函数: CanIf_SetPduMode
- * 源码: examples\classic-platform\communication\CanIf\src\CanIf.c L1342
+ * 源码: /mnt/c/Users/Adminis/.zcode/workspace/default/ut-agent/examples/classic-platform/communication/CanIf/src/CanIf.c L1342
  *
  * 规则: 被测函数内所有调用函数 stub 化; 只留 callcnt 与引数入出力; 无逻辑
  * 命名: stub 编号 k 按调用顺序从 00 起; ARG<k>_<形参名>=入力记录;
@@ -20,6 +20,9 @@ uint8 ARG00_ErrorId[CALL_MAX];  /* 入力记录 */
 
 Std_ReturnType Det_ReportError(uint16 ModuleId, uint8 InstanceId, uint8 ApiId, uint8 ErrorId)
 {
+    if (callcnt00 >= CALL_MAX) {
+        return 0;
+    }
     ARG00_ModuleId[callcnt00] = ModuleId;
     ARG00_InstanceId[callcnt00] = InstanceId;
     ARG00_ApiId[callcnt00] = ApiId;
