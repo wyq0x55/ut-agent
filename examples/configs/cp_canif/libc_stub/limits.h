@@ -1,0 +1,8 @@
+#define INT_MAX 2147483647
+#define INT_MIN (-2147483648)
+#define UINT_MAX 4294967295U
+#define CHAR_MAX 127
+#define CHAR_MIN (-128)
+#define UCHAR_MAX 255
+#define USHRT_MAX 65535
+#define SHRT_MAX 32767
