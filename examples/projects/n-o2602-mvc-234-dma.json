@@ -1,0 +1,54 @@
+{
+  "name": "n-o2602-mvc-234-dma",
+  "source": "src/bsw/cdd/dma/Dma.c",
+  "include_root": "src",
+  "call_max": 5,
+  "cpu": "cortex-m4",
+  "dwarf_version": 5,
+  "defines": {},
+  "functions": [
+    {
+      "name": "p_vog_dma_init",
+      "testcsv": "../golden/n-o2602-mvc-234/dma/p_vog_dma_init/TestCsv.csv",
+      "expected": "../golden/n-o2602-mvc-234/dma/p_vog_dma_init/Output.csv"
+    },
+    {
+      "name": "Dma_Csih2Send",
+      "testcsv": "../golden/n-o2602-mvc-234/dma/Dma_Csih2Send/TestCsv.csv",
+      "expected": "../golden/n-o2602-mvc-234/dma/Dma_Csih2Send/Output.csv"
+    },
+    {
+      "name": "Dma_Csih2Receive",
+      "testcsv": "../golden/n-o2602-mvc-234/dma/Dma_Csih2Receive/TestCsv.csv",
+      "expected": "../golden/n-o2602-mvc-234/dma/Dma_Csih2Receive/Output.csv"
+    },
+    {
+      "name": "Os_Isr_f_vog_dma_interrupt_DMA04"
+    },
+    {
+      "name": "Os_Isr_f_vog_dma_interrupt_DMA05",
+      "testcsv": "../golden/n-o2602-mvc-234/dma/Os_Isr_f_vog_dma_interrupt_DMA05/TestCsv.csv",
+      "expected": "../golden/n-o2602-mvc-234/dma/Os_Isr_f_vog_dma_interrupt_DMA05/Output.csv"
+    },
+    {
+      "name": "Dma_Error",
+      "testcsv": "../golden/n-o2602-mvc-234/dma/Dma_Error/TestCsv.csv",
+      "expected": "../golden/n-o2602-mvc-234/dma/Dma_Error/Output.csv"
+    },
+    {
+      "name": "p_vol_dma_write_reg32"
+    },
+    {
+      "name": "p_u4l_dma_read_reg32"
+    },
+    {
+      "name": "p_vol_dma_orwrite_reg16"
+    },
+    {
+      "name": "p_vol_dma_andwrite_reg16"
+    },
+    {
+      "name": "p_vol_dma_andwrite_reg32"
+    }
+  ]
+}

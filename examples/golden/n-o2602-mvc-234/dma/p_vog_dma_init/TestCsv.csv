@@ -1,0 +1,14 @@
+mod,"p_vog_dma_init","p_vog_dma_init 単体テスト",2,2,,,,CPP,,,"",0
+#COMMENT,"U4L_DMA_REG_PDMA0DM04CM","U2L_DMA_REG_ICDMA04","U4L_DMA_REG_PDMA0DM04CM","U2L_DMA_REG_ICDMA04"
+;$L$,if ( (u1)(1)==xnl_spi_unit_cfg[SPI_CSIH2].is_enable_dma )
+;$L$,TRUE
+,0x0,0xffbf,0x1c,0xff7f
+;$L$,FALSE デッドコードがあった為、この分岐に入ることができません
+;$L$,if ( (u1)(1)==xnl_spi_unit_cfg[SPI_CSIH2].is_enable_dma )
+;$L$,TRUE
+,0x0,0xffbf,0x1c,0xff7f
+;$L$,FALSE デッドコードがあった為、この分岐に入ることができません
+;$L$,if ( (u1)(1)==xnl_spi_unit_cfg[SPI_CSIH2].is_enable_dma )
+;$L$,TRUE
+,0x0,0xffbf,0x1c,0xff7f
+;$L$,FALSE デッドコードがあった為、この分岐に入ることができません

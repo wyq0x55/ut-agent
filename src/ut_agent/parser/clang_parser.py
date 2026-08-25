@@ -97,12 +97,31 @@ def parse_tu(source: Path, include_dirs=(), defines: Optional[dict] = None,
 
 # ---------------------------------------------------------------- 辅助
 
+def _safe_token_spelling(token) -> str:
+    """读取 token 文本；老项目的 CP932 注释可能无法被 libclang 解码为 UTF-8。
+
+    注释不参与表达式/赋值分析，因此遇到这类 token 时跳过即可。对非注释
+    token 保留空串兜底，避免单个坏 token 阻塞整个函数的确定性解析。
+    """
+    if token.kind == cindex.TokenKind.COMMENT:
+        return ""
+    try:
+        return token.spelling
+    except UnicodeDecodeError:
+        return ""
+
+
+def _token_spellings(tokens) -> list[str]:
+    return [text for token in tokens
+            if (text := _safe_token_spelling(token))]
+
+
 def _tokens_text(tu, cur) -> str:
-    return " ".join(t.spelling for t in tu.get_tokens(extent=cur.extent))
+    return " ".join(_token_spellings(tu.get_tokens(extent=cur.extent)))
 
 
 def _tokens_text_obj(cur) -> str:
-    return " ".join(t.spelling for t in cur.get_tokens())
+    return " ".join(_token_spellings(cur.get_tokens()))
 
 
 def _strip_wrappers(cur):
@@ -138,7 +157,7 @@ def _operator_of(tu, parent, hint=None) -> Optional[str]:
     宏展开后子节点 extent 会坍缩、部分节点 token 为空——此时用最近一次
     拿到的非空 token 序列（hint，通常是外层括号的实参文本）兜底。
     顺序：原序列扫深度 0 → 剥一层外括号再扫（覆盖 (A==B) 整体包裹的形态）。"""
-    toks = [t.spelling for t in tu.get_tokens(extent=parent.extent)]
+    toks = _token_spellings(tu.get_tokens(extent=parent.extent))
     if not toks and hint is not None:
         toks = list(hint)
     for _ in range(2):
@@ -242,7 +261,7 @@ def _collect_atoms(tu, cur, out: list, hint=None) -> None:
     # 逐层解包裹并同时刷新 hint：宏坍缩下内层节点 token 可能为空，
     # 外层（尤其是实参括号）的 token 序列是唯一可靠的算符文本来源
     while True:
-        toks = [t.spelling for t in tu.get_tokens(extent=cur.extent)]
+        toks = _token_spellings(tu.get_tokens(extent=cur.extent))
         if toks:
             hint = toks
         if cur.kind in CAST_KINDS:
@@ -400,8 +419,8 @@ def _collect_calls(body, tu, ir, macros) -> None:
             callee = ref.spelling
         else:
             # 函数指针调用：取调用表达式首 token 作 callee 记号
-            toks = list(tu.get_tokens(extent=cur.extent))
-            callee = toks[0].spelling if toks else "<unknown>"
+            toks = _token_spellings(tu.get_tokens(extent=cur.extent))
+            callee = toks[0] if toks else "<unknown>"
         # 结构体分发表（CanIfDispatchConfig.CanIfXxx(...)）会被 referenced 解析成
         # 空参数函数——callee 命中全局变量名时一律按指针表调用处理（介入点）
         via_table = callee in ir.globals_used
@@ -409,7 +428,7 @@ def _collect_calls(body, tu, ir, macros) -> None:
         table_base = table_member = None
         arg_types: list[str] = []
         if is_ptr_call:
-            toks = [t.spelling for t in tu.get_tokens(extent=cur.extent)]
+            toks = _token_spellings(tu.get_tokens(extent=cur.extent))
             if len(toks) >= 3 and toks[0] in ir.globals_used:
                 table_base = toks[0]
                 if toks[1] == "." and toks[2] != "(":

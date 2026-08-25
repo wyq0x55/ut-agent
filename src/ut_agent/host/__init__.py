@@ -1,3 +1,3 @@
-from . import driver, extract, run
+from . import arm_gcc, driver, extract, run
 
-__all__ = ["driver", "extract", "run"]
+__all__ = ["arm_gcc", "driver", "extract", "run"]

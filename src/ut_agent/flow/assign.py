@@ -11,7 +11,17 @@ from clang import cindex
 
 
 def _tokens_text(tu, cur) -> str:
-    return " ".join(t.spelling for t in tu.get_tokens(extent=cur.extent))
+    texts = []
+    for token in tu.get_tokens(extent=cur.extent):
+        if token.kind == cindex.TokenKind.COMMENT:
+            continue
+        try:
+            text = token.spelling
+        except UnicodeDecodeError:
+            continue
+        if text:
+            texts.append(text)
+    return " ".join(texts)
 
 
 def _find_tu_var(cur) -> str | None:
@@ -37,7 +47,16 @@ def trace_assigns(body, tu) -> dict[str, dict]:
         ch = list(cur.get_children())
         if len(ch) != 2:
             continue
-        toks = [t.spelling for t in tu.get_tokens(extent=cur.extent)]
+        toks = []
+        for token in tu.get_tokens(extent=cur.extent):
+            if token.kind == cindex.TokenKind.COMMENT:
+                continue
+            try:
+                text = token.spelling
+            except UnicodeDecodeError:
+                continue
+            if text:
+                toks.append(text)
         if "=" not in toks:      # 赋值（== 是单 token，不会误命中）
             continue
         lhs, rhs = ch
@@ -64,7 +83,16 @@ def global_writes(body, tu) -> list[str]:
         ch = list(cur.get_children())
         if len(ch) != 2:
             continue
-        toks = [t.spelling for t in tu.get_tokens(extent=cur.extent)]
+        toks = []
+        for token in tu.get_tokens(extent=cur.extent):
+            if token.kind == cindex.TokenKind.COMMENT:
+                continue
+            try:
+                text = token.spelling
+            except UnicodeDecodeError:
+                continue
+            if text:
+                toks.append(text)
         if "=" not in toks:
             continue
         lhs, _ = ch

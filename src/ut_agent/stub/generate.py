@@ -1,11 +1,14 @@
-"""M2：stub 源码生成（确定性，规格 §3）。
+"""M2：WinAMS stub 源码生成（确定性）。
 
-命名：callcnt<k> / ARG<k>_<形参名> / PTIN<k>_<形参名> / PTOUT<k>_<形参名>[CALL_MAX]
-/ CALLRET<k>[CALL_MAX]（仅当该返回值参与被测函数分支判定时生成——v0 依据
-控制变量 source=="stub" 判定，flow 集成前保守不生成）。
-stub 体无逻辑：先记录后递增，索引从 0 起。
+主入口 ``render_stub_c`` 直接生成参考工程使用的
+``AMSTB_ / CALLCNT_ / ARG / PTROUT / AMIN_return`` 契约。旧 host
+回放器仍通过 ``render_spec_stub_c`` 使用其内部 fixture 格式，不属于
+WinAMS 交付物。
 """
 from __future__ import annotations
+
+from pathlib import Path
+from typing import Sequence
 
 from ut_agent.ir import FunctionIR, is_scalar_type
 
@@ -29,8 +32,8 @@ def table_stub_name(call) -> str:
     return f"stub{k}_{call.table_base}"
 
 
-def render_stub_c(ir: FunctionIR, call_max: int = CALL_MAX_DEFAULT,
-                  with_prelude: bool = True) -> str:
+def render_spec_stub_c(ir: FunctionIR, call_max: int = CALL_MAX_DEFAULT,
+                       with_prelude: bool = True) -> str:
     """with_prelude=False：嵌入 host 执行器单 TU 用（不带文件头注释与 #include）。"""
     if call_max <= 0:
         raise ValueError("call_max 必须大于 0")
@@ -127,4 +130,171 @@ def render_stub_c(ir: FunctionIR, call_max: int = CALL_MAX_DEFAULT,
                 out.append("    return 0;   /* 返回值未参与分支判定: 不加 CALLRET, 返回类型零值 */")
         out.append("}")
         out.append("")
+    return "\n".join(out).rstrip() + "\n"
+
+
+# WinAMS の STB_ARYSIZE と同じ扱いにする。プロジェクトごとに CLI の
+# --call-max で上書きできる（参考プロジェクトの AMSTB_SrcFile.c は 5）。
+WINAMS_CALL_MAX_DEFAULT = 5
+
+
+def _winams_ident(name: str) -> str:
+    """C 識別子として使えない関数ポインタ表記を安定した名前にする。"""
+    out = []
+    for ch in name:
+        out.append(ch if ch.isalnum() or ch == "_" else "_")
+    ident = "".join(out).strip("_")
+    return ident or "anonymous"
+
+
+def _winams_pointer_base(ptr_type: str) -> str:
+    """WinAMS の PTROUT 配列に使う指向物型を取り出す。"""
+    return _base_type(ptr_type)
+
+
+def _winams_is_scalar(type_name: str, ir: FunctionIR) -> bool:
+    """补充参考项目的 u1/u2/u4、s1/s2/s4 基础类型。"""
+    return is_scalar_type(type_name, ir.enums) or type_name.strip() in {
+        "u1", "u2", "u4", "s1", "s2", "s4", "f4", "f8",
+    }
+
+
+def render_stub_c(ir: FunctionIR, call_max: int = WINAMS_CALL_MAX_DEFAULT,
+                  with_prelude: bool = True,
+                  extra_includes: Sequence[str] = ()) -> str:
+    """WinAMS 原生 stub 源码。
+
+    参考项目的命名规则是：调用仍使用原函数名，由 WinAMS 的
+    ``STB_PREFIX=AMSTB_`` 接管到 ``AMSTB_<callee>``；调用履历使用
+    ``CALLCNT_<callee>``，普通参数使用 ``ARG<argno>_<callee>``，可写
+    指针输出使用 ``PTROUT<argno>_<callee>``，返回值使用
+    ``AMIN_return``。这与项目原先的 ``callcnt00`` 格式不同，因此该
+    函数作为主生成入口直接输出 WinAMS 格式。
+    """
+    if call_max <= 0:
+        raise ValueError("call_max 必须大于 0")
+
+    out: list[str] = []
+    if with_prelude:
+        out += [
+            "#define WINAMS_STUB",
+            "#ifdef WINAMS_STUB",
+            "#ifdef __cplusplus",
+            'extern "C" {',
+            "#endif",
+            "",
+            f"#define CALL_MAX  {call_max}",
+            "",
+            '/* WinAMS 参考工程的公共类型头；项目头路径由编译命令提供。 */',
+            '#include "aipf_std_def.h"',
+            '#include "Platform_Types.h"',
+            '#include "Std_Types.h"',
+            '#include "Compiler.h"',
+        ]
+        seen = {"aipf_std_def.h", "Platform_Types.h", "Std_Types.h", "Compiler.h"}
+        for header in extra_includes:
+            if header and header not in seen:
+                out.append(f'#include "{header}"')
+                seen.add(header)
+        out.append("")
+    else:
+        out.append(f"#define CALL_MAX  {call_max}")
+        out.append("")
+
+    declarations: list[str] = []
+    bodies: list[str] = []
+    for call in ir.calls:
+        callee = _winams_ident(call.callee)
+        stub_name = f"AMSTB_{callee}"
+        params_sig = ", ".join(f"{p.type} {p.name}" for p in call.params)
+        if not params_sig:
+            params_sig = " void "
+        declarations.append(
+            f"{call.ret_type} {stub_name}({params_sig}) __attribute__((used));"
+        )
+
+        body: list[str] = [
+            f"/* WINAMS_STUB[{Path(ir.file).name}:{call.callee}:{stub_name}:"
+            f"inout:::counter<CALLCNT_{callee}>] */",
+            f"/*    {call.callee} => Stub */",
+            f"{call.ret_type} {stub_name}({params_sig})",
+            "{",
+            f"    static volatile u1 CALLCNT_{callee};",
+        ]
+
+        for idx, param in enumerate(call.params):
+            slot = f"{idx:02d}"
+            if not param.is_ptr:
+                body.append(
+                    f"    static volatile {param.type} ARG{slot}_{callee}[ CALL_MAX ];"
+                )
+                continue
+            base = _winams_pointer_base(param.type)
+            if not param.is_const and _winams_is_scalar(base, ir):
+                body.append(
+                    f"    static volatile {base} PTROUT{slot}_{callee}[ CALL_MAX ];"
+                )
+            else:
+                body.append(
+                    f"    static {base}* volatile PTROUT{slot}_{callee}[ CALL_MAX ];"
+                )
+
+        has_return = call.ret_type not in ("", "void")
+        if has_return:
+            body.append(f"    static volatile {call.ret_type} AMIN_return[CALL_MAX];")
+        body.append("")
+        body.append(f"    CALLCNT_{callee}++;" )
+
+        for idx, param in enumerate(call.params):
+            slot = f"{idx:02d}"
+            index = f"CALLCNT_{callee} - 1"
+            if not param.is_ptr:
+                body.append(
+                    f"    ARG{slot}_{callee}[{index}] = {param.name};"
+                )
+            elif not param.is_const and _winams_is_scalar(
+                    _winams_pointer_base(param.type), ir):
+                body += [
+                    "",
+                    "    /* WinAMS 参考 stub：按调用序设定传出值 */",
+                    f"    *{param.name} = PTROUT{slot}_{callee}[{index}];",
+                ]
+            else:
+                body += [
+                    "",
+                    "    /* 指针地址记录，供 WinAMS 的 @地址 列使用 */",
+                    f"    PTROUT{slot}_{callee}[{index}] = {param.name};",
+                ]
+
+        if has_return:
+            body += ["", f"    return AMIN_return[CALLCNT_{callee} - 1];"]
+        body += ["}", ""]
+        bodies.extend(body)
+
+    out += declarations
+    out.append("/*--------------------------------- stub function --------------------------------*/")
+    out.extend(bodies)
+    # ARM GCC 链接阶段仍需要解析被测 C 文件中的原调用名。WinAMS 运行时
+    # 通过 STB_PREFIX 使用 AMSTB_*，而 GNU ld 不会自动建立这个映射；同一
+    # TU 中的别名只补齐 ELF 符号，不改变 TestCsv 的 AMSTB 契约。
+    aliases: list[str] = []
+    for call in ir.calls:
+        if call.ptr_call:
+            continue
+        ident = _winams_ident(call.callee)
+        params_sig = ", ".join(f"{p.type} {p.name}" for p in call.params) or " void "
+        aliases.append(
+            f"{call.ret_type} {call.callee}({params_sig}) "
+            f"__attribute__((alias(\"AMSTB_{ident}\"), used));"
+        )
+    if aliases:
+        out.append("/* ARM GCC link aliases: original call -> AMSTB symbol */")
+        out.extend(aliases)
+    if with_prelude:
+        out += [
+            "#ifdef __cplusplus",
+            "}",
+            "#endif",
+            "#endif /* WINAMS_STUB */",
+        ]
     return "\n".join(out).rstrip() + "\n"

@@ -9,8 +9,8 @@ import re
 
 from conftest import ROOT, build_ir
 from ut_agent.cases import boundary
-from ut_agent.stub.generate import render_stub_c
-from ut_agent.winams.csv_render import build_columns, render_csv
+from ut_agent.stub.generate import render_spec_stub_c
+from ut_agent.winams.csv_render import build_columns, render_spec_csv
 
 GOLDEN = ROOT / "examples" / "golden" / "CanIf_SetPduMode"
 CFG_DISPLAY = ("CANIF_CHANNEL_CNT=2 ; CANIF_PUBLIC_DEV_ERROR_DETECT=STD_ON ; "
@@ -26,7 +26,8 @@ def _norm(text: str) -> str:
 def test_stub_code_matches_golden():
     ir = build_ir()
     golden = (GOLDEN / "CanIf_SetPduMode_stubs.c").read_text(encoding="utf-8")
-    assert _norm(render_stub_c(ir)) == _norm(golden)
+    # 旧 golden 仅回归 host 内部 fixture，不是 WinAMS 交付格式。
+    assert _norm(render_spec_stub_c(ir)) == _norm(golden)
 
 
 def test_csv_header_matches_golden():
@@ -40,7 +41,7 @@ def test_csv_header_matches_golden():
 
 
 def test_csv_branch_rows():
-    csv_text = render_csv(build_ir(), CFG_DISPLAY)
+    csv_text = render_spec_csv(build_ir(), CFG_DISPLAY)
     b_lines = [line for line in csv_text.splitlines() if line.startswith("# B")]
     assert len(b_lines) == 16                                # 15 if/elseif + 1 switch
     assert sum("VALIDATE_RV" in line for line in b_lines) == 2
@@ -98,7 +99,7 @@ def test_control_var_sources():
 
 
 def test_data_row_values_formatted():
-    csv_text = render_csv(build_ir(), CFG_DISPLAY)
+    csv_text = render_spec_csv(build_ir(), CFG_DISPLAY)
     lines = csv_text.splitlines()
     header_idx = next(i for i, l in enumerate(lines) if l.startswith("case_id,"))
     data = [line for line in lines if re.match(r"^U\d+,", line)]

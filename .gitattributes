@@ -1,6 +1,2 @@
-* text=auto
-*.c text eol=lf
-*.h text eol=lf
-*.csv text eol=lf
-*.md text eol=lf
-*.py text eol=lf
+# WinAMS golden CSV 是 CP932/CRLF 的字节契约，禁止 Git 做换行转换。
+examples/golden/** -text

@@ -1,0 +1,6 @@
+mod,"Os_Isr_f_vog_dma_interrupt_DMA05","Os_Isr_f_vog_dma_interrupt_DMA05 単体テスト",7,6,,,,CPP,,,"",0
+%,"AMSTB_ActivateTask","ActivateTask"
+%,"AMSTB_p_vog_spiif_drvcom_receive","p_vog_spiif_drvcom_receive"
+%,"AMSTB_p_u1l_iohwa_dio_active_in","iohwa_dio.c/p_u1l_iohwa_dio_active_in"
+#COMMENT,"AMSTB_SrcFile.c/AMSTB_p_u1l_iohwa_dio_active_in@CALLCNT_p_u1l_iohwa_dio_active_in","AMSTB_SrcFile.c/AMSTB_p_vog_spiif_drvcom_receive@CALLCNT_p_vog_spiif_drvcom_receive","AMSTB_SrcFile.c/AMSTB_ActivateTask@CALLCNT_ActivateTask","Dma.c/ptl_dma_callback_func","AMSTB_SrcFile.c/AMSTB_p_u1l_iohwa_dio_active_in@ARG00_p_u1l_iohwa_dio_active_in[0]","AMSTB_SrcFile.c/AMSTB_p_u1l_iohwa_dio_active_in@ARG01_p_u1l_iohwa_dio_active_in[0]","AMSTB_SrcFile.c/AMSTB_ActivateTask@ARG00_ActivateTask[0]","AMSTB_SrcFile.c/AMSTB_p_u1l_iohwa_dio_active_in@CALLCNT_p_u1l_iohwa_dio_active_in","AMSTB_SrcFile.c/AMSTB_p_vog_spiif_drvcom_receive@CALLCNT_p_vog_spiif_drvcom_receive","AMSTB_SrcFile.c/AMSTB_ActivateTask@CALLCNT_ActivateTask","AMSTB_SrcFile.c/AMSTB_p_u1l_iohwa_dio_active_in@ARG00_p_u1l_iohwa_dio_active_in[0]","AMSTB_SrcFile.c/AMSTB_p_u1l_iohwa_dio_active_in@ARG01_p_u1l_iohwa_dio_active_in[0]","AMSTB_SrcFile.c/AMSTB_ActivateTask@ARG00_ActivateTask[0]"
+,0,0,0,p_u1l_iohwa_dio_active_in,0xff,255,0x0,1,1,1,0x0,0,0x6

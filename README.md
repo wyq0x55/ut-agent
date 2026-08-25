@@ -15,11 +15,11 @@ C 源码 + 配置头
 ├─────────────────────────────────────┤
 │  cases/    边界值枚举 + 组合去冗余     │
 ├─────────────────────────────────────┤
-│  stub/     无逻辑 stub（callcnt + 引数记录）│
+│  stub/     WinAMS AMSTB stub（CALLCNT/ARG/PTROUT）│
 ├─────────────────────────────────────┤
-│  host/     harness + driver 编译执行  │
+│  host/     harness + ARM GCC 编译执行       │
 ├─────────────────────────────────────┤
-│  winams/   WinAMS CSV 输出（预留）    │
+│  winams/   WinAMS TestCsv（mod/#COMMENT）   │
 ├─────────────────────────────────────┤
 │  llm/      LLM 兜底（来源判定/有状态stub/覆盖率闭环）│
 └─────────────────────────────────────┘
@@ -44,6 +44,19 @@ pip install -e ".[dev]"
 
 # 批量跑某个源文件
 ut-agent batch <source.c> -D MACRO=val --out .build/batch/<name> -I <include> ...
+
+# 生成 WinAMS 原生 stub 与 TestCsv（CSV 写为 CP932/CRLF）
+ut-agent gen <source.c> -f <function> --out .build/winams/<function> \
+  -I <include> --reference-csv <参考 TestCsv>
+
+# 用 Arm GNU Toolchain 生成带 DWARF 的 ARM ELF
+ut-agent arm-build <source.c> -o .build/winams/<function>.elf \
+  --entry <function> -I <include>
+
+# 在 WinAMS 安装了 armgccomf.EXE 时，同时生成可导入的 .xlo
+ut-agent arm-build <source.c> <function>_stubs.c \
+  -o .build/winams/<function>.out --omf-output .build/winams/<function>.xlo \
+  --entry <function> -I <include>
 
 # 回归测试（需要外部 Classic Platform 基准源码）
 pytest tests/
@@ -75,7 +88,8 @@ pytest tests/
 
 - Python >= 3.10
 - libclang >= 16
-- GCC（host 执行模式，通过 WSL）
+- Arm GNU Toolchain（`arm-none-eabi-gcc`，生成 WinAMS 使用的 ARM ELF）
+- GCC（可选，仅用于 host 回放模式）
 
 ## License
 

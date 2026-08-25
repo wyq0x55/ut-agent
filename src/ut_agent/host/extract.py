@@ -14,7 +14,7 @@ from pathlib import Path
 from clang import cindex
 
 from ut_agent.ir import FunctionIR
-from ut_agent.stub.generate import render_stub_c
+from ut_agent.stub.generate import render_spec_stub_c
 
 
 def _first_function_line(tu) -> int:
@@ -249,7 +249,7 @@ def build_harness_source(tu, ir: FunctionIR, driver_code: str,
         *window_fn,
         "",
         "/* ===== stub（自动生成） ===== */",
-        render_stub_c(ir, call_max, with_prelude=False),
+        render_spec_stub_c(ir, call_max, with_prelude=False),
         "",
         driver_code,
     ]

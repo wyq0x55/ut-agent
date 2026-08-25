@@ -11,7 +11,7 @@ from conftest import CP, CFG, DEFINES, ROOT, build_tu_ir
 from ut_agent.cases import boundary
 from ut_agent.host import driver as driver_gen
 from ut_agent.host import extract, run
-from ut_agent.winams.csv_render import render_csv
+from ut_agent.winams.csv_render import render_spec_csv
 
 GOLDEN = ROOT / "examples" / "golden" / "CanIf_SetPduMode"
 BUILD = ROOT / ".build" / "host"
@@ -106,8 +106,8 @@ def test_golden_17_rows_expectations(executed):
 def test_backfill_csv(executed):
     """渲染 CSV 的 ? 用实测值回填，抽查回填文本。"""
     ir, cols, rows, results = executed
-    csv_text = render_csv(ir, "CANIF_CHANNEL_CNT=2 ; CANIF_PUBLIC_DEV_ERROR_DETECT=STD_ON ; "
-                         "CANIF_PUBLIC_PN_SUPPORT=STD_OFF ; CANIF_PUBLIC_TX_BUFFERING=STD_OFF")
+    csv_text = render_spec_csv(ir, "CANIF_CHANNEL_CNT=2 ; CANIF_PUBLIC_DEV_ERROR_DETECT=STD_ON ; "
+                               "CANIF_PUBLIC_PN_SUPPORT=STD_OFF ; CANIF_PUBLIC_TX_BUFFERING=STD_OFF")
     lines = csv_text.splitlines()
     header_idx = next(i for i, l in enumerate(lines) if l.startswith("case_id,"))
     header = lines[header_idx].split(",")

@@ -49,11 +49,15 @@ def test_batch_cli_allows_skipped_execution(monkeypatch):
     assert cli.main(["batch", "unused.c"]) == 0
 
 
-def test_generated_stub_guards_call_max():
+def test_generated_stub_uses_winams_call_contract():
     ir = FunctionIR(name="f", file="f.c", line=1, ret_type="void")
     ir.calls = [CallSite(
         order=0, callee="callee", line=1,
         params=[Param(name="value", type="int")], ret_type="void"
     )]
     source = render_stub_c(ir, call_max=1)
-    assert "if (callcnt00 >= CALL_MAX)" in source
+    assert "#define WINAMS_STUB" in source
+    assert "#define CALL_MAX  1" in source
+    assert "AMSTB_callee" in source
+    assert "CALLCNT_callee" in source
+    assert "ARG00_callee[ CALL_MAX ]" in source
