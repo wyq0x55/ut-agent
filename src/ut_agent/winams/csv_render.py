@@ -8,10 +8,27 @@ from __future__ import annotations
 import csv
 import io
 from itertools import product
+import re
 from pathlib import Path
 
 from ut_agent.cases import boundary
-from ut_agent.ir import FunctionIR, is_scalar_type
+from ut_agent.ir import FunctionIR, is_scalar_type, selected_global_writes
+
+
+_MEMORY_HELPER = re.compile(
+    r".*(?:read|orwrite|andwrite|xorwrite|write).*?reg(?:8|16|32|64)$",
+    re.IGNORECASE,
+)
+_DEAD_BRANCH_COMMENT = "デッドコードがあった為、この分岐に入ることができません"
+
+
+def _skip_memory_helpers(ir: FunctionIR, call) -> bool:
+    """寄存器 helper 是实现细节，不生成重复的 stub 设定列。
+
+    即使当前函数因已有返回值/指针结果而没有选中写寄存器，helper 调用
+    本身也不能表示新的测试分歧，因此仍然跳过。
+    """
+    return bool(_MEMORY_HELPER.fullmatch(call.callee or ""))
 
 
 def build_columns(ir: FunctionIR, cand: dict) -> list:
@@ -20,6 +37,8 @@ def build_columns(ir: FunctionIR, cand: dict) -> list:
     并登记 @地址 行（规格 §4.1：@引数名 分配地址，其前地址段空闲可用）。"""
     cols: list = []
     for call in ir.calls:
+        if _skip_memory_helpers(ir, call):
+            continue
         k = f"{call.order:02d}"
         if call.ptr_call:
             cols.append({"header": f"callcnt{k}(期待·指针表)", "kind": "expect", "values": None})
@@ -57,7 +76,7 @@ def build_columns(ir: FunctionIR, cand: dict) -> list:
             continue
         cols.append({"header": f"{name}(设定)", "kind": "set",
                      "values": sorted(c["values"]), "enum": c["enum"], "cv": c["cv"]})
-    for w in ir.global_writes:
+    for w in selected_global_writes(ir):
         key = w.replace(" ", "")
         last = key.split(".")[-1].split("[")[0]
         cols.append({"header": f"{last}_after(期待)", "kind": "expect", "values": None})
@@ -195,6 +214,11 @@ def _winams_columns(ir: FunctionIR) -> tuple[list[tuple[str, str | None]],
     """
     inputs: list[tuple[str, str | None]] = []
     outputs: list[tuple[str, str | None]] = []
+    # memory-mapped IO 宏没有 C 变量声明可供 WinAMS 直接解析；地址宏和
+    # 访问方向由 parser 写入 IR，输入侧表示调用前寄存器值，写访问同时
+    # 生成同名输出侧期待值。
+    for memory in ir.memory_vars:
+        inputs.append((memory.name, None))
     for param in ir.params:
         if param.is_ptr:
             inputs.append((f"@{param.name}", param.name))
@@ -202,6 +226,8 @@ def _winams_columns(ir: FunctionIR) -> tuple[list[tuple[str, str | None]],
             inputs.append((param.name, param.name))
 
     for call in ir.calls:
+        if _skip_memory_helpers(ir, call):
+            continue
         inputs.append((_winams_comment_source(call), None))
         for index, param in enumerate(call.params):
             # 参考 TestCsv 使用 @<参数名> 表示输入列，*<参数名> 表示
@@ -213,15 +239,18 @@ def _winams_columns(ir: FunctionIR) -> tuple[list[tuple[str, str | None]],
             ))
 
     for cv in ir.control_vars:
-        if cv.source in ("global", "local_from_global"):
+        if cv.constant_value is None and cv.source in ("global", "local_from_global"):
             inputs.append((cv.var, cv.name))
 
     for param in ir.params:
         if param.is_ptr and not param.is_const:
             outputs.append((f"*{param.name}", None))
+    for memory in ir.memory_vars:
+        if memory.write:
+            outputs.append((memory.name, None))
     if ir.ret_type not in ("", "void"):
         outputs.append((f"{Path(ir.file).name}/{ir.name}@@", None))
-    outputs.extend((name, None) for name in ir.global_writes)
+    outputs.extend((name, None) for name in selected_global_writes(ir))
     return inputs, outputs
 
 
@@ -333,6 +362,15 @@ def render_csv(ir: FunctionIR, cfg_display: str = "", *,
     _, rows = boundary.enumerate_rows(ir)
     rows = rows or [{}]
     all_columns = input_columns + output_columns
+    memory_inputs = {
+        memory.name: memory.input_value if memory.input_value is not None else 0
+        for memory in ir.memory_vars
+    }
+    memory_outputs = {
+        memory.name: memory.expected_value if memory.expected_value is not None else 0
+        for memory in ir.memory_vars
+        if memory.write
+    }
     template_data = template.get("data_rows", ()) if template else ()
     if template_data and any(len(row) != len(all_columns) for row in template_data):
         template_data = ()
@@ -348,9 +386,15 @@ def render_csv(ir: FunctionIR, cfg_display: str = "", *,
         values = []
         for index, (comment, key) in enumerate(all_columns):
             if index < input_count:
-                values.append(_winams_value(comment, key, row))
+                if comment in memory_inputs:
+                    values.append(f"0x{memory_inputs[comment]:x}")
+                else:
+                    values.append(_winams_value(comment, key, row))
             else:
-                values.append("0x0")
+                if comment in memory_outputs:
+                    values.append(f"0x{memory_outputs[comment]:x}")
+                else:
+                    values.append("0x0")
         return ",".join([""] + values)
 
     for branch_index, branch in enumerate(ir.branches):
@@ -359,13 +403,17 @@ def render_csv(ir: FunctionIR, cfg_display: str = "", *,
         else:
             condition = _winams_condition(branch)
         out.append(f";$L$,{condition}")
-        out.append(";$L$,TRUE")
-        out.extend(data_line(row) for row in rows)
-        if template and not emit_false:
-            out.append(f";$L$,{template.get('false_label', 'FALSE')}")
-        else:
-            out.append(";$L$,FALSE")
-        if emit_false:
+        true_label = "TRUE"
+        if branch.constant_value is False:
+            true_label = f"TRUE {_DEAD_BRANCH_COMMENT}"
+        out.append(f";$L$,{true_label}")
+        if branch.constant_value is not False:
+            out.extend(data_line(row) for row in rows)
+        false_label = "FALSE"
+        if branch.constant_value is True:
+            false_label = f"FALSE {_DEAD_BRANCH_COMMENT}"
+        out.append(f";$L$,{false_label}")
+        if emit_false and branch.constant_value is not True:
             out.extend(data_line(row) for row in rows)
 
     if not ir.branches:

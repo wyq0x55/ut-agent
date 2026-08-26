@@ -94,7 +94,7 @@ def control_candidates(ir: FunctionIR) -> dict:
     for b in ir.branches:
         for a in b.atoms:
             cv = var_to_cv.get(a.var.replace(" ", ""))
-            if cv is None:
+            if cv is None or cv.constant_value is not None:
                 continue
             # Prefer the enum domain inferred from the actual boundary name.
             # libclang often exposes an enum typedef as its underlying type
@@ -109,7 +109,7 @@ def control_candidates(ir: FunctionIR) -> dict:
             acc[cv.name][1].append((a.boundary, dom))
         if b.kind == "switch":
             cv = var_to_cv.get(b.cond_text.replace(" ", ""))
-            if cv is None:
+            if cv is None or cv.constant_value is not None:
                 continue
             vals = {c.value for c in b.cases if not c.is_default and c.value is not None}
             if vals:
@@ -154,6 +154,8 @@ def settable_columns(ir: FunctionIR, cand: dict) -> list:
                      sorted(c["values"]) if c else [0]))
     for name, c in cand.items():
         cv = c["cv"]
+        if cv.constant_value is not None:
+            continue
         if cv.source != "local_from_global" and cv.source != "global":
             continue
         cols.append((name, cv, sorted(c["values"])))

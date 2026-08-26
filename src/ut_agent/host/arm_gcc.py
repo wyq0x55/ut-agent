@@ -18,10 +18,14 @@ from typing import Sequence
 
 
 _ARM_GCC_CANDIDATES = (
+    r"C:\Program Files\Arm\GNU Toolchain mingw-w64-x86_64-arm-none-eabi\bin\arm-none-eabi-gcc.exe",
+    r"C:\Program Files (x86)\Arm\GNU Toolchain mingw-w64-x86_64-arm-none-eabi\bin\arm-none-eabi-gcc.exe",
     "/mnt/c/Program Files/Arm/GNU Toolchain mingw-w64-x86_64-arm-none-eabi/bin/arm-none-eabi-gcc.exe",
     "/mnt/c/Program Files (x86)/Arm/GNU Toolchain mingw-w64-x86_64-arm-none-eabi/bin/arm-none-eabi-gcc.exe",
 )
 _ARM_GCC_OMF_CANDIDATES = (
+    r"C:\WinAMS\BIN\armgccomf.EXE",
+    r"C:\WinAMS\BIN\ARMGccOmf.EXE",
     "/mnt/c/WinAMS/BIN/armgccomf.EXE",
     "/mnt/c/WinAMS/BIN/ARMGccOmf.EXE",
 )
@@ -113,11 +117,21 @@ def _run_executable(executable: str | Path,
                     args: Sequence[str]) -> subprocess.CompletedProcess[str]:
     executable = str(executable)
     if _is_windows_executable(executable):
+        native_executable = _wsl_to_windows(executable)
+        native_args = [
+            _wsl_to_windows(a) if not a.startswith("-") else a for a in args
+        ]
+        if os.name == "nt":
+            # Git Bash 启动的 Windows Python 可以直接调用原生 .exe；不再
+            # 隐式切换到 PowerShell，保持实验编排 shell 的可追溯性。
+            return subprocess.run(
+                [native_executable, *native_args], check=True,
+                capture_output=True, text=True, encoding="cp932", errors="replace",
+            )
         ps = ["powershell.exe", "-NoProfile", "-NonInteractive", "-Command"]
-        command = "& " + _powershell_quote(_wsl_to_windows(executable))
-        command += " " + " ".join(_powershell_quote(_wsl_to_windows(a))
-                                    if not a.startswith("-") else _powershell_quote(a)
-                                    for a in args)
+        command = "& " + _powershell_quote(native_executable)
+        command += " " + " ".join(_powershell_quote(value)
+                                    for value in native_args)
         return subprocess.run(
             ps + [command], check=True, capture_output=True, text=True,
             encoding="cp932", errors="replace",

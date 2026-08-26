@@ -3,12 +3,11 @@
 这个模块的输入只有：
 
 * 用户交付的 ``Soft`` 源码树；
-* 仓库内的项目 manifest；
-* 仓库内已经确认过的 TestCsv/Output golden 契约。
+* 仓库内的项目 manifest（函数清单和配置宏）；
+* 可选的编译器/WinAMS 执行工具。
 
-参考工程的 ``winAMS/src`` 不在这里出现，也不会在运行时被搜索。golden
-中的 TestCsv 是测试向量契约（包含人工选择的地址、stub 行和不可达分支
-标记），不能从 C 源码唯一推导，所以必须作为项目的一部分保存。
+默认生成不搜索参考工程的 ``winAMS/src``，也不读取 golden TestCsv/DefineVar。
+golden 只可通过显式校验选项作为只读对照物。
 """
 from __future__ import annotations
 
@@ -30,6 +29,12 @@ from ut_agent.host.arm_gcc import (
 from ut_agent.parser import clang_parser
 from ut_agent.stub import generate as stub_generate
 from ut_agent.winams import csv_render
+from ut_agent.winams.define_var import (
+    entries_from_ir,
+    read_define_var,
+    render_define_var,
+    render_winams_ini,
+)
 
 
 @dataclass(frozen=True)
@@ -62,6 +67,7 @@ class GeneratedUnit:
     xlo: Path | None
     amsy: Path
     output: Path
+    define_var: Path | None = None
 
 
 @dataclass(frozen=True)
@@ -123,8 +129,17 @@ def discover_include_dirs(soft_root: Path, include_root: Path) -> tuple[Path, ..
     return tuple(sorted(dirs, key=lambda item: item.as_posix().lower()))
 
 
-def _wsl_to_windows(path: Path) -> str:
-    text = str(path.resolve())
+def _wsl_to_windows(path: Path | str) -> str:
+    raw = os.fspath(path)
+    if raw.startswith("/mnt/") and len(raw) >= 7:
+        drive = raw[5]
+        rest = raw[7:]
+        return f"{drive.upper()}:\\{rest.replace('/', chr(92))}"
+    if len(raw) >= 3 and raw[0] == "/" and raw[2] == "/":
+        drive = raw[1]
+        rest = raw[3:]
+        return f"{drive.upper()}:\\{rest.replace('/', chr(92))}"
+    text = str(Path(raw).resolve())
     if len(text) >= 2 and text[1] == ":":
         return text.replace("/", "\\")
     wslpath = shutil.which("wslpath")
@@ -143,7 +158,7 @@ def _write_cp932(path: Path, text: str) -> None:
 
 
 def _amsy_text(unit_dir: Path, xlo: Path, elf: Path, stub: Path) -> str:
-    """生成最小但完整的 ARM GCC WinAMS 工程配置。
+    """生成最小但完整的 WinAMS 工程配置。
 
     ``ObjectFile`` 指向已转换的 xlo；``OMF/InFile`` 保留 ELF 路径，便于
     WinAMS GUI/CLI 重新转换或检查工程。测试运行时仍使用显式 TestCsv。
@@ -167,11 +182,47 @@ def _copy_source(soft_root: Path, source_rel: Path, out_root: Path) -> Path:
     return destination
 
 
+def _copy_source_tree(soft_root: Path, include_root: Path, out_root: Path) -> None:
+    """复制 Soft 的源码/include 树，生成可独立打开的 winAMS 输入树。"""
+    source_root = (soft_root / include_root).resolve()
+    if not source_root.is_dir():
+        raise FileNotFoundError(f"Soft include 根目录不存在：{source_root}")
+    shutil.copytree(source_root, out_root / include_root, dirs_exist_ok=True)
+
+
 def _direct_includes(source: Path) -> tuple[str, ...]:
     """提取被测 C 文件的直接头文件，供独立 stub TU 使用。"""
     text = source.read_bytes().decode("cp932", errors="replace")
     found = re.findall(r'^\s*#\s*include\s*[<"]([^">]+)[">]', text, re.MULTILINE)
     return tuple(dict.fromkeys(found))
+
+
+def _winams_mpu_for_cpu(cpu: str) -> str:
+    """将 manifest CPU 名映射为 WinAMS 的 MPU 名称。"""
+    normalized = cpu.lower().replace("_", "-")
+    if normalized in {"rh850", "rh850(ghs)"}:
+        return "RH850"
+    return {
+        "cortex-m0": "Cortex-M0/M1(ARM GCC)",
+        "cortex-m1": "Cortex-M0/M1(ARM GCC)",
+        "cortex-m3": "CortexM3(GCC)",
+        "cortex-m4": "Cortex-M4(ARM GCC soft)",
+    }.get(normalized, "Cortex-M4(ARM GCC soft)")
+
+
+def _normalize_reference_mpu(mpu: str) -> str:
+    """把 MPU 信息表标签归一化为 .amsy 实际使用的固定名称。"""
+    normalized = mpu.strip().lower()
+    if normalized in {"rh850", "rh850(ghs)"}:
+        return "RH850"
+    return mpu.strip()
+
+
+def _reference_define_var_path(
+    reference_root: Path, source_rel: Path, function: str,
+) -> Path:
+    """定位原项目对应函数的 IO 登录文件。"""
+    return reference_root / "winAMS" / source_rel / function / "DefineVar.dat"
 
 
 def generate_project(
@@ -182,24 +233,93 @@ def generate_project(
     build: bool = False,
     compiler: str | Path | None = None,
     converter: str | Path | None = None,
+    cpu: str | None = None,
+    reference_out: str | Path | None = None,
+    reference_xlo: str | Path | None = None,
+    reference_mpu: str | None = None,
+    reference_define_var: str | Path | None = None,
 ) -> GeneratedProject:
-    """从 Soft 生成全部 manifest 用例；可选编译为 ELF/xlo。"""
+    """从 Soft 生成全部 manifest 用例；可选编译或引用已有 ELF/xlo。"""
     soft_root = soft_root.resolve()
     output_root = output_root.resolve()
     spec = load_project_spec(manifest.resolve())
-    source = _copy_source(soft_root, spec.source, output_root)
+    reference_mode = reference_out is not None or reference_xlo is not None
+    if reference_mode and build:
+        raise ValueError("reference 模式不能同时编译新 ELF/xlo")
+    if reference_mode and (reference_out is None or reference_xlo is None):
+        raise ValueError("reference 模式必须同时提供 reference_out/reference_xlo")
+    reference_elf = Path(reference_out).resolve() if reference_out else None
+    reference_object = Path(reference_xlo).resolve() if reference_xlo else None
+    reference_define_var_path = (
+        Path(reference_define_var).resolve() if reference_define_var else None
+    )
+    if reference_elf is not None and not reference_elf.is_file():
+        raise FileNotFoundError(f"reference .out 不存在：{reference_elf}")
+    if reference_object is not None and not reference_object.is_file():
+        raise FileNotFoundError(f"reference .xlo 不存在：{reference_object}")
+    if reference_define_var_path is not None and not reference_define_var_path.is_file():
+        raise FileNotFoundError(
+            f"reference DefineVar.dat 不存在：{reference_define_var_path}"
+        )
+    # WinAMS 的工程容器本身使用 ``<out>/src/.../<源文件>`` 目录布局，
+    # 其中 ``Dma.c`` 是目录名而不是源码文件名。源码树因此放到独立的
+    # ``<out>/source`` 下，避免 Windows 文件/目录同名冲突，同时保持工程
+    # 目录与输入源码完全分离。
+    source_root = output_root / "source"
+    source = _copy_source(soft_root, spec.source, source_root)
+    _copy_source_tree(soft_root, spec.include_root, source_root)
     include_dirs = discover_include_dirs(soft_root, spec.include_root)
     tu = clang_parser.parse_tu(source, include_dirs, spec.defines, strict=False)
 
+    selected_cpu = cpu or spec.cpu
+    if build and selected_cpu.lower().startswith("rh850"):
+        raise ValueError(
+            "当前没有确定的 RH850 编译器；请使用 --no-build 生成源码/测试工程，"
+            "编译器方案另行决策"
+        )
     gcc_path = find_arm_gcc(compiler) if build else None
-    gcc_config = ArmGccConfig(compiler=gcc_path, cpu=spec.cpu) if gcc_path else None
+    gcc_config = (ArmGccConfig(compiler=gcc_path, cpu=selected_cpu)
+                  if gcc_path else None)
+    mpu_name = (
+        _normalize_reference_mpu(reference_mpu or "RH850")
+        if reference_mode else _winams_mpu_for_cpu(selected_cpu)
+    )
+    if reference_mode and not mpu_name:
+        raise ValueError("reference_mpu 不能为空")
+
+    # 第一遍只收集目标函数引用的全局名；第二遍把这些全局的源码定义
+    # 作为 AST 上下文传入。这样 Dma.c 中的 extern 声明可以追到
+    # Spi_Lcfg.c 的 const 数组初始化器，但不会读取 .out/.map 或原 TestCsv。
+    preliminary_irs = [
+        clang_parser.extract_function(tu, source, item.name, spec.defines)
+        for item in spec.functions
+    ]
+    context_names = {
+        name for ir in preliminary_irs for name in ir.globals_used
+    }
+    context_sources = clang_parser.find_definition_sources(
+        soft_root, context_names,
+    )
+    context_tus = tuple(
+        clang_parser.parse_tu(path, include_dirs, spec.defines, strict=False)
+        for path in context_sources
+    )
+    # 兼容此前已经生成的扁平观察目录：旧目录把源文件名落成普通文件，
+    # 新布局无法在同一路径创建同名工程目录。只更新旧函数输出，不删除
+    # 旧文件；全新 output 仍使用 <out>/src/.../<源文件>/<函数>/。
+    legacy_unit_layout = (output_root / spec.source).is_file()
     units: list[GeneratedUnit] = []
     for item in spec.functions:
-        ir = clang_parser.extract_function(tu, source, item.name, spec.defines)
-        unit_dir = output_root / item.name
+        ir = clang_parser.extract_function(
+            tu, source, item.name, spec.defines, context_tus=context_tus,
+        )
+        # 保持原 WinAMS 的工程布局：<out>/src/.../<源文件>/<函数>/。
+        # out 本身可以是 work/winAMS，也可以是 .build/ast-only-winams。
+        unit_root = output_root if legacy_unit_layout else output_root / spec.source
+        unit_dir = unit_root / item.name
         test_dir = unit_dir / "TestCsv"
         output_dir = unit_dir / "Output"
-        stub = output_root / "src" / "winams" / item.name / "AMSTB_SrcFile.c"
+        stub = output_root / "source" / "winams" / item.name / "AMSTB_SrcFile.c"
         testcsv = test_dir / f"{item.name}.csv"
         stub.parent.mkdir(parents=True, exist_ok=True)
         stub.write_text(
@@ -207,17 +327,19 @@ def generate_project(
                 ir, spec.call_max, extra_includes=_direct_includes(source)
             ), encoding="utf-8", newline="\n"
         )
-        reference = item.testcsv
         csv_text = csv_render.render_csv(
             ir,
             source_label=item.name,
             title=f"{item.name} 単体テスト",
-            reference_csv=reference,
         )
         _write_cp932(testcsv, csv_text)
 
         elf = xlo = None
-        if build:
+        if reference_mode:
+            assert reference_elf is not None and reference_object is not None
+            elf = reference_elf
+            xlo = reference_object
+        elif build:
             assert gcc_config is not None
             elf = unit_dir / f"{item.name}.out"
             xlo = unit_dir / f"{item.name}.xlo"
@@ -231,10 +353,96 @@ def generate_project(
             elf = unit_dir / f"{item.name}.out"
             xlo = unit_dir / f"{item.name}.xlo"
         amsy = unit_dir / f"{item.name}.amsy"
-        _write_cp932(amsy, _amsy_text(unit_dir, xlo, elf, stub))
+        amsy_text = _amsy_text(unit_dir, xlo, elf, stub)
+        amsy_text = amsy_text.replace(
+            "MpuFixedName=Cortex-M4(ARM GCC soft)",
+            f"MpuFixedName={mpu_name}",
+        ).replace(
+            "MpuModelFixedName=Cortex-M4(ARM GCC soft)",
+            f"MpuModelFixedName={mpu_name}",
+        )
+        if mpu_name == "RH850":
+            amsy_text = amsy_text.replace(
+                "ToolFixedName=ARM GCC OMF Converter",
+                "ToolFixedName=GHS",
+            ).replace(
+                "FileType=xlo",
+                "FileType=x30",
+            )
+        if reference_mode:
+            amsy_text = amsy_text.replace(
+                "ToolFixedName=ARM GCC OMF Converter",
+                "ToolFixedName=GHS",
+            )
+            assert reference_elf is not None
+            reference_root = reference_elf.parent.parent
+            startup = reference_root / "AMS_Setting" / "SS_STARTUP.txt"
+            source_path_file = reference_root / "AMS_Setting" / "path.txt"
+            caseplayer = (
+                reference_root / "CasePlayer2" / "3MLA_MVC" / "3MLA_MVC.vproj"
+            )
+            original_stub = reference_elf.parent / "src" / "AMSTB_SrcFile.c"
+            if startup.is_file():
+                amsy_text = amsy_text.replace(
+                    "Start=\nSystemGOption=",
+                    f"Start={_wsl_to_windows(startup)}\nSystemGOption=",
+                )
+            if source_path_file.is_file():
+                amsy_text = amsy_text.replace(
+                    "SrcPathFile=\nSrcPathCnt=0",
+                    f"SrcPathFile={_wsl_to_windows(source_path_file)}\n"
+                    "SrcPathCnt=0",
+                )
+            if caseplayer.is_file():
+                amsy_text = amsy_text.replace(
+                    "Cp2Proj=",
+                    f"Cp2Proj={_wsl_to_windows(caseplayer)}",
+                )
+            if original_stub.is_file():
+                amsy_text = amsy_text.replace(
+                    f"STB_SRCPATH={_wsl_to_windows(stub)}",
+                    f"STB_SRCPATH={_wsl_to_windows(original_stub)}",
+                )
+            # 原 RH850 工程的 WinAMS 执行区间来自其已验证的 .amsy；
+            # reference 模式沿用这组固定的测试区设置，不改变 .out/.xlo。
+            amsy_text = amsy_text.replace(
+                "MultiRunCount=1", "MultiRunCount=2",
+            ).replace(
+                "TestAreaStart=0\nTestAreaEnd=0",
+                "TestAreaStart=57876\nTestAreaEnd=58367",
+            )
+            amsy_text = amsy_text.replace(
+                "StopAdress=\nStopRadio=0",
+                "StopAdress=p_vog_pwom_hook_RsetBoot\nStopRadio=1",
+            ).replace(
+                "FileType=xlo",
+                "FileType=x30",
+            )
+        _write_cp932(amsy, amsy_text)
+        define_var = unit_dir / "DefineVar.dat"
+        define_var_source = reference_define_var_path
+        if define_var_source is None and reference_mode:
+            assert reference_elf is not None
+            define_var_source = _reference_define_var_path(
+                reference_elf.parent.parent, spec.source, item.name,
+            )
+        if define_var_source is not None and define_var_source.is_file():
+            define_entries = read_define_var(define_var_source)
+        else:
+            define_entries = entries_from_ir(ir)
+        _write_cp932(define_var, render_define_var(define_entries))
+        winams_ini = unit_dir / "WinAMS.INI"
+        _write_cp932(
+            winams_ini,
+            render_winams_ini(
+                define_var,
+                windows_path=_wsl_to_windows(define_var),
+            ),
+        )
         units.append(GeneratedUnit(
             name=item.name, source=source, stub=stub, testcsv=testcsv,
             expected=item.expected, elf=elf, xlo=xlo, amsy=amsy, output=output_dir,
+            define_var=define_var,
         ))
     return GeneratedProject(output_root, source, tuple(units))
 
@@ -263,6 +471,20 @@ def _windows_executable(path: str | Path) -> bool:
     return text.endswith(".exe") or (len(text) >= 2 and text[1] == ":")
 
 
+def _winams_batch_args(unit: GeneratedUnit) -> list[str]:
+    """构造 WinAMS 官方批处理参数，工程文件必须放在最后。"""
+    xml_result = unit.output / f"{unit.name}.amsyr"
+    return [
+        "-b",
+        "-output", str(unit.output),
+        # .amsy 的 InDir=.\TestCsv 是 WinAMS 的 CSV 搜索根；官方样例
+        # 传入的是文件名，传绝对路径会出现 CsvList 为空但返回码为 0。
+        "-testCsv", unit.testcsv.name,
+        "-xmlex", str(xml_result),
+        str(unit.amsy),
+    ]
+
+
 def run_winams(
     project: GeneratedProject,
     executable: str | Path = "/mnt/c/WinAMS/BIN/SSTManager.exe",
@@ -276,23 +498,29 @@ def run_winams(
         if unit.expected is None:
             continue
         unit.output.mkdir(parents=True, exist_ok=True)
-        args = [
-            "-b", "-output", str(unit.output), "-testCsv", str(unit.testcsv),
-            str(unit.amsy),
-        ]
+        # SSTManager 的批处理入口要求工程文件放在最后，并显式给出
+        # output/testCsv；仅传 ``-b <amsy>`` 会静默退出而不产生 Output。
+        args = _winams_batch_args(unit)
         if _windows_executable(exe):
-            ps = shutil.which("powershell.exe")
-            if not ps:
-                results.append((unit.name, False, "找不到 powershell.exe"))
-                continue
-            def quote(value: str) -> str:
-                return "'" + value.replace("'", "''") + "'"
-            command = "& " + quote(_wsl_to_windows(Path(exe)))
-            command += " " + " ".join(
-                quote(_wsl_to_windows(Path(arg))) if not arg.startswith("-") else quote(arg)
+            native_executable = _wsl_to_windows(exe)
+            native_args = [
+                _wsl_to_windows(arg) if not arg.startswith("-") else arg
                 for arg in args
-            )
-            command_args = [ps, "-NoProfile", "-NonInteractive", "-Command", command]
+            ]
+            if os.name == "nt":
+                # Git Bash 启动的 Windows Python 直接调用 SSTManager.exe，
+                # 避免运行过程中隐式切换到 PowerShell。
+                command_args = [native_executable, *native_args]
+            else:
+                ps = shutil.which("powershell.exe")
+                if not ps:
+                    results.append((unit.name, False, "找不到 powershell.exe"))
+                    continue
+                def quote(value: str) -> str:
+                    return "'" + value.replace("'", "''") + "'"
+                command = "& " + quote(native_executable)
+                command += " " + " ".join(quote(value) for value in native_args)
+                command_args = [ps, "-NoProfile", "-NonInteractive", "-Command", command]
         else:
             command_args = [exe, *args]
         try:

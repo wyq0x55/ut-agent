@@ -47,6 +47,9 @@ class Branch:
     # M2 填充：可达域（值域合法 + 前置路径可达）min/max；M1 阶段为 None
     reach_min: Optional[Union[int, float]] = None
     reach_max: Optional[Union[int, float]] = None
+    # 配置/常量传播结果。None 表示源码上下文不足，不能判定恒真/恒假。
+    constant_value: Optional[bool] = None
+    constant_reason: Optional[str] = None
 
 
 @dataclass
@@ -86,6 +89,30 @@ class ControlVar:
     source: str                     # param | global | local_from_global | local | stub
     set_via: Optional[str] = None   # local_from_global 时：赋值来源表达式（设定该全局）
     var_type: Optional[str] = None
+    # 配置表成员等只读常量的确定值；这类变量不生成输入/IO 登录列。
+    constant_value: Optional[int] = None
+    constant_reason: Optional[str] = None
+
+
+@dataclass
+class MemoryVar:
+    """源码中访问的 memory-mapped IO 宏。
+
+    ``address`` 来自 TranslationUnit 的宏定义，``width`` 优先来自实际的
+    read/write helper 调用；两者都属于源码 AST/预处理记录，不从 WinAMS
+    工程文件反向猜测。
+    """
+
+    name: str
+    address: int
+    width: int
+    read: bool = False
+    write: bool = False
+    # 是否在真实分支语句的作用域内访问。用于选择最小可观察寄存器集合。
+    conditional: bool = False
+    # 对源码中可求值的寄存器写序列生成的初始/期待值；未知时为 None。
+    input_value: Optional[int] = None
+    expected_value: Optional[int] = None
 
 
 @dataclass
@@ -114,6 +141,19 @@ class FunctionIR:
     global_writes: list[str] = field(default_factory=list)  # 全局写回表达式文本（期待列）
     control_vars: list[ControlVar] = field(default_factory=list)     # 控制变量来源登记
     config_ptrs: list[str] = field(default_factory=list)   # 引用到的配置表指针全局（介入点）
+    memory_vars: list[MemoryVar] = field(default_factory=list)  # memory-mapped IO 宏
 
     def to_dict(self) -> dict:
         return asdict(self)
+
+
+def selected_global_writes(ir: FunctionIR) -> list[str]:
+    """返回 testcase 需要登录/期待的全局写回。
+
+    当函数的所有分支都已由源码配置传播确定时，单纯的初始化状态写回
+    不会带来路径差异；这类列会让 WinAMS 变量集合膨胀，因此不进入
+    自动生成的 testcase。存在未确定分支时保留原有写回素材。
+    """
+    if ir.branches and all(branch.constant_value is not None for branch in ir.branches):
+        return []
+    return list(ir.global_writes)

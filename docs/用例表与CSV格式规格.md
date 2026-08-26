@@ -11,7 +11,7 @@
 随机数或当前时间。
 
 配置宏通过 `-D NAME=VALUE` 或 `--include-config` 传入。WinAMS 的 `mod` 行
-不承载自定义 CFG 注释，实际编译时必须把同一组配置传给 ARM GCC 和 WinAMS
+不承载自定义 CFG 注释，实际编译时必须把同一组配置传给目标编译器和 WinAMS
 工程。
 
 ## 2. WinAMS stub 契约
@@ -99,29 +99,19 @@ mod,"Dma.c/p_vog_dma_init","p_vog_dma_init 単体テスト",2,2,,,,CPP,,,"",0
 WinAMS 初始数据，不宣称是业务正确期望值。业务期望值必须由 WinAMS 执行结果、
 寄存器模型或人工审查回填。
 
-已有 WinAMS TestCsv 可通过 `--reference-csv` 作为模板：生成器读取其 `mod`、
-`#COMMENT` 和输入数据行，分支条件仍从当前源码重新生成；这样可以复用项目
-已经验证过的寄存器初值/期望值。若不提供模板，输入默认值为 `0x0`，需要在
-WinAMS 或人工审查阶段补齐业务数据。
+默认 `ut-agent project` 不读取已有 WinAMS TestCsv。生成器从 Soft 的
+AST/预处理记录生成 `mod`、`#COMMENT`、分支条件和输入数据；输入默认值为
+`0x0`，需要在 WinAMS 或人工审查阶段补齐业务数据。`--reference-csv` 仅供
+显式的兼容性回放使用，不能作为默认 project 生成输入。
 
-## 4. ARM GCC 产物
+## 4. RH850 编译产物（待决策）
 
-参考 `Soft.out` 是 RH850/V800 GHS ELF，不能直接用 ARM 链接器链接。项目现在
-使用 Arm GNU Toolchain 的 `arm-none-eabi-gcc`：
+`Soft.out` 是 RH850/V800 GHS ELF。当前目标是 RH850，新的 RH850 编译器方案
+尚未拍板，因此 AST-only 生成可先使用 `--no-build` 完成源码、TestCsv、stub、
+DefineVar 和 `.amsy` 工程生成；不把 `arm-none-eabi-gcc` 冒充 RH850 编译器。
 
-```bash
-ut-agent arm-build Dma.c -I <全部 include 目录> \
-  -o .build/p_vog_dma_init.arm.elf --entry p_vog_dma_init
-```
-
-如果同时把生成的 `<function>_stubs.c` 作为输入，构建器会自动发现并保留
-`AMSTB_` 符号，避免 `--gc-sections` 把 WinAMS stub 丢掉：
-
-```bash
-ut-agent arm-build Dma.c <function>_stubs.c -I <全部 include 目录> \
-  -o .build/<function>.winams.out --entry <function> \
-  --omf-output .build/<function>.winams.xlo
-```
+`arm-build` 仅保留为独立的 ARM 示例命令，不属于本 RH850 工程生成链路。
+待 RH850 编译器方案确定后，再补充对应的 `.out/.xlo` 产物步骤。
 
 `--omf-output` 调用 WinAMS 安装目录中的 `armgccomf.EXE`，将 GCC ELF 转成
 WinAMS 的 `.xlo`；不指定时仍保留原始 ELF，适合只检查编译和 DWARF。
@@ -140,7 +130,6 @@ Windows 安装的 GCC 从 WSL 调用时由 PowerShell 转发，以保证 GCC 能
 ut-agent gen <source.c> -f <function> \
   -I <include> -D NAME=VALUE \
   --call-max 30 \
-  --reference-csv <参考 TestCsv> \
   --out .build/winams/<function>
 ```
 
@@ -148,7 +137,34 @@ ut-agent gen <source.c> -f <function> \
 
 - `<function>_stubs.c`：WinAMS `AMSTB_` stub；
 - `<function>_testdata.csv`：WinAMS CP932/CRLF TestCsv；
-- ARM ELF 由同目录下的 `arm-build` 命令生成，避免把编译器特定参数混入 CSV。
+- RH850 `.out/.xlo` 产物暂不由本链路生成，避免把未确定的编译器方案混入 AST/TestCsv。
+
+### 5.1 WinAMS IO 登录副文件
+
+当前 WinAMS 版本没有公开的 `DefineVar.dat`/IO 登录命令行选项；
+`-InputVar_*`、`-OutputVar_*` 和 `-MBToutVarDef` 属于自动测试数据或 MBT
+配置，不等价于 IO 登录。`ut-agent project` 因此确定性生成每个函数目录下的
+`DefineVar.dat`，并生成 `WinAMS.INI` 的 `DefVarFile` 指向该文件。
+
+默认 project 流程从 FunctionIR 的 memory-mapped IO 记录生成 `DefineVar.dat`：
+地址来自 Soft 源码中的整数宏定义，访问宽度来自 `*_read_reg16`、
+`*_write_reg32` 等源码调用。只有显式 reference 模式才读取原工程的
+`DefineVar.dat`，用于旧 RH850 产物兼容性回放。
+
+`DefineVar.dat` 只登记最终选中的 memory-mapped IO。普通全局变量、指针变量和
+stub 的调用次数/参数不生成空定义记录；它们如果影响测试行为，仍可出现在
+TestCsv 的输入/输出列中。寄存器名称的 `U1/U2/U4/U8` 前缀与实际 WinAMS IO
+登录宽度一致，例如源码宏 `U4L_DMA_REG_ICDMA04` 通过 16 位 helper 访问时
+生成 `U2L_DMA_REG_ICDMA04`。
+
+变量选择采用确定性的最小集合：优先保留条件语句作用域内访问的寄存器，
+每种访问宽度只取首次出现的代表；寄存器 helper 已由地址变量表示时不再
+重复生成 stub 输入列；未选中的寄存器 helper 也不单独生成 stub 输入列。若被测函数已有返回值或可写指针结果，则不把仅写寄存器
+重复列入测试变量；无返回/无指针的初始化函数保留寄存器作为可观测输出。能从
+源码配置初始化器求值的 `const` 数组成员不生成
+设定列，恒真/恒假分支仍输出 `$L$` 标记，并在不可达侧保留说明。
+其中恒真分支的 WinAMS 标签使用原项目约定：
+`FALSE デッドコードがあった為、この分岐に入ることができません`。
 
 ## 6. 参考项目自检记录
 
@@ -156,11 +172,12 @@ ut-agent gen <source.c> -f <function> \
 
 - 已复制到 WSL 的 `.build/reference/N-O2602-MVC-234/work/Soft`，源文件哈希与
   Windows 文件一致；
-- `Dma.c::p_vog_dma_init` 可用 97 个源码 include 目录解析，识别 4 个调用和
-  3 个条件分支；
-- 参考 `TestCsv/p_vog_dma_init.csv` 已作为列模板验证 `mod/#COMMENT/;$L$`；
-- ARM GCC 已生成带 `.debug_info`、`.debug_line` 的 ARM EABI5 ELF；
-- 原始 GHS `Soft.out` 仅作为 WinAMS 参考，不能冒充 ARM GCC 产物。
+- `Dma.c::p_vog_dma_init` 可用 Soft 内部源码/include 目录解析，识别函数调用、
+  条件分支以及 memory-mapped IO 地址宏；
+- `TestCsv/p_vog_dma_init.csv` 由 AST-only 路径独立生成，golden 只作为显式
+  只读对比物；
+- RH850 新编译器方案仍待决策，AST-only 结果不包含新的 `.out/.xlo`；
+- 原始 GHS `Soft.out` 不作为源码/TestCsv/DefineVar 生成输入。
 
 ## 7. 规格变更记录
 

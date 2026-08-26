@@ -67,9 +67,20 @@ def main(argv=None) -> int:
     project.add_argument("--no-build", action="store_true",
                          help="只生成 src/stub/TestCsv/amsy，不编译 ELF/xlo")
     project.add_argument("--run", action="store_true",
-                         help="编译后调用 SSTManager.exe，并比较 golden Output")
+                         help="调用 SSTManager.exe，并比较 golden Output")
+    project.add_argument("--check-golden", action="store_true",
+                         help="生成后只读对比 golden TestCsv；不参与生成")
     project.add_argument("--compiler", help="arm-none-eabi-gcc 路径")
     project.add_argument("--omf-converter", help="armgccomf.EXE 路径")
+    project.add_argument("--cpu", help="覆盖 manifest CPU，例如 rh850 或 cortex-m3")
+    project.add_argument("--reference-out",
+                         help="只读引用原项目 .out，不参与新工程编译")
+    project.add_argument("--reference-xlo",
+                         help="只读引用原项目 .out.xlo，不参与新工程编译")
+    project.add_argument("--reference-define-var",
+                         help="可选：指定原工程 DefineVar.dat；缺省按 Soft/work/winAMS 自动定位")
+    project.add_argument("--reference-mpu", default="RH850(GHS)",
+                         help="reference 产物对应的 WinAMS MPU 名称；RH850(GHS) 会归一化为 RH850")
     project.add_argument("--winams", default="/mnt/c/WinAMS/BIN/SSTManager.exe",
                          help="SSTManager.exe 路径")
     project.add_argument("--timeout", type=float, default=120.0,
@@ -124,22 +135,43 @@ def main(argv=None) -> int:
             run_winams,
         )
 
-        must_build = a.run or not a.no_build
+        reference_mode = a.reference_out is not None or a.reference_xlo is not None
+        if reference_mode and not a.no_build:
+            print("[project] reference 模式必须同时使用 --no-build", file=sys.stderr)
+            return 2
+        must_build = not reference_mode and (a.run or not a.no_build)
         generated = generate_project(
             Path(a.soft), Path(a.manifest), Path(a.out),
             build=must_build, compiler=a.compiler,
             converter=a.omf_converter,
+            cpu=a.cpu,
+            reference_out=Path(a.reference_out) if a.reference_out else None,
+            reference_xlo=Path(a.reference_xlo) if a.reference_xlo else None,
+            reference_mpu=a.reference_mpu if reference_mode else None,
+            reference_define_var=(
+                Path(a.reference_define_var) if a.reference_define_var else None
+            ),
         )
-        csv_checks = compare_testcsv(generated)
-        for name, ok in csv_checks:
-            has_golden = next(u.expected is not None for u in generated.units if u.name == name)
-            label = "OK" if ok and has_golden else "SKIP" if ok else "DIFF"
-            print(f"[project/csv] {label} {name}", file=sys.stderr)
-        if not all(ok for _, ok in csv_checks):
-            return 1
+        if a.check_golden:
+            csv_checks = compare_testcsv(generated)
+            for name, ok in csv_checks:
+                has_golden = next(
+                    u.expected is not None for u in generated.units if u.name == name
+                )
+                label = "OK" if ok and has_golden else "SKIP" if ok else "DIFF"
+                print(f"[project/csv] {label} {name}", file=sys.stderr)
+            if not all(ok for _, ok in csv_checks):
+                return 1
+        else:
+            print("[project/csv] AST-only generation; golden not used", file=sys.stderr)
         print(
             f"[project] {generated.root} units={len(generated.units)} "
             f"golden={sum(1 for u in generated.units if u.expected)}",
+            file=sys.stderr,
+        )
+        print(
+            f"[project/define-var] generated="
+            f"{sum(1 for u in generated.units if u.define_var and u.define_var.is_file())}",
             file=sys.stderr,
         )
         if not a.run:

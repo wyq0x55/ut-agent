@@ -16,3 +16,20 @@
 - 解析层输入三件套：C 源码树 + include 路径 + **配置头/宏定义**（配置是一等输入，随项目而变）。
 - 测试：pytest；解析器改动必须跑 `tests/test_setpdumode_golden.py` 回归。
 - 中文注释与文档命名沿用现有风格。
+
+# Tool Preference
+
+- Git Bash for shell execution
+- fd for file discovery
+- rg for text search
+- git grep when appropriate
+- choco for software installation
+- jq for JSON processing
+- bat for file viewing
+- ast-grep for code-aware searching
+
+Avoid:
+
+- PowerShell Get-ChildItem when fd is available
+- PowerShell Select-String when rg is available
+- Manual software download when choco can install it

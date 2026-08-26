@@ -10,12 +10,15 @@
 from __future__ import annotations
 
 from pathlib import Path
+import re
 from typing import Optional
 
 from clang import cindex
 
 from ut_agent.flow import assign
-from ut_agent.ir import Atom, Branch, CallSite, Case, ControlVar, FunctionIR, Param
+from ut_agent.ir import (
+    Atom, Branch, CallSite, Case, ControlVar, FunctionIR, MemoryVar, Param,
+)
 
 # 常见“校验类”函数宏：展开后含 if/return/调用，需要在 IR 里标来源
 WATCH_MACROS_DEFAULT = (
@@ -133,6 +136,17 @@ def _strip_wrappers(cur):
     return cur
 
 
+def _strip_value_wrappers(cur):
+    """去掉表达式转换包装，并跳过 CStyleCast 的 TYPE_REF 子节点。"""
+    while cur.kind in CAST_KINDS:
+        kids = [child for child in cur.get_children()
+                if child.kind != cindex.CursorKind.TYPE_REF]
+        if not kids:
+            return cur
+        cur = kids[-1]
+    return cur
+
+
 def _children(cur):
     return list(cur.get_children())
 
@@ -173,17 +187,17 @@ def _operator_of(tu, parent, hint=None) -> Optional[str]:
 
 def _value_of(cur) -> tuple[Optional[int], Optional[str]]:
     """字面值/枚举 → (真实值, 枚举名)。宏展开后的 TRUE/E_OK 已是 IntegerLiteral。"""
-    cur = _strip_wrappers(cur)
+    cur = _strip_value_wrappers(cur)
     kids = _children(cur)
     if cur.kind == cindex.CursorKind.INTEGER_LITERAL:
         text = _tokens_text_obj(cur)
-        try:
-            return int(text, 0), None
-        except ValueError:
-            # 宏展开后字面量拼写仍为宏名（TRUE/E_OK 等）
-            if text in KNOWN_CONSTS:
-                return KNOWN_CONSTS[text], text
-            return None, text
+        value = _integer_token(text)
+        if value is not None:
+            return value, None
+        # 宏展开后字面量拼写仍为宏名（TRUE/E_OK 等）
+        if text in KNOWN_CONSTS:
+            return KNOWN_CONSTS[text], text
+        return None, text
     if cur.kind == cindex.CursorKind.FLOATING_LITERAL:
         return float(_tokens_text_obj(cur)), None
     if cur.kind == cindex.CursorKind.UNARY_OPERATOR and kids:
@@ -312,6 +326,626 @@ def _macro_at_line(line: int, macro_lines: dict) -> Optional[str]:
     return None
 
 
+_C_INTEGER = re.compile(r"^(?:0[xX][0-9A-Fa-f]+|[0-9]+)[uUlL]*$")
+_MEMORY_ACCESS = re.compile(
+    r"(?:read|orwrite|andwrite|xorwrite|write).*?reg(8|16|32|64)$",
+    re.IGNORECASE,
+)
+_MEMORY_PREFIX = re.compile(r"^U(1|2|4|8)L_")
+
+
+def _memory_name_for_width(name: str, width: int) -> str:
+    """按 WinAMS IO 登录宽度规范化寄存器符号前缀。
+
+    源码中的宏前缀有时表示寄存器原始声明宽度，而 WinAMS 登录名表示
+    本次访问宽度。比如 ``U4L_DMA_REG_ICDMA04`` 经过 16 位 helper 访问
+    时，TestCsv/DefineVar 应使用 ``U2L_DMA_REG_ICDMA04``。
+    """
+    if width not in (1, 2, 4, 8):
+        return name
+    return _MEMORY_PREFIX.sub(f"U{width}L_", name, count=1)
+
+
+def _integer_token(text: str) -> Optional[int]:
+    """把 C 整数字面量（含 UL/ULL 后缀）解析为 Python 整数。"""
+    if not _C_INTEGER.fullmatch(text):
+        return None
+    value = text.rstrip("uUlL")
+    try:
+        return int(value, 0)
+    except ValueError:
+        return None
+
+
+def _macro_constant_definitions(tu) -> dict[str, int]:
+    """收集 TU（含 include 头）中可解析为整数的宏定义。
+
+    libclang 的预处理记录同时保留 MACRO_DEFINITION 和
+    MACRO_INSTANTIATION。地址宏通常形如 ``((u4)0xFFFFB080UL)``，因此
+    取定义体中的整数字面量即可；函数宏和普通配置表达式不会进入结果。
+    """
+    macro_kind = getattr(cindex.CursorKind, "MACRO_DEFINITION")
+    raw: dict[str, list[str]] = {}
+    for cur in tu.cursor.walk_preorder():
+        if cur.kind != macro_kind:
+            continue
+        tokens = _token_spellings(cur.get_tokens())
+        if len(tokens) < 2:
+            continue
+        raw[cur.spelling] = tokens[1:]
+
+    result: dict[str, int] = {}
+
+    def resolve(name: str, stack: set[str]) -> Optional[int]:
+        if name in result:
+            return result[name]
+        if name in stack or name not in raw:
+            return None
+        tokens = list(raw[name])
+        while len(tokens) >= 2 and tokens[0] == "(" and tokens[-1] == ")":
+            tokens = tokens[1:-1]
+        if len(tokens) == 1:
+            value = _integer_token(tokens[0])
+            if value is None:
+                value = KNOWN_CONSTS.get(tokens[0])
+            if value is None:
+                value = resolve(tokens[0], {*stack, name})
+            if value is not None:
+                result[name] = value
+            return value
+        values = [value for token in tokens
+                  if (value := _integer_token(token)) is not None]
+        if len(values) == 1:
+            result[name] = values[0]
+            return values[0]
+        return None
+
+    for name in sorted(raw):
+        resolve(name, set())
+    return result
+
+
+def _macro_name_at_cursor(cur) -> Optional[str]:
+    """从宏展开 AST 节点的位置取源代码中的 object-like 宏名。"""
+    try:
+        file = cur.location.file
+        line_no = cur.location.line
+        column = cur.location.column
+        if file is None or line_no <= 0:
+            return None
+        line = Path(file.name).read_bytes().decode("cp932", errors="replace").splitlines()[line_no - 1]
+    except (OSError, IndexError, UnicodeError):
+        return None
+    position = max(column - 1, 0)
+    matches = list(re.finditer(r"[A-Za-z_]\w*", line))
+    for match in matches:
+        if match.start() <= position < match.end():
+            return match.group(0)
+    return None
+
+
+def _call_argument_value(tu, cur, index: int, definitions: dict[str, int]) -> Optional[int]:
+    """解析 helper 实参中的字面量或 object-like 常量宏。"""
+    args = _children(cur)[1:]
+    if index >= len(args):
+        return None
+    argument = args[index]
+    value, _ = _value_of(argument)
+    if value is not None:
+        return value
+    for node in argument.walk_preorder():
+        name = _macro_name_at_cursor(node)
+        if name in definitions:
+            return definitions[name]
+    return None
+
+
+def _derive_memory_values(ops: list[tuple[str, Optional[int]]], width: int):
+    """从源码可求值的寄存器写序列生成一个有意义的初始/期待值。
+
+    对 ``OR``/``AND`` 序列，初值取能同时触发首个置位和清位效果的值；
+    对普通 write，初值取 0。该策略只使用源码 helper 的实际常量，不从
+    原 TestCsv 复制手工向量。
+    """
+    if not ops or any(value is None for _, value in ops):
+        return 0, None
+    mask = (1 << (width * 8)) - 1
+    first_kind, first_value = ops[0]
+    assert first_value is not None
+    if first_kind == "orwrite" and any(kind == "andwrite" for kind, _ in ops[1:]):
+        initial = mask ^ first_value
+    elif first_kind == "andwrite":
+        initial = mask ^ first_value
+    else:
+        initial = 0
+    current = initial
+    for kind, value in ops:
+        assert value is not None
+        if kind == "write":
+            current = value
+        elif kind == "orwrite":
+            current |= value
+        elif kind == "andwrite":
+            current &= value
+        elif kind == "xorwrite":
+            current ^= value
+        current &= mask
+    return initial, current
+
+
+def _memory_vars(tu, target, body) -> list[MemoryVar]:
+    """从目标函数的宏实例化和寄存器 helper 调用提取 memory-mapped IO。
+
+    只登记目标函数实际使用的整数地址宏。访问宽度优先取
+    ``*_read_reg16``/``*_write_reg32`` 等源码调用名，无法识别时才使用
+    宏名的 ``U1L/U2L/U4L/U8L`` 前缀。这样 ``DefineVar.dat`` 的地址和
+    WinAMS 宽度都由源码解析结果产生，不依赖原工程副文件。
+    """
+    definitions = _macro_constant_definitions(tu)
+    macro_kind = getattr(cindex.CursorKind, "MACRO_INSTANTIATION")
+    macro_names: list[str] = []
+    for cur in tu.cursor.walk_preorder():
+        if cur.kind != macro_kind or cur.spelling not in definitions:
+            continue
+        if not (target.location.line <= cur.location.line <= target.extent.end.line):
+            continue
+        if cur.spelling not in macro_names:
+            macro_names.append(cur.spelling)
+    if not macro_names:
+        return []
+
+    # 先记录真实分支语句的范围。无条件初始化寄存器很多，但它们不能
+    # 帮助测试用例区分路径；优先从条件作用域内的访问中选代表变量。
+    branch_ranges = []
+    for node in body.walk_preorder():
+        if node.kind in (
+            cindex.CursorKind.IF_STMT,
+            cindex.CursorKind.SWITCH_STMT,
+            cindex.CursorKind.CONDITIONAL_OPERATOR,
+        ):
+            branch_ranges.append((node.extent.start.line, node.extent.end.line))
+
+    def in_branch(line: int) -> bool:
+        return any(start <= line <= end for start, end in branch_ranges)
+
+    state: dict[str, dict] = {}
+    ordered_names: list[str] = []
+
+    def add_name(name: str) -> dict:
+        if name not in state:
+            state[name] = {
+                "address": definitions[name], "widths": set(),
+                "read": False, "write": False, "conditional": False,
+                "ops": [],
+            }
+            ordered_names.append(name)
+        return state[name]
+
+    def first_call_argument(tokens: list[str]) -> list[str]:
+        try:
+            start = tokens.index("(") + 1
+        except ValueError:
+            return []
+        depth = 0
+        out: list[str] = []
+        for token in tokens[start:]:
+            if token == "(" :
+                depth += 1
+            elif token == ")":
+                if depth == 0:
+                    break
+                depth -= 1
+            elif token == "," and depth == 0:
+                break
+            out.append(token)
+        return out
+
+    for cur in body.walk_preorder():
+        if cur.kind != cindex.CursorKind.CALL_EXPR:
+            continue
+        tokens = _token_spellings(tu.get_tokens(extent=cur.extent))
+        ref = cur.referenced
+        callee = ref.spelling if ref is not None else (tokens[0] if tokens else "")
+        access = _MEMORY_ACCESS.search(callee or "")
+        if not access:
+            continue
+        first_arg = first_call_argument(tokens)
+        used = [name for name in macro_names if name in first_arg]
+        for name in used:
+            item = add_name(name)
+            item["widths"].add(int(access.group(1)) // 8)
+            if access.group(0).lower().startswith("read"):
+                item["read"] = True
+            else:
+                item["write"] = True
+            item["conditional"] |= in_branch(cur.location.line)
+            callee_lower = (callee or "").lower()
+            if "orwrite" in callee_lower:
+                operation = "orwrite"
+            elif "andwrite" in callee_lower:
+                operation = "andwrite"
+            elif "xorwrite" in callee_lower:
+                operation = "xorwrite"
+            elif "write" in callee_lower:
+                operation = "write"
+            else:
+                operation = "read"
+            item["ops"].append((
+                operation, _call_argument_value(tu, cur, 1, definitions),
+            ))
+
+    # 非 helper 形式的直接寄存器地址访问没有可靠的读写方向，但带 REG
+    # 语义的源码宏仍应登录为输入变量；数据常量（*_DAT_*）不会混入。
+    for name in macro_names:
+        if name not in state and "_REG_" in name:
+            item = add_name(name)
+            item["read"] = True
+
+    result: list[MemoryVar] = []
+    for name in ordered_names:
+        item = state[name]
+        prefix = _MEMORY_PREFIX.match(name)
+        fallback = int(prefix.group(1)) if prefix else 4
+        widths = item["widths"]
+        width = max(widths) if widths else fallback
+        input_value, expected_value = _derive_memory_values(item["ops"], width)
+        result.append(MemoryVar(
+            name=_memory_name_for_width(name, width),
+            address=item["address"],
+            width=width,
+            read=item["read"],
+            write=item["write"],
+            conditional=item["conditional"],
+            input_value=input_value,
+            expected_value=expected_value,
+        ))
+
+    # 如果被测函数已经有返回值或可写指针，调用者可以通过这些高层结果
+    # 表达分支差异；仅写寄存器不会再增加有效测试分歧。无返回/无指针的
+    # 初始化函数则保留写寄存器，寄存器本身就是它的可观测结果。读寄存器
+    # 始终保留，因为它可能是分支条件的输入（例如 Dma_Error）。
+    has_high_level_output = (
+        target.result_type.spelling not in ("", "void")
+        or any("*" in child.type.spelling.replace(" ", "")
+               for child in _children(target)
+               if child.kind == cindex.CursorKind.PARM_DECL)
+    )
+    if has_high_level_output:
+        result = [item for item in result if item.read]
+
+    # 最小可观察集合：优先选择分支内访问，再按访问宽度各保留首个代表。
+    # 例如 p_vog_dma_init 会稳定得到一个 32 位 PDMA 寄存器和一个
+    # 16 位 ICDMA 寄存器；DMA04/05 的重复写入不会膨胀测试输入列。
+    pool = [item for item in result if item.conditional] or result
+    selected: list[MemoryVar] = []
+    selected_widths: set[int] = set()
+    for item in pool:
+        if item.width in selected_widths:
+            continue
+        selected.append(item)
+        selected_widths.add(item.width)
+    return selected
+
+
+# ---------------------------------------------------------------- 配置常量传播
+
+def _normalise_expr(text: str) -> str:
+    return re.sub(r"\s+", "", text or "")
+
+
+def _lvalue_path(cur):
+    """返回源码左值的 ``(根变量, [(index|field, value), ...])``。"""
+    cur = _strip_value_wrappers(cur)
+    if cur.kind == cindex.CursorKind.DECL_REF_EXPR:
+        ref = cur.referenced
+        if ref is not None and ref.kind == cindex.CursorKind.VAR_DECL:
+            return ref.spelling, []
+        return None
+    if cur.kind == cindex.CursorKind.ARRAY_SUBSCRIPT_EXPR:
+        children = _children(cur)
+        if len(children) < 2:
+            return None
+        base = _lvalue_path(children[0])
+        index, _ = _value_of(children[1])
+        if base is None or index is None:
+            return None
+        name, path = base
+        return name, [*path, ("index", index)]
+    if cur.kind == cindex.CursorKind.MEMBER_REF_EXPR:
+        children = _children(cur)
+        ref = cur.referenced
+        if not children or ref is None or ref.kind != cindex.CursorKind.FIELD_DECL:
+            return None
+        base = _lvalue_path(children[0])
+        if base is None:
+            return None
+        name, path = base
+        field_index = _field_index(ref)
+        if field_index is None:
+            return None
+        return name, [*path, ("field", (ref.spelling, field_index))]
+    return None
+
+
+def _definition_decl(name: str, translation_units) -> object | None:
+    """在源码上下文 TU 中找带初始化器的全局定义，不接受 extern 声明。"""
+    for tu in translation_units:
+        for cur in tu.cursor.walk_preorder():
+            if cur.kind != cindex.CursorKind.VAR_DECL or cur.spelling != name:
+                continue
+            try:
+                is_definition = cur.is_definition()
+            except Exception:
+                is_definition = False
+            has_initializer = any(
+                child.kind in (
+                    cindex.CursorKind.INIT_LIST_EXPR,
+                    cindex.CursorKind.INTEGER_LITERAL,
+                    cindex.CursorKind.UNEXPOSED_EXPR,
+                    cindex.CursorKind.CSTYLE_CAST_EXPR,
+                )
+                for child in cur.get_children()
+            )
+            if is_definition and has_initializer:
+                return cur
+    return None
+
+
+def _initializer_root(decl):
+    children = _children(decl)
+    for child in children:
+        if child.kind == cindex.CursorKind.INIT_LIST_EXPR:
+            return child
+    for child in children:
+        if child.kind in (
+            cindex.CursorKind.INTEGER_LITERAL,
+            cindex.CursorKind.UNEXPOSED_EXPR,
+            cindex.CursorKind.CSTYLE_CAST_EXPR,
+        ):
+            return child
+    return None
+
+
+def _field_index(field) -> int | None:
+    parent = field.semantic_parent
+    if parent is None:
+        return None
+    fields = [child for child in parent.get_children()
+              if child.kind == cindex.CursorKind.FIELD_DECL]
+    for index, child in enumerate(fields):
+        if child.spelling == field.spelling:
+            return index
+    return None
+
+
+def _initializer_at(decl, path):
+    """按数组下标和结构体字段路径取初始化器节点。"""
+    current = _initializer_root(decl)
+    if current is None:
+        return None
+    for kind, value in path:
+        current = _strip_wrappers(current)
+        if current.kind != cindex.CursorKind.INIT_LIST_EXPR:
+            return None
+        children = _children(current)
+        if kind == "index":
+            index = value
+        else:
+            # path 在 _lvalue_path 中已经保存了 FieldDecl 的声明顺序。
+            # 聚合初始化器通常是 positional INIT_LIST_EXPR，不能从初值
+            # 节点反向拿到字段名，所以这里不能依赖调试符号或字符串猜测。
+            index = value[1] if isinstance(value, tuple) else None
+            if index is None:
+                return None
+        if index < 0 or index >= len(children):
+            return None
+        current = children[index]
+    return current
+
+
+def _simple_binary_operator(tu, cur) -> str | None:
+    tokens = _token_spellings(tu.get_tokens(extent=cur.extent))
+    depth = 0
+    operators = {"+", "-", "*", "/", "%", "|", "&", "^", "<<", ">>"}
+    for token in tokens:
+        if token == "(":
+            depth += 1
+        elif token == ")":
+            depth -= 1
+        elif depth == 0 and token in operators:
+            return token
+    return None
+
+
+def _const_value_expr(cur, tu, translation_units, seen=None) -> int | None:
+    """求能由源码初始化器确定的整数表达式值。"""
+    if cur is None:
+        return None
+    seen = set() if seen is None else seen
+    cur = _strip_value_wrappers(cur)
+    children = _children(cur)
+    if cur.kind == cindex.CursorKind.INTEGER_LITERAL:
+        value, _ = _value_of(cur)
+        if value is not None:
+            return value
+        macro_name = _macro_name_at_cursor(cur)
+        if macro_name:
+            for context_tu in translation_units:
+                value = _macro_constant_definitions(context_tu).get(macro_name)
+                if value is not None:
+                    return value
+        return None
+    if cur.kind == cindex.CursorKind.ENUM_CONSTANT_DECL:
+        return cur.enum_value
+    if cur.kind == cindex.CursorKind.DECL_REF_EXPR:
+        value, _ = _value_of(cur)
+        if value is not None:
+            return value
+        path = _lvalue_path(cur)
+        path_key = (path[0], tuple(path[1])) if path is not None else None
+        if path is None or path_key in seen:
+            return None
+        seen.add(path_key)
+        decl = _definition_decl(path[0], translation_units)
+        init = _initializer_at(decl, path[1]) if decl is not None else None
+        return _const_value_expr(init, tu, translation_units, seen)
+    if cur.kind in (cindex.CursorKind.MEMBER_REF_EXPR,
+                    cindex.CursorKind.ARRAY_SUBSCRIPT_EXPR):
+        path = _lvalue_path(cur)
+        path_key = (path[0], tuple(path[1])) if path is not None else None
+        if path is None or path_key in seen:
+            return None
+        seen.add(path_key)
+        decl = _definition_decl(path[0], translation_units)
+        init = _initializer_at(decl, path[1]) if decl is not None else None
+        return _const_value_expr(init, tu, translation_units, seen)
+    if cur.kind == cindex.CursorKind.UNARY_OPERATOR and children:
+        value = _const_value_expr(children[-1], tu, translation_units, seen)
+        if value is None:
+            return None
+        text = _tokens_text_obj(cur).replace(" ", "")
+        if text.startswith("!"):
+            return int(not value)
+        if text.startswith("-"):
+            return -value
+        return value
+    if cur.kind == cindex.CursorKind.BINARY_OPERATOR and len(children) == 2:
+        op = _operator_of(tu, cur) or _simple_binary_operator(tu, cur)
+        left = _const_value_expr(children[0], tu, translation_units, seen)
+        right = _const_value_expr(children[1], tu, translation_units, seen)
+        if left is None or right is None or op is None:
+            return None
+        if op == "+": return left + right
+        if op == "-": return left - right
+        if op == "*": return left * right
+        if op == "/" and right != 0: return left // right
+        if op == "%" and right != 0: return left % right
+        if op == "|": return left | right
+        if op == "&": return left & right
+        if op == "^": return left ^ right
+        if op == "<<": return left << right
+        if op == ">>": return left >> right
+    return None
+
+
+def _condition_constant(cond, tu, translation_units) -> tuple[bool | None, str | None]:
+    cur = _strip_wrappers(cond)
+    children = _children(cur)
+    if cur.kind == cindex.CursorKind.UNARY_OPERATOR and children:
+        op_text = _tokens_text_obj(cur).replace(" ", "")
+        if op_text.startswith("!"):
+            value, _ = _condition_constant(children[-1], tu, translation_units)
+            if value is not None:
+                return (not value, f"{_tokens_text(tu, cond)} => {'FALSE' if value else 'TRUE'}")
+    if cur.kind == cindex.CursorKind.BINARY_OPERATOR and len(children) == 2:
+        op = _operator_of(tu, cur)
+        if op in COMPARE_OPS:
+            left = _const_value_expr(children[0], tu, translation_units)
+            right = _const_value_expr(children[1], tu, translation_units)
+            if left is not None and right is not None:
+                result = {
+                    "==": left == right, "!=": left != right,
+                    "<": left < right, "<=": left <= right,
+                    ">": left > right, ">=": left >= right,
+                }[op]
+                return result, (
+                    f"{_tokens_text(tu, cond)} => {'TRUE' if result else 'FALSE'} "
+                    f"(AST values: {left} {op} {right})"
+                )
+        if op in LOGIC_OPS:
+            left = _condition_constant(children[0], tu, translation_units)[0]
+            right = _condition_constant(children[1], tu, translation_units)[0]
+            if left is not None and right is not None:
+                result = (left and right) if op == "&&" else (left or right)
+                return result, (
+                    f"{_tokens_text(tu, cond)} => {'TRUE' if result else 'FALSE'}"
+                )
+    value = _const_value_expr(cur, tu, translation_units)
+    if value is not None:
+        return bool(value), f"{_tokens_text(tu, cond)} => {'TRUE' if value else 'FALSE'}"
+    return None, None
+
+
+def _constant_lvalues(cond, tu, translation_units) -> dict[str, int]:
+    values: dict[str, int] = {}
+    for node in cond.walk_preorder():
+        path = _lvalue_path(node)
+        if path is None:
+            continue
+        value = _const_value_expr(node, tu, translation_units)
+        if value is not None:
+            text = _tokens_text(tu, node)
+            if text:
+                values[_normalise_expr(text)] = value
+    return values
+
+
+def _condition_node(kind, children):
+    if kind == "switch":
+        return children[0] if children else None
+    if kind == "dowhile":
+        return children[-1] if children else None
+    if kind == "for":
+        return children[1] if len(children) >= 2 \
+            and children[1].kind != cindex.CursorKind.COMPOUND_STMT else None
+    return children[0] if children else None
+
+
+def _annotate_constant_values(tu, body, ir, context_tus=()) -> None:
+    """用配置定义 TU 对分支和控制变量做确定性常量传播。"""
+    translation_units = (tu, *tuple(context_tus))
+    branch_nodes = []
+    for cur in body.walk_preorder():
+        kind = STMT_KIND_MAP.get(cur.kind)
+        if kind is None:
+            continue
+        children = _children(cur)
+        if kind in ("while", "dowhile"):
+            cond = _condition_node(kind, children)
+            if cond is not None and cond.kind == cindex.CursorKind.INTEGER_LITERAL:
+                continue
+        branch_nodes.append((kind, _condition_node(kind, children)))
+
+    constants: dict[str, int] = {}
+    for branch, (kind, cond) in zip(ir.branches, branch_nodes):
+        if cond is None or kind == "switch":
+            continue
+        value, reason = _condition_constant(cond, tu, translation_units)
+        branch.constant_value = value
+        branch.constant_reason = reason
+        constants.update(_constant_lvalues(cond, tu, translation_units))
+
+    for cv in ir.control_vars:
+        value = constants.get(_normalise_expr(cv.var))
+        if value is not None:
+            cv.constant_value = value
+            cv.constant_reason = "源码配置初始化器传播"
+
+
+def find_definition_sources(source_root: Path, names: set[str]) -> tuple[Path, ...]:
+    """按全局名查找可能包含初始化器的 C 源文件。
+
+    这里只做确定性的文本预筛选，最终是否为定义由 libclang AST 的
+    ``VarDecl.is_definition()`` 和初始化器节点确认；不会读取 WinAMS
+    工程、map/out 或测试结果。
+    """
+    wanted = sorted(name for name in names if name)
+    if not wanted:
+        return ()
+    patterns = [re.compile(
+        rf"\b{re.escape(name)}\b\s*(?:\[[^\n;{{}}]*\])?\s*=",
+    ) for name in wanted]
+    found: list[Path] = []
+    for path in sorted(source_root.rglob("*.c"), key=lambda item: item.as_posix().lower()):
+        try:
+            text = path.read_bytes().decode("cp932", errors="replace")
+        except OSError:
+            continue
+        if any(pattern.search(text) for pattern in patterns):
+            found.append(path)
+    return tuple(found)
+
+
 # ---------------------------------------------------------------- 主入口
 
 STMT_KIND_MAP = {
@@ -326,7 +960,8 @@ STMT_KIND_MAP = {
 
 def extract_function(tu, source: Path, function_name: str,
                      defines: Optional[dict] = None,
-                     watch_macros=WATCH_MACROS_DEFAULT) -> FunctionIR:
+                     watch_macros=WATCH_MACROS_DEFAULT,
+                     context_tus=()) -> FunctionIR:
     macros = _macro_lines(tu, tuple(watch_macros))
 
     target = None
@@ -373,6 +1008,7 @@ def extract_function(tu, source: Path, function_name: str,
     if body is None:
         raise RuntimeError(f"{function_name} 无函数体")
 
+    ir.memory_vars = _memory_vars(tu, target, body)
     _collect_vars(body, ir)
     _collect_calls(body, tu, ir, macros)   # 在 vars 之后：需要 globals_used 判定指针表调用
     _collect_branches(body, tu, ir, macros)
@@ -380,6 +1016,7 @@ def extract_function(tu, source: Path, function_name: str,
     ir.global_writes = assign.global_writes(body, tu)
     ir.control_vars = _classify_control_vars(
         ir, assign.trace_assigns(body, tu))
+    _annotate_constant_values(tu, body, ir, context_tus)
 
     if other_errors:
         ir.notes.append(
