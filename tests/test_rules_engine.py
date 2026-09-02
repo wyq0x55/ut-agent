@@ -7,15 +7,20 @@ import pytest
 
 from conftest import ROOT
 from ut_agent import cli
-from ut_agent.ir import Atom, Branch, CallSite, ControlVar, FunctionIR, Param, TypeInfo
+from ut_agent.ir import (
+    Atom, Branch, CallSite, ControlVar, Effect, FieldAccess, FunctionIR,
+    GlobalObject, Param, RecordLayoutField, TypeInfo,
+)
 from ut_agent.rules import (
     NEEDS_REVIEW, UNSUPPORTED, VALIDATED, Rule, RulePack, evaluate_atom,
-    approve_rule_pack, generate_intents, infer_rule_pack, load_rule_pack,
+    approve_rule_pack, generate_intents, load_rule_pack,
     review_rule_pack,
 )
 from ut_agent.winams.csv_render import render_intents_csv
+from ut_agent.winams.rule_infer import infer_rule_pack
 from ut_agent.parser import ClangExtractor, default_clang_extractor, make_compile_context
 from ut_agent.cases.boundary import control_candidates
+from ut_agent.rules.semantic import global_key
 
 
 def _branch_ir(*, ret_type: str = "void") -> FunctionIR:
@@ -192,6 +197,43 @@ def test_unknown_local_source_is_unsupported_instead_of_becoming_an_input():
     result = generate_intents(ir)
     assert result.status == UNSUPPORTED
     assert "来源不可设定" in result.issues[0]
+
+
+def test_record_storage_oracle_uses_typed_layout_without_project_names():
+    layout = [
+        RecordLayoutField("bits.b0", 0, 1, True, "bits", 0, 8),
+        RecordLayoutField("bits.b1", 1, 1, True, "bits", 0, 8),
+        RecordLayoutField("byte", 0, 8, False, "byte", 0, 8),
+    ]
+    ir = FunctionIR(
+        name="record_target", file="record.c", line=1, ret_type="void",
+        global_objects=[GlobalObject(
+            name="state", write=True,
+            field_paths=["bits.b0", "bits.b1", "byte"],
+            field_accesses=[
+                FieldAccess("bits.b0", write=True),
+                FieldAccess("bits.b1", write=True),
+            ], record_layout=layout,
+        )],
+        global_write_effects=[
+            Effect(path="state.bits.b0", constant_value=1),
+            Effect(path="state.bits.b1", constant_value=0),
+        ],
+    )
+    result = generate_intents(ir)
+    assert result.status == VALIDATED
+    assert result.intents[0].expected[global_key("state", field="byte")] == 1
+    assert all(not key.startswith("AMSTB_") for key in result.intents[0].expected)
+
+
+def test_unknown_global_output_is_needs_review_not_zero():
+    ir = FunctionIR(
+        name="unknown_global", file="record.c", line=1, ret_type="void",
+        global_objects=[GlobalObject(name="state", write=True)],
+    )
+    result = generate_intents(ir)
+    assert result.status == NEEDS_REVIEW
+    assert any("oracle" in issue for issue in result.issues)
 
 
 def test_generation_manifest_is_deterministic():

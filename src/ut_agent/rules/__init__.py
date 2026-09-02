@@ -1,6 +1,5 @@
 """确定性测试规则引擎。"""
 from ut_agent.rules.engine import evaluate_atom, evaluate_branch, generate_intents
-from ut_agent.rules.infer import infer_rule_pack, semantic_csv_signature
 from ut_agent.rules.compress import compress_corpus, compress_corpus_file, compress_corpora
 from ut_agent.rules.model import (
     EXECUTION_FAILED, NEEDS_REVIEW, UNSUPPORTED, VALIDATED, Constraint,
@@ -15,7 +14,7 @@ __all__ = [
     "BUILTIN_PACK", "EXECUTION_FAILED", "NEEDS_REVIEW", "UNSUPPORTED", "VALIDATED",
     "Constraint", "GenerationResult", "Rule", "RulePack", "RuleTrace", "TestIntent",
     "TestObligation", "ValidationResult", "evaluate_atom", "evaluate_branch",
-    "generate_intents", "infer_rule_pack", "load_rule_pack", "merge_packs",
-    "semantic_csv_signature", "review_rule_pack", "approve_rule_pack",
+    "generate_intents", "load_rule_pack", "merge_packs",
+    "review_rule_pack", "approve_rule_pack",
     "compress_corpus", "compress_corpus_file", "compress_corpora",
 ]

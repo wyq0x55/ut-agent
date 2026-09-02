@@ -2,6 +2,7 @@
 #include "clang/AST/Decl.h"
 #include "clang/AST/Expr.h"
 #include "clang/AST/ParentMapContext.h"
+#include "clang/AST/RecordLayout.h"
 #include "clang/AST/RecursiveASTVisitor.h"
 #include "clang/Basic/Diagnostic.h"
 #include "clang/Basic/Version.h"
@@ -85,11 +86,23 @@ struct FunctionDefinitionFact {
   std::vector<std::string> ReturnFields;
 };
 
+struct RecordLayoutFieldFact {
+  std::string Path;
+  uint64_t BitOffset = 0;
+  uint64_t BitWidth = 0;
+  bool IsBitField = false;
+  std::string StoragePath;
+  uint64_t StorageBitOffset = 0;
+  uint64_t StorageWidth = 0;
+};
+
 struct FunctionPointerParameterFact {
   std::string Name;
   std::string Type;
   bool IsPointer = false;
   bool IsConst = false;
+  bool PointeeRead = false;
+  bool PointeeWrite = false;
   llvm::json::Object TypeInfo;
 };
 
@@ -564,6 +577,81 @@ std::vector<std::string> recordLeafPaths(QualType Type,
   return Unique;
 }
 
+std::optional<int64_t> constantInteger(const Expr *Expression,
+                                        const ASTContext &Context);
+
+void appendRecordLayoutFields(QualType Type, const ASTContext &Context,
+                              llvm::StringRef Prefix, uint64_t BaseBitOffset,
+                              std::vector<RecordLayoutFieldFact> &Result) {
+  if (const auto *Array = Context.getAsConstantArrayType(Type)) {
+    const uint64_t Count = Array->getSize().getZExtValue();
+    const uint64_t ElementBits = Context.getTypeSize(Array->getElementType());
+    for (uint64_t Index = 0; Index < Count; ++Index) {
+      const std::string Indexed = Prefix.str() + "[" +
+                                  std::to_string(Index) + "]";
+      appendRecordLayoutFields(Array->getElementType(), Context, Indexed,
+                               BaseBitOffset + Index * ElementBits, Result);
+    }
+    return;
+  }
+
+  const RecordType *Record = Type->getAs<RecordType>();
+  if (!Record)
+    Record = Type.getCanonicalType()->getAs<RecordType>();
+  if (!Record || !Record->getDecl()->isCompleteDefinition())
+    return;
+
+  const RecordDecl *Decl = Record->getDecl();
+  const ASTRecordLayout &Layout = Context.getASTRecordLayout(Decl);
+  unsigned Index = 0;
+  for (const FieldDecl *Field : Decl->fields()) {
+    std::string FieldPath = Prefix.str();
+    const std::string FieldName = jsonText(Field->getNameAsString());
+    if (!FieldName.empty()) {
+      if (!FieldPath.empty())
+        FieldPath += ".";
+      FieldPath += FieldName;
+    }
+    const uint64_t Offset = BaseBitOffset + Layout.getFieldOffset(Index);
+    ++Index;
+    if (FieldPath.empty())
+      continue;
+
+    if (Field->isBitField()) {
+      const auto Width = constantInteger(Field->getBitWidth(), Context);
+      const uint64_t StorageWidth = Context.getTypeSize(Field->getType());
+      if (!Width || *Width <= 0 || StorageWidth == 0)
+        continue;
+      const uint64_t StorageOffset = (Offset / StorageWidth) * StorageWidth;
+      Result.push_back(RecordLayoutFieldFact{
+          FieldPath, Offset, static_cast<uint64_t>(*Width), true,
+          Prefix.empty() ? std::string("<record>") : Prefix.str(),
+          StorageOffset, StorageWidth});
+      continue;
+    }
+
+    const QualType FieldType = Field->getType();
+    if (FieldType->isArrayType() || FieldType->isRecordType()) {
+      const size_t Before = Result.size();
+      appendRecordLayoutFields(FieldType, Context, FieldPath, Offset, Result);
+      if (Result.size() != Before)
+        continue;
+    }
+    const uint64_t Width = Context.getTypeSize(FieldType);
+    if (Width == 0)
+      continue;
+    Result.push_back(RecordLayoutFieldFact{
+        FieldPath, Offset, Width, false, FieldPath, Offset, Width});
+  }
+}
+
+std::vector<RecordLayoutFieldFact> recordLayoutFields(
+    QualType Type, const ASTContext &Context) {
+  std::vector<RecordLayoutFieldFact> Result;
+  appendRecordLayoutFields(Type, Context, "", 0, Result);
+  return Result;
+}
+
 class ParameterFieldVisitor final
     : public RecursiveASTVisitor<ParameterFieldVisitor> {
 public:
@@ -669,6 +757,78 @@ private:
   bool Written = false;
 };
 
+// Classify the semantic direction of a pointer argument from the callee AST.
+// The WinAMS adapter consumes these facts; it does not infer direction from
+// symbol naming conventions.
+class PointeeUseVisitor final
+    : public RecursiveASTVisitor<PointeeUseVisitor> {
+public:
+  PointeeUseVisitor(ASTContext &Context, const ParmVarDecl *Target)
+      : Context(Context), Target(Target) {}
+
+  bool VisitUnaryOperator(UnaryOperator *Expression) {
+    if (Expression && Expression->getOpcode() == UO_Deref &&
+        referencedVar(Expression->getSubExpr()) == Target)
+      mark(Expression);
+    return true;
+  }
+
+  bool VisitMemberExpr(MemberExpr *Expression) {
+    if (Expression && referencedVar(Expression) == Target)
+      mark(Expression);
+    return true;
+  }
+
+  bool VisitArraySubscriptExpr(ArraySubscriptExpr *Expression) {
+    if (Expression && referencedVar(Expression) == Target)
+      mark(Expression);
+    return true;
+  }
+
+  bool read() const { return Read; }
+  bool write() const { return Write; }
+
+private:
+  void mark(const Expr *Expression) {
+    if (isWriteLValue(Expression))
+      Write = true;
+    else
+      Read = true;
+  }
+
+  bool isWriteLValue(const Expr *Expression) const {
+    const Expr *Current = Expression;
+    for (unsigned Depth = 0; Depth < 32; ++Depth) {
+      auto Parents = Context.getParents(*Current);
+      if (Parents.empty())
+        return false;
+      const DynTypedNode &Parent = Parents[0];
+      if (const auto *Operator = Parent.get<BinaryOperator>()) {
+        const Expr *LHS = Operator->getLHS()->IgnoreParenImpCasts();
+        if (LHS == Current->IgnoreParenImpCasts() && Operator->isAssignmentOp())
+          return true;
+        return false;
+      }
+      if (const auto *Unary = Parent.get<UnaryOperator>()) {
+        if (Unary->isIncrementDecrementOp())
+          return true;
+        Current = Unary;
+        continue;
+      }
+      const auto *ParentExpr = Parent.get<Expr>();
+      if (!ParentExpr)
+        return false;
+      Current = ParentExpr;
+    }
+    return false;
+  }
+
+  ASTContext &Context;
+  const ParmVarDecl *Target;
+  bool Read = false;
+  bool Write = false;
+};
+
 class FunctionBodyVisitor final
     : public RecursiveASTVisitor<FunctionBodyVisitor> {
   struct MemoryFact {
@@ -712,7 +872,7 @@ class FunctionBodyVisitor final
     SourceRange Range;
   };
 
-  struct GlobalFieldAccess {
+struct GlobalFieldAccess {
     bool Read = false;
     bool Write = false;
     bool CopiedFromLocal = false;
@@ -721,8 +881,8 @@ class FunctionBodyVisitor final
     unsigned ReadLine = 0;
     unsigned ReadOffset = 0;
     unsigned WriteLine = 0;
-    unsigned WriteOffset = 0;
-  };
+  unsigned WriteOffset = 0;
+};
 
   struct GlobalFact {
     std::string Name;
@@ -734,6 +894,7 @@ class FunctionBodyVisitor final
     std::string SourceFile;
     std::vector<uint64_t> ArraySizes;
     std::vector<std::string> FieldPaths;
+    std::vector<RecordLayoutFieldFact> RecordLayout;
     std::map<std::string, GlobalFieldAccess> FieldAccesses;
     unsigned ReadLine = 0;
     unsigned ReadOffset = 0;
@@ -1138,7 +1299,18 @@ public:
             {"read_line", static_cast<int64_t>(Access.second.ReadLine)},
             {"read_offset", static_cast<int64_t>(Access.second.ReadOffset)},
             {"write_line", static_cast<int64_t>(Access.second.WriteLine)},
-            {"write_offset", static_cast<int64_t>(Access.second.WriteOffset)}});
+              {"write_offset", static_cast<int64_t>(Access.second.WriteOffset)}});
+      }
+      llvm::json::Array RecordLayout;
+      for (const RecordLayoutFieldFact &Field : Fact.RecordLayout) {
+        RecordLayout.push_back(llvm::json::Object{
+            {"path", jsonText(Field.Path)},
+            {"bit_offset", static_cast<int64_t>(Field.BitOffset)},
+            {"bit_width", static_cast<int64_t>(Field.BitWidth)},
+            {"is_bitfield", Field.IsBitField},
+            {"storage_path", jsonText(Field.StoragePath)},
+            {"storage_bit_offset", static_cast<int64_t>(Field.StorageBitOffset)},
+            {"storage_width", static_cast<int64_t>(Field.StorageWidth)}});
       }
       Result.push_back(llvm::json::Object{
           {"name", jsonText(Fact.Name)},
@@ -1151,6 +1323,7 @@ public:
           {"array_sizes", std::move(ArraySizes)},
           {"field_paths", std::move(FieldPaths)},
           {"field_accesses", std::move(FieldAccesses)},
+          {"record_layout", std::move(RecordLayout)},
           {"read_line", static_cast<int64_t>(Fact.ReadLine)},
           {"read_offset", static_cast<int64_t>(Fact.ReadOffset)},
           {"write_line", static_cast<int64_t>(Fact.WriteLine)},
@@ -1983,6 +2156,7 @@ private:
         Type = Array->getElementType();
       }
       Fact.FieldPaths = recordLeafPaths(Type, Context);
+      Fact.RecordLayout = recordLayoutFields(Type, Context);
       if (const auto *Record = Type->getAs<RecordType>())
         Fact.IsUnion = Record->getDecl()->isUnion();
       Fact.IsConst = Variable->getType().isConstQualified();
@@ -2426,18 +2600,34 @@ public:
           cast<UnaryOperator>(Ignored)->getOpcode() == UO_AddrOf;
       const bool IsNull = Argument->isNullPointerConstant(
           Context, Expr::NPC_ValueDependentIsNull);
+      bool PointeeRead = false;
+      bool PointeeWrite = false;
+      bool PointeeKnown = false;
+      if (Direct && Index < Direct->parameters().size()) {
+        const FunctionDecl *Definition = Direct->getDefinition();
+        if (!Definition)
+          Definition = Direct;
+        const ParmVarDecl *DefinitionParam = Definition->getParamDecl(Index);
+        if (DefinitionParam && Definition->getBody()) {
+          PointeeUseVisitor Use(Context, DefinitionParam);
+          Use.TraverseStmt(const_cast<Stmt *>(Definition->getBody()));
+          PointeeRead = Use.read();
+          PointeeWrite = Use.write();
+          PointeeKnown = true;
+        }
+      }
       PointerArguments[std::to_string(Index)] = llvm::json::Object{
-          {"is_address", IsAddress}, {"is_null", IsNull}};
-      if (IsAddress &&
-          ((Direct && DirectName.rfind("Rte_Read_", 0) == 0) ||
-           (!Direct && !TablePath.empty()))) {
+          {"is_address", IsAddress}, {"is_null", IsNull},
+          {"address_used", IsAddress}, {"nullable", !IsAddress},
+          {"pointee_read", PointeeRead},
+          {"pointee_write", PointeeWrite},
+          {"pointee_known", PointeeKnown}};
+      if (IsAddress && (PointeeWrite || (!Direct && !TablePath.empty()))) {
         const VarDecl *Root = referencedVar(Argument);
         if (Root && Root->isLocalVarDecl())
           recordLocalStubOutputOrigin(
               Root, Call, Index,
-              Direct && DirectName.rfind("Rte_Read_", 0) == 0
-                  ? llvm::StringRef(DirectName)
-                  : llvm::StringRef());
+              PointeeWrite ? llvm::StringRef(DirectName) : llvm::StringRef());
       }
     }
     if (!PointerArguments.empty())
@@ -3131,9 +3321,17 @@ private:
         bool IsConst = ParamType.isConstQualified();
         if (ParamType->isPointerType())
           IsConst = IsConst || ParamType->getPointeeType().isConstQualified();
+        bool PointeeRead = false;
+        bool PointeeWrite = false;
+        if (ParamType->isPointerType() && Target->getBody()) {
+          PointeeUseVisitor Use(Context, Param);
+          Use.TraverseStmt(const_cast<Stmt *>(Target->getBody()));
+          PointeeRead = Use.read();
+          PointeeWrite = Use.write();
+        }
         Fact.Params.push_back(FunctionPointerParameterFact{
             Param->getNameAsString(), ParamType.getAsString(),
-            ParamType->isPointerType(), IsConst,
+            ParamType->isPointerType(), IsConst, PointeeRead, PointeeWrite,
             typeInfo(ParamType, &Context)});
       }
       const std::string Key = normalizeIndexedPath(Path);
@@ -3921,7 +4119,7 @@ void applyFunctionPointerTargets(llvm::json::Object &Function,
           {"type", jsonText(Param.Type)},
           {"is_ptr", Param.IsPointer},
           {"is_const", Param.IsConst},
-          {"is_written", false},
+          {"is_written", Param.PointeeWrite},
           {"type_info", llvm::json::Object(Param.TypeInfo)},
           {"access_paths", llvm::json::Array{}},
           {"write_effects", llvm::json::Array{}},
@@ -3929,16 +4127,33 @@ void applyFunctionPointerTargets(llvm::json::Object &Function,
           {"extensions", emptyExtensions()}});
     }
     (*Call)["params"] = std::move(Params);
+    if (llvm::json::Object *PointerArguments =
+            Call->getObject("pointer_arguments")) {
+      for (unsigned Index = 0; Index < Target.Params.size(); ++Index) {
+        const FunctionPointerParameterFact &Param = Target.Params[Index];
+        if (!Param.IsPointer)
+          continue;
+        if (llvm::json::Object *Info =
+                PointerArguments->getObject(std::to_string(Index))) {
+          (*Info)["pointee_read"] = Param.PointeeRead;
+          (*Info)["pointee_write"] = Param.PointeeWrite;
+          (*Info)["pointee_known"] = true;
+        }
+      }
+    }
     if (llvm::json::Object *Extensions = Call->getObject("extensions"))
       (*Extensions)["resolved_via"] = "function_pointer_initializer";
 
     // Local variables passed by address are recorded while visiting the
     // indirect call, before this pass has resolved its table target.  Once a
-    // unique target is known, promote only Rte_Read targets to the same
-    // ``stub_param`` provenance used for direct calls.  This keeps local
-    // temporaries out of the CSV while still allowing the corresponding
-    // PTROUT value to drive later branch conditions.
-    if (Target.Name.rfind("Rte_Read_", 0) == 0) {
+    // unique target is known, promote a local only when the resolved callee's
+    // typed pointer fact proves a write.  No callee naming convention is used.
+    const bool WritesPointee = std::any_of(
+        Target.Params.begin(), Target.Params.end(),
+        [](const FunctionPointerParameterFact &Param) {
+          return Param.IsPointer && Param.PointeeWrite;
+        });
+    if (WritesPointee) {
       std::optional<int64_t> CallOffset;
       if (const llvm::json::Object *Provenance =
               Call->getObject("provenance")) {

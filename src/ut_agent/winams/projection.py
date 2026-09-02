@@ -127,18 +127,14 @@ def stub_columns(ir) -> tuple[list[str], list[str]]:
             )
             qualified = [qualified_stub_key(callee, name) for name in names]
             inputs.extend(qualified)
-            is_getter = callee.startswith("Rte_Read_") or (
-                callee.startswith("pal_") and "_get_" in callee
-            )
-            if not is_getter:
-                is_setter = callee.startswith("pal_") and "_set_" in callee
-                info = (call.pointer_arguments.get(str(index), {})
-                        if isinstance(call.pointer_arguments, dict) else {})
-                if (is_setter and param.is_ptr and isinstance(info, dict)
-                        and info.get("is_address") and not info.get("is_null")):
-                    outputs.extend(f"{column}[0]" for column in qualified)
-                else:
-                    outputs.extend(qualified)
+            if not param.is_ptr:
+                outputs.extend(qualified)
+                continue
+            observable = call.caller_param_output.get(
+                str(index), call.caller_param_output.get(index, False)
+            ) if isinstance(call.caller_param_output, dict) else False
+            if observable:
+                outputs.extend(qualified)
         if call.return_used:
             fields = stub_return_fields(call)
             if fields:

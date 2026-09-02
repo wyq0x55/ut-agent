@@ -404,7 +404,8 @@ def main(argv=None) -> int:
         return 0
 
     if a.cmd == "rules":
-        from ut_agent.rules import approve_rule_pack, infer_rule_pack, review_rule_pack
+        from ut_agent.rules import approve_rule_pack, review_rule_pack
+        from ut_agent.winams.rule_infer import infer_rule_pack
 
         if a.rules_cmd == "check":
             try:

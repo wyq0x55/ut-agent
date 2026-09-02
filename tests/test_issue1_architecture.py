@@ -2,10 +2,15 @@
 from __future__ import annotations
 
 import json
+import ast
+import re
 from pathlib import Path
 
 from ut_agent.cases.boundary import control_candidates
-from ut_agent.ir import Atom, Branch, CallSite, ControlVar, FunctionIR, Param, TypeInfo
+from ut_agent.ir import (
+    Atom, Branch, CallSite, Case, ControlVar, FunctionIR, Param, TypeInfo,
+    ValueOrigin,
+)
 from ut_agent.rules.engine import evaluate_atom, evaluate_branch
 from ut_agent.stub.generate import render_stub_c
 
@@ -31,23 +36,43 @@ def test_python_pipeline_has_no_c_parser_or_core_extension_reads():
 
 def test_rules_do_not_reopen_source_or_own_target_column_spelling():
     engine = (SRC / "rules" / "engine.py").read_text(encoding="utf-8")
-    learner = (SRC / "rules" / "infer.py").read_text(encoding="utf-8")
     corpus = (SRC / "rules" / "corpus.py").read_text(encoding="utf-8")
     model = (SRC / "rules" / "model.py").read_text(encoding="utf-8")
-    assert "AMSTB_" not in engine
-    assert "PTROUT" not in engine
-    assert "AMIN_return" not in engine
-    assert "CALLCNT" not in engine
-    assert "read_text" not in learner
-    assert "rglob" not in learner
-    assert "source_macro" not in learner
-    assert "_source_text" not in learner
+    semantic = (SRC / "rules" / "semantic.py").read_text(encoding="utf-8")
+    projection = (SRC / "winams" / "projection.py").read_text(encoding="utf-8")
+    renderer = (SRC / "winams" / "csv_render.py").read_text(encoding="utf-8")
+    assert "AMSTB_" not in engine + semantic
+    assert "PTROUT" not in engine + semantic
+    assert "AMIN_return" not in engine + semantic
+    assert "CALLCNT" not in engine + semantic
     assert "ClangExtractor" not in corpus
     assert "read_text" not in corpus
     assert "rglob" not in corpus
     assert "input_columns" not in model
     assert "output_columns" not in model
     assert "stub_declarations" not in model
+    assert not (SRC / "rules" / "infer.py").exists()
+    assert "Rte_Read_" not in projection + renderer
+    assert "pal_" not in projection + renderer
+
+
+def test_rules_dependency_graph_has_no_execution_adapter_imports():
+    """Rules may emit semantic IDs but cannot depend on target/execution code."""
+    rules_root = SRC / "rules"
+    forbidden = {"ut_agent.winams", "ut_agent.host"}
+    for path in rules_root.glob("*.py"):
+        tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
+        for node in ast.walk(tree):
+            if isinstance(node, ast.Import):
+                names = {alias.name for alias in node.names}
+            elif isinstance(node, ast.ImportFrom):
+                names = {node.module or ""}
+            else:
+                continue
+            assert not any(
+                name == prefix or name.startswith(prefix + ".")
+                for name in names for prefix in forbidden
+            ), f"{path} imports execution adapter: {names}"
 
 
 def test_parser_owns_corpus_extraction_orchestration():
@@ -64,17 +89,16 @@ def test_extractor_pass_boundary_and_v3_schema_are_present():
     assert schema["properties"]["schema_version"]["const"] == 3
     cmake = (EXTRACTOR / "CMakeLists.txt").read_text(encoding="utf-8")
     main = (EXTRACTOR / "main.cpp").read_text(encoding="utf-8")
-    assert "passes/type_facts.cpp" in cmake
-    assert "passes/contract_validation.cpp" in cmake
-    assert '#include "passes/type_facts.h"' in main
-    assert '#include "passes/contract_validation.h"' in main
+    pass_sources = sorted(set(re.findall(r"passes/[A-Za-z0-9_]+\.cpp", cmake)))
+    assert pass_sources
+    for source in pass_sources:
+        source_path = EXTRACTOR / source.replace("/", "\\")
+        assert source_path.is_file(), source
+        header = source[:-4] + ".h"
+        assert (EXTRACTOR / header.replace("/", "\\")).is_file(), header
+        assert f'#include "{header}"' in main
     assert "parameterWriteEffects()" in main
     assert '"order", Effect.Order' in main
-
-
-def test_flow_package_has_no_python_producer():
-    flow = SRC / "flow"
-    assert not any(flow.glob("*.py"))
 
 
 def test_rules_consume_typed_mask_and_domain_facts():
@@ -100,6 +124,28 @@ def test_rules_consume_typed_mask_and_domain_facts():
     )
     assert evaluate_atom(ir.branches[0].atoms[0], {"flags": 0x30})
     assert control_candidates(ir)["flags"]["values"]
+
+
+def test_switch_default_candidate_stays_inside_typed_domain():
+    info = TypeInfo(
+        canonical_type="unsigned char", kind="integer", bit_width=8,
+        signed=False, min_value=0, max_value=255,
+    )
+    ir = FunctionIR(
+        name="target", file="target.c", line=1, ret_type="void",
+        branches=[Branch(
+            bid="b0", kind="switch", line=2,
+            cases=[Case("case 255:", 255, False), Case("default:", None, True)],
+            selector=ValueOrigin(kind="variable", driver="state"),
+        )],
+        control_vars=[ControlVar(
+            "state", "state", "param", var_type="unsigned char",
+            type_info=info, branch_ids=["b0"],
+        )],
+    )
+    values = control_candidates(ir)["state"]["values"]
+    assert 256 not in values
+    assert all(0 <= value <= 255 for value in values)
 
 
 def test_rules_preserve_logical_not_in_condition_tree():

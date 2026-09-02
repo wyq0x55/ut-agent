@@ -211,7 +211,7 @@
     "global_object": {
       "type": "object",
       "additionalProperties": false,
-      "required": ["name", "read", "write", "is_const", "is_volatile", "is_union", "source_file", "array_sizes", "field_paths", "field_accesses", "read_line", "read_offset", "write_line", "write_offset", "provenance"],
+      "required": ["name", "read", "write", "is_const", "is_volatile", "is_union", "source_file", "array_sizes", "field_paths", "field_accesses", "record_layout", "read_line", "read_offset", "write_line", "write_offset", "provenance"],
       "properties": {
         "name": { "type": "string", "minLength": 1 },
         "read": { "type": "boolean" },
@@ -223,11 +223,26 @@
         "array_sizes": { "type": "array", "items": { "type": "integer", "minimum": 0 } },
         "field_paths": { "type": "array", "items": { "type": "string" } },
         "field_accesses": { "type": "array", "items": { "$ref": "#/$defs/field_access" } },
+        "record_layout": { "type": "array", "items": { "$ref": "#/$defs/record_layout_field" } },
         "read_line": { "type": "integer", "minimum": 0 },
         "read_offset": { "type": "integer", "minimum": 0 },
         "write_line": { "type": "integer", "minimum": 0 },
         "write_offset": { "type": "integer", "minimum": 0 },
         "provenance": { "$ref": "#/$defs/provenance" }
+      }
+    },
+    "record_layout_field": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["path", "bit_offset", "bit_width", "is_bitfield", "storage_path", "storage_bit_offset", "storage_width"],
+      "properties": {
+        "path": { "type": "string", "minLength": 1 },
+        "bit_offset": { "type": "integer", "minimum": 0 },
+        "bit_width": { "type": "integer", "minimum": 1 },
+        "is_bitfield": { "type": "boolean" },
+        "storage_path": { "type": "string" },
+        "storage_bit_offset": { "type": "integer", "minimum": 0 },
+        "storage_width": { "type": "integer", "minimum": 1 }
       }
     },
     "access_path": {
@@ -362,7 +377,15 @@
           "additionalProperties": {
             "type": "object", "additionalProperties": false,
             "required": ["is_address", "is_null"],
-            "properties": { "is_address": { "type": "boolean" }, "is_null": { "type": "boolean" } }
+            "properties": {
+              "is_address": { "type": "boolean" },
+              "is_null": { "type": "boolean" },
+              "address_used": { "type": "boolean" },
+              "nullable": { "type": "boolean" },
+              "pointee_read": { "type": "boolean" },
+              "pointee_write": { "type": "boolean" },
+              "pointee_known": { "type": "boolean" }
+            }
           }
         },
         "caller_param_fields": { "type": "object", "additionalProperties": { "type": "array", "items": { "type": "string" } } },

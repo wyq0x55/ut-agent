@@ -101,6 +101,19 @@ class FieldAccess:
 
 
 @dataclass
+class RecordLayoutField:
+    """Extractor-proven storage facts for one record leaf field."""
+
+    path: str
+    bit_offset: int
+    bit_width: int
+    is_bitfield: bool = False
+    storage_path: str = ""
+    storage_bit_offset: int = 0
+    storage_width: int = 0
+
+
+@dataclass
 class GlobalObject:
     name: str
     read: bool = False
@@ -112,6 +125,7 @@ class GlobalObject:
     array_sizes: list[int] = field(default_factory=list)
     field_paths: list[str] = field(default_factory=list)
     field_accesses: list[FieldAccess] = field(default_factory=list)
+    record_layout: list[RecordLayoutField] = field(default_factory=list)
     read_line: int = 0
     read_offset: int = 0
     write_line: int = 0

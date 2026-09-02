@@ -222,6 +222,36 @@ def test_standalone_resolves_function_pointer_table_initializer(tmp_path: Path):
     assert call.extensions["resolved_via"] == "function_pointer_initializer"
     assert call.params[0].is_ptr is True
     assert call.caller_param_output["0"] is False
+    pointer = call.pointer_arguments["0"]
+    assert pointer["address_used"] is True
+    assert pointer["pointee_write"] is True
+    assert pointer["pointee_known"] is True
+
+
+def test_standalone_emits_generic_record_bitfield_layout(tmp_path: Path):
+    executable = default_clang_extractor()
+    if executable is None:
+        pytest.skip("repository standalone extractor is not built")
+    source = tmp_path / "record.c"
+    source.write_text(
+        "typedef unsigned char u1;\n"
+        "typedef struct {\n"
+        "  u1 b0:1; u1 b1:1; u1 b2:1; u1 b3:1;\n"
+        "  u1 b4:1; u1 b5:1; u1 b6:1; u1 b7:1;\n"
+        "} Bits;\n"
+        "typedef union { Bits bits; u1 byte; } Overlay;\n"
+        "Overlay state;\n"
+        "void target(void) { state.bits.b0 = 1U; state.bits.b7 = 1U; }\n",
+        encoding="ascii",
+    )
+    ir = ClangExtractor(executable).extract(
+        make_compile_context([source]), "target", cwd=tmp_path,
+    )
+    state = next(item for item in ir.global_objects if item.name == "state")
+    layout = {item.path: item for item in state.record_layout}
+    assert layout["bits.b0"].is_bitfield is True
+    assert layout["bits.b0"].bit_width == 1
+    assert layout["byte"].is_bitfield is False
 
 
 def test_standalone_propagates_scalar_global_initializer_from_context_tu(

@@ -1,0 +1,45 @@
+name: CI
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  python-contracts:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - run: python -m pip install --upgrade pip
+      - run: python -m pip install -e ".[dev]"
+      - run: python -m pytest tests/test_issue1_architecture.py tests/test_ir_json.py
+
+  clang-fixtures:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - name: Install LLVM
+        shell: pwsh
+        run: choco install llvm --no-progress --yes
+      - name: Install Python package
+        shell: pwsh
+        run: python -m pip install -e ".[dev]"
+      - name: Build Clang extractor
+        shell: pwsh
+        run: |
+          $llvm = "C:/Program Files/LLVM"
+          cmake -S tooling -B build -G "Visual Studio 17 2022" -A x64 `
+            "-DLLVM_DIR=$llvm/lib/cmake/llvm" `
+            "-DClang_DIR=$llvm/lib/cmake/clang"
+          cmake --build build --config Release
+          New-Item -ItemType Directory -Force -Path .build/ut-clang-extract-nmake2/bin | Out-Null
+          Copy-Item build/bin/Release/ut-clang-extract.exe `
+            .build/ut-clang-extract-nmake2/bin/ut-clang-extract.exe
+      - name: Run extractor fixtures
+        shell: pwsh
+        run: python -m pytest tests/test_clang_extractor.py tests/test_ir_json.py
