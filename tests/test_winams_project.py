@@ -6,8 +6,8 @@ from pathlib import Path
 
 import pytest
 
-from ut_agent.parser import default_clang_extractor
-from ut_agent.winams.project import generate_project
+from ut_agent.toolchain import default_clang_extractor
+from ut_agent.targets.winams.project import generate_project
 
 
 def test_project_uses_context_source_for_global_initializer(tmp_path: Path):

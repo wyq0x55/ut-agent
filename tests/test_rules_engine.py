@@ -11,16 +11,16 @@ from ut_agent.ir import (
     Atom, Branch, CallSite, ControlVar, Effect, FieldAccess, FunctionIR,
     GlobalObject, Param, RecordLayoutField, TypeInfo,
 )
-from ut_agent.rules import (
+from ut_agent.generation import (
     NEEDS_REVIEW, UNSUPPORTED, VALIDATED, Rule, RulePack, evaluate_atom,
     approve_rule_pack, generate_intents, load_rule_pack,
     review_rule_pack,
 )
-from ut_agent.winams.csv_render import render_intents_csv
-from ut_agent.winams.rule_infer import infer_rule_pack
-from ut_agent.parser import ClangExtractor, default_clang_extractor, make_compile_context
-from ut_agent.cases.boundary import control_candidates
-from ut_agent.rules.semantic import global_key
+from ut_agent.targets.winams.csv import render_intents_csv
+from ut_agent.learning.rule_infer import infer_rule_pack
+from ut_agent.toolchain import ClangExtractor, default_clang_extractor, make_compile_context
+from ut_agent.generation.boundary import control_candidates
+from ut_agent.generation.semantic import global_key
 
 
 def _branch_ir(*, ret_type: str = "void") -> FunctionIR:

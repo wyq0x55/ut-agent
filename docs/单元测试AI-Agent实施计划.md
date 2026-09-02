@@ -20,16 +20,18 @@
 ```
 ut-agent/
 ├── src/ut_agent/
-│   ├── ir/            # 中间表示：函数/调用图/原子条件的 JSON schema 与读写
-│   ├── parser/        # libclang：函数抽取、调用关系、条件 AST 拆解
-│   ├── flow/          # 变量来源判定（函数内数据流/常量传播）
-│   ├── cases/         # 边界值枚举、pairwise、C0/C1/MC/DC 组合
-│   ├── stub/          # stub 骨架生成（含 LLM 有状态 stub 接口）
-│   ├── winams/        # CSV 渲染、批处理调用、覆盖率解析（RealRunner + MockRunner）
-│   ├── host/          # 用例表 → C driver 生成 + host 编译执行 + 覆盖率采集（HostRunner）
-│   ├── llm/           # provider 抽象、prompt 注册表、用量记账、缓存
-│   ├── report/        # 测试报告 + 审查说明起草
-│   └── cli.py         # 主控入口（单模块 / 批量）
+│   ├── project/       # 项目 manifest、Baseline/ProjectRulePack 解析与锁定
+│   ├── baseline/      # 版本化、已审批 TestBaseline 数据契约
+│   ├── ir/            # C++ extractor 产出的 FunctionIR schema 与 codec
+│   ├── generation/    # Obligation → Constraint → Solve → Evaluate → Oracle
+│   ├── learning/      # Golden/语料归纳；不进入正式生成主链
+│   ├── targets/winams/# CSV、Stub、DefineVar 和 WinAMS 工程适配器
+│   ├── toolchain/     # 唯一 C++ Clang extractor、编译和 host 进程边界
+│   ├── reporting/     # 构建产物证据和诊断报告
+│   ├── cli/           # parser + 命令路由；业务实现按命令拆分
+│   └── llm/           # 三个介入点（仅非确定性辅助路径）
+├── schemas/           # FunctionIR、Baseline、ProjectManifest 合同
+├── config/            # baseline、project-rules、projects、winams 配置
 ├── eval/              # 基准函数集 + 评测脚本（一次到位率、轮数、token）
 ├── examples/          # 代表模块 + golden 输出（CSV、覆盖率、报告）
 ├── tests/             # pytest 单测 + golden-file 回归

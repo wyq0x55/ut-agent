@@ -18,13 +18,13 @@ from ut_agent.ir import (
     SourceLocation,
     TypeInfo,
 )
-from ut_agent.parser.ir_json import (
+from ut_agent.ir.codec import (
     FunctionIRSchemaError,
     document_to_function_ir,
     serialize_document,
     validate_document,
 )
-from ut_agent.parser import ClangExtractor, ClangExtractorError, default_clang_extractor, make_compile_context
+from ut_agent.toolchain import ClangExtractor, ClangExtractorError, default_clang_extractor, make_compile_context
 
 
 ROOT = Path(__file__).resolve().parents[1]

@@ -8,7 +8,7 @@ from pathlib import Path
 
 import pytest
 
-from ut_agent.parser import ClangExtractor, default_clang_extractor, make_compile_context
+from ut_agent.toolchain import ClangExtractor, default_clang_extractor, make_compile_context
 
 ROOT = Path(__file__).resolve().parents[1]
 CP = Path(os.environ.get("UT_AGENT_CLASSIC_PLATFORM",

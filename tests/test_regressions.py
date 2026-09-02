@@ -2,11 +2,11 @@
 from pathlib import Path
 
 from ut_agent import batch, cli
-from ut_agent.cases.boundary import control_candidates
-from ut_agent.host.run import _wsl_path
+from ut_agent.generation.boundary import control_candidates
+from ut_agent.toolchain.process import _wsl_path
 from ut_agent.ir import Atom, Branch, CallSite, ControlVar, FunctionIR, Param
-from ut_agent.stub.generate import render_stub_c
-from ut_agent.parser import ClangExtractor, default_clang_extractor, make_compile_context
+from ut_agent.targets.winams.stub import render_stub_c
+from ut_agent.toolchain import ClangExtractor, default_clang_extractor, make_compile_context
 
 
 def test_enum_typedef_domain_wins_over_underlying_type():

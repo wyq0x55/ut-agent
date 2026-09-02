@@ -1,0 +1,21 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://ut-agent.local/schema/project-rule-pack.json",
+  "title": "ut-agent ProjectRulePack",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["project_rule_pack"],
+  "properties": {
+    "project_rule_pack": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["id", "version", "status", "rules"],
+      "properties": {
+        "id": {"type": "string", "minLength": 1},
+        "version": {"type": "string", "minLength": 1},
+        "status": {"const": "approved"},
+        "rules": {"type": "array", "items": {"type": "object"}}
+      }
+    }
+  }
+}
