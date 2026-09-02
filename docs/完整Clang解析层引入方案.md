@@ -148,7 +148,7 @@ tooling/
 
 ```json
 {
-  "schema_version": 2,
+  "schema_version": 3,
   "extractor": {"name": "ut-clang-extract", "version": "...", "clang_version": "..."},
   "status": "OK | PARTIAL | UNSUPPORTED | ERROR",
   "compile_context": {},
@@ -243,7 +243,7 @@ WinAMS 列名、用例组合或文本正则。
 
 **只做设计与测试，不迁移生产 parser。**
 
-- 写 `CompileContext` 和 FunctionIR JSON Schema v2。
+- 写 `CompileContext` 和 FunctionIR JSON Schema v3。
 - 为现有 Python IR 写从 JSON 到 dataclass 的严格 adapter；未知 schema 版本、缺少
   必填字段、非法状态必须失败。
 - 新增最小、脱敏的 C fixtures，至少覆盖：配置头、对象宏、函数宏包裹条件、位掩码、
@@ -340,7 +340,7 @@ Luna 应严格按 P0 → P1 → P2 → P3 → P4 推进；一次只推进一个�
 ```text
 请在 C:\\workspeace\\ut-agent 严格执行 docs/完整Clang解析层引入方案.md 的 P0，
 不要开始 P1 或安装 LLVM。先阅读 AGENTS.md 和方案，再检查工作区已有改动并保持
-它们不受影响。为完整 Clang extractor 定义 CompileContext 与 FunctionIR JSON Schema v2，
+它们不受影响。为完整 Clang extractor 定义 CompileContext 与 FunctionIR JSON Schema v3，
 实现 Python 端的严格 schema adapter 测试，并建立最小脱敏 C fixture 证据集。不要
 修改 WinAMS CSV 规格、cases/stub/winams 的业务逻辑，也不要使用 token/regex fallback。
 完成后运行相关 pytest（包括 tests/test_setpdumode_golden.py），报告改动、测试结果、
@@ -356,4 +356,3 @@ Luna 应严格按 P0 → P1 → P2 → P3 → P4 推进；一次只推进一个�
    的 CompileContext 和系统头策略。
 3. 交付工程是否允许提交脱敏 C fixtures；若不允许，提供可在本机运行的外置证据集
    路径和摘要清单。
-

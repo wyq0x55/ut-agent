@@ -42,7 +42,7 @@ ut-agent/
 | 项 | 选择 | 理由 |
 |---|---|---|
 | 主控 | 裸 Python 3.11+ | 线性流水线，无框架必要 |
-| 解析 | clang.cindex（libclang） | 成熟、能拿语法树与游标位置 |
+| 解析 | `ut-clang-extract`（C++ LibTooling） | 唯一 C 语义事实源，保留 AST 与 provenance |
 | 组合 | itertools + pandas | 笛卡尔积/pairwise 足够 |
 | 执行 | subprocess 调 WinAMS 批处理 | 确定性 |
 | LLM | OpenAI 兼容接口，模型可配置 | 小模型干便宜活，按介入点路由模型 |

@@ -1,197 +1,149 @@
-"""M2：控制变量候选值与用例行枚举（确定性，规格 §4.4）。
+"""Deterministic candidate generation from extractor-owned typed facts.
 
-五点规则：{v−1, v, v+1} ∪ {可达域 min, max}；±1 超出值域不加；
-switch 变量加 case 值全体 + default 触发值（max+1）。
+This module is intentionally a generator, not a C parser.  Domains, enum
+members, and switch selectors must already be present in FunctionIR.
 """
 from __future__ import annotations
 
 from itertools import product
-import re
-from typing import Optional
 
-from ut_agent.ir import FunctionIR
+from ut_agent.ir import FunctionIR, TypeInfo, ValueOrigin
 
-PAIRWISE_THRESHOLD = 500   # 超过则降 pairwise（v0 未实现，先告警备注）
+PAIRWISE_THRESHOLD = 500
 
 
-def domain_of(var_type: Optional[str], enums: dict):
-    """值域：("set", 值集合) 或 ("range", min, max) 或 None（未知，不过滤）。"""
-    if not var_type:
+def _domain(type_info: TypeInfo | None):
+    if type_info is None:
         return None
-    t = var_type.strip()
-    if "*" in t:
-        return None
-    if t == "boolean":
+    if type_info.enum_values:
+        return ("set", set(type_info.enum_values.values()))
+    if type_info.kind == "bool":
         return ("set", {0, 1})
-    if t in enums:
-        return ("set", set(enums[t].values()))
-    if t in {"u1", "uint8_t"} or "uint8" in t:
-        return ("set", set(range(256)))
-    if t in {"s1", "int8_t"} or "sint8" in t:
-        return ("set", set(range(-128, 128)))
-    if t in {"u2", "uint16_t"} or "uint16" in t:
-        return ("range", 0, 65535)
-    if t in {"u4", "uint32_t"} or "uint32" in t or "unsigned" in t:
-        return ("range", 0, 4294967295)
-    return None
+    if type_info.min_value is None or type_info.max_value is None:
+        return None
+    if type_info.min_value == type_info.max_value:
+        return ("set", {type_info.min_value})
+    return ("range", type_info.min_value, type_info.max_value)
 
 
-def _in(v, dom) -> bool:
-    if dom is None:
+def _in(value, domain) -> bool:
+    if domain is None:
         return True
-    if dom[0] == "set":
-        return v in dom[1]
-    return dom[1] <= v <= dom[2]
+    if domain[0] == "set":
+        return value in domain[1]
+    return domain[1] <= value <= domain[2]
 
 
-def _dmin(dom):
-    return min(dom[1]) if dom[0] == "set" else dom[1]
+def _minimum(domain):
+    return min(domain[1]) if domain[0] == "set" else domain[1]
 
 
-def _dmax(dom):
-    return max(dom[1]) if dom[0] == "set" else dom[2]
+def _maximum(domain):
+    return max(domain[1]) if domain[0] == "set" else domain[2]
 
 
-def five_points(boundary, dom) -> set:
-    """边界五点。±1 必须能进该分支（值域合法）才保留；min/max 取值域极值。"""
+def _five_points(boundary, domain) -> set:
+    """Return {boundary-1, boundary, boundary+1, min, max} when proven."""
     if boundary is None:
         return set()
-    pts = set()
-    for v in (boundary - 1, boundary, boundary + 1):
-        if _in(v, dom):
-            pts.add(v)
-    if dom is not None:
-        pts.add(_dmin(dom))
-        pts.add(_dmax(dom))
-    return pts
+    points = {value for value in (boundary - 1, boundary, boundary + 1)
+              if _in(value, domain)}
+    if domain is not None:
+        points.update({_minimum(domain), _maximum(domain)})
+    return points
 
 
-def _resolve_enum_domain(ir: FunctionIR, boundary_name) -> tuple | None:
-    """var_type 缺失时，用边界里的枚举名反查它所属的枚举域。"""
-    if not boundary_name:
+def _selector_control(branch, controls):
+    selector = branch.selector
+    if not isinstance(selector, ValueOrigin):
         return None
-    for name, members in ir.enums.items():
-        if boundary_name in members:
-            return ("set", set(members.values()))
+    names = {name for name in (selector.driver, selector.expression) if name}
+    for control in controls:
+        if control.var in names:
+            return control
     return None
 
 
-def _const_domain(boundary_name) -> tuple | None:
-    """标准常量宏隐含的值域（AUTOSAR：boolean / Std_ReturnType）。"""
-    if boundary_name in ("TRUE", "FALSE", "E_OK", "E_NOT_OK"):
-        return ("set", {0, 1})
-    return None
-
-
-def _switch_control_var(condition: str, var_to_cv: dict):
-    """Resolve a switch selector without depending on pretty-print spacing."""
-    normalized = condition.replace(" ", "")
-    direct = var_to_cv.get(normalized)
-    if direct is not None:
-        return direct
-    if normalized.startswith("switch(") and normalized.endswith(")"):
-        return var_to_cv.get(normalized[len("switch("):-1])
-    # Keep this conservative: only an identifier/member-path token match is
-    # accepted, and prefer the longest candidate when selectors are nested.
-    for key in sorted(var_to_cv, key=len, reverse=True):
-        if re.search(rf"(?<![A-Za-z0-9_]){re.escape(key)}(?![A-Za-z0-9_])", normalized):
-            return var_to_cv[key]
-    return None
+def _enum_names(type_info: TypeInfo | None) -> dict[int, str]:
+    if type_info is None:
+        return {}
+    return {value: name for name, value in type_info.enum_values.items()}
 
 
 def control_candidates(ir: FunctionIR) -> dict:
-    """{控制变量短名: {"cv": ControlVar, "values": set, "enum": 反查表}}。"""
-    var_to_cv = {cv.var.replace(" ", ""): cv for cv in ir.control_vars}
-    cand: dict = {}
-    acc: dict = {}
+    """Build candidates from typed atoms and the extractor's selector fact."""
+    controls = {control.var: control for control in ir.control_vars}
+    candidates: dict = {}
 
-    def add(cv, values):
-        c = cand.setdefault(cv.name, {"cv": cv, "values": set(),
-                                      "enum": _reverse_enum(ir, cv.var_type)})
-        c["values"] |= values
+    def add(control, values):
+        if not values:
+            return
+        entry = candidates.setdefault(control.name, {
+            "cv": control,
+            "values": set(),
+            "enum": _enum_names(control.type_info),
+        })
+        entry["values"].update(values)
 
-    for b in ir.branches:
-        for a in b.atoms:
-            cv = var_to_cv.get(a.var.replace(" ", ""))
-            if cv is None or cv.constant_value is not None:
+    for branch in ir.branches:
+        for atom in branch.atoms:
+            control = controls.get(atom.var)
+            if control is None or control.constant_value is not None:
                 continue
-            # Prefer the enum domain inferred from the actual boundary name.
-            # Clang may expose an enum typedef as its underlying type
-            # (for example ``unsigned int``); using that type first would
-            # incorrectly widen a six-value enum to 0..UINT_MAX.
-            dom = (_resolve_enum_domain(ir, a.boundary_name)
-                   or domain_of(cv.var_type, ir.enums)
-                   or domain_of(a.var_type, ir.enums)
-                   or _const_domain(a.boundary_name))
-            if cv.name not in acc:
-                acc[cv.name] = (cv, [])
-            acc[cv.name][1].append((a.boundary, dom))
-        if b.kind == "switch":
-            cv = _switch_control_var(b.cond_text, var_to_cv)
-            if cv is None or cv.constant_value is not None:
-                continue
-            vals = {c.value for c in b.cases if not c.is_default and c.value is not None}
-            if vals:
-                add(cv, vals)
-                add(cv, {max(vals) + 1})          # default 触发（max+1）
-                dom = domain_of(cv.var_type, ir.enums)
-                if dom is not None:
-                    add(cv, {_dmin(dom), _dmax(dom)})
-    # 值域推断兜底：类型链全失败但全部边界值 ∈ {0,1} → 布尔域
-    # （旧版绑定会把 boolean typedef 归一成 "int"，确定性补救）
-    for name, (cv, items) in acc.items():
-        if all(d is None for _, d in items) and all(bd in (0, 1, None) for bd, _ in items):
-            acc[name] = (cv, [(bd, ("set", {0, 1})) for bd, _ in items])
-    for cv, items in acc.values():
-        for bd, dom in items:
-            add(cv, five_points(bd, dom))
-    return cand
+            typed_domain = _domain(atom.type_info) or _domain(control.type_info)
+            add(control, _five_points(atom.boundary, typed_domain))
 
-
-def _reverse_enum(ir, var_type) -> dict:
-    """{值: 成员短名}。短名 = 成员名去掉枚举类型首词的前缀
-    （CanIf_PduSetModeType → CANIF_ 前缀 → SET_OFFLINE），与 golden 标注一致。"""
-    if not var_type:
-        return {}
-    t = var_type.strip()
-    if t not in ir.enums:
-        return {}
-    prefix = t.split("_")[0].upper() + "_"
-    out = {}
-    for k, v in ir.enums[t].items():
-        out[v] = k[len(prefix):] if k.startswith(prefix) else k
-    return out
-
-
-def settable_columns(ir: FunctionIR, cand: dict) -> list:
-    """设定列（有序）：[B] 引数 + [D] 可设定控制变量（global/local_from_global）。
-    config（配置表只读）/ local / unknown 来源不生成设定列（notes 已记介入点）。"""
-    cols = []
-    for p in ir.params:
-        c = cand.get(p.name)
-        cols.append((p.name, c["cv"] if c else None,
-                     sorted(c["values"]) if c else [0]))
-    for name, c in cand.items():
-        cv = c["cv"]
-        if cv.constant_value is not None:
+        if branch.kind != "switch":
             continue
-        if cv.source != "local_from_global" and cv.source != "global":
+        control = _selector_control(branch, controls.values())
+        if control is None or control.constant_value is not None:
             continue
-        cols.append((name, cv, sorted(c["values"])))
-    return cols
+        values = {case.value for case in branch.cases
+                  if not case.is_default and case.value is not None}
+        if values:
+            add(control, values)
+            add(control, {max(values) + 1})
+            typed_domain = _domain(control.type_info)
+            if typed_domain is not None:
+                add(control, {_minimum(typed_domain), _maximum(typed_domain)})
+
+    return candidates
+
+
+def settable_columns(ir: FunctionIR, candidates: dict) -> list:
+    """Return only externally controllable parameter/global columns."""
+    columns = []
+    for param in ir.params:
+        entry = candidates.get(param.name)
+        columns.append((
+            param.name,
+            entry["cv"] if entry else None,
+            sorted(entry["values"]) if entry else [0],
+        ))
+    for name, entry in candidates.items():
+        control = entry["cv"]
+        if control.constant_value is not None:
+            continue
+        if control.source not in {"local_from_global", "global"}:
+            continue
+        columns.append((name, control, sorted(entry["values"])))
+    return columns
 
 
 def enumerate_rows(ir: FunctionIR, threshold: int = PAIRWISE_THRESHOLD):
-    """全组合枚举；超过阈值降 pairwise（v0 记 TODO 备注，先笛卡尔）。"""
-    cand = control_candidates(ir)
-    cols = settable_columns(ir, cand)
-    sizes = [len(v) for _, _, v in cols]
+    """Enumerate the Cartesian product; pairwise reduction remains explicit TODO."""
+    candidates = control_candidates(ir)
+    columns = settable_columns(ir, candidates)
     total = 1
-    for s in sizes:
-        total *= s
+    for _, _, values in columns:
+        total *= len(values)
     if total > threshold:
-        ir.notes.append(f"组合数 {total} 超过阈值 {threshold}，应降 pairwise（v0 未实现，仍全量）")
-    keys = [name for name, _, _ in cols]
-    rows = [dict(zip(keys, combo))
-            for combo in product(*(values for _, _, values in cols))]
-    return cols, rows
+        ir.notes.append(
+            f"组合数 {total} 超过阈值 {threshold}，应降 pairwise（未实现，仍全量）"
+        )
+    keys = [name for name, _, _ in columns]
+    rows = [
+        dict(zip(keys, values))
+        for values in product(*(values for _, _, values in columns))
+    ]
+    return columns, rows

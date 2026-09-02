@@ -18,12 +18,15 @@
 #include "llvm/Support/MemoryBuffer.h"
 #include "llvm/Support/Path.h"
 #include "llvm/Support/raw_ostream.h"
+#include "passes/contract_validation.h"
+#include "passes/type_facts.h"
 
 #include <algorithm>
 #include <cctype>
 #include <cstdint>
 #include <map>
 #include <memory>
+#include <limits>
 #include <optional>
 #include <set>
 #include <sstream>
@@ -37,7 +40,7 @@ using namespace clang;
 
 namespace {
 
-constexpr llvm::StringLiteral ExtractorVersion = "0.2.6";
+constexpr llvm::StringLiteral ExtractorVersion = "0.3.0";
 constexpr llvm::StringLiteral ExtractorName = "ut-clang-extract";
 
 llvm::cl::opt<std::string> ContextPath(
@@ -87,6 +90,7 @@ struct FunctionPointerParameterFact {
   std::string Type;
   bool IsPointer = false;
   bool IsConst = false;
+  llvm::json::Object TypeInfo;
 };
 
 struct FunctionPointerTargetFact {
@@ -294,7 +298,10 @@ llvm::json::Object provenance(const SourceManager &SM, SourceRange Range,
 
 llvm::json::Object emptyExtensions() { return llvm::json::Object{}; }
 
-llvm::json::Object parameter(const ParmVarDecl *Param) {
+using ut_agent::extractor::typeInfo;
+
+llvm::json::Object parameter(const ParmVarDecl *Param,
+                             const ASTContext *Context = nullptr) {
   QualType Type = Param->getType();
   bool IsPointer = Type->isPointerType();
   bool IsConst = Type.isConstQualified();
@@ -306,6 +313,10 @@ llvm::json::Object parameter(const ParmVarDecl *Param) {
       {"is_ptr", IsPointer},
       {"is_const", IsConst},
       {"is_written", false},
+      {"type_info", typeInfo(Type, Context)},
+      {"access_paths", llvm::json::Array{}},
+      {"write_effects", llvm::json::Array{}},
+      {"write_status", "unknown"},
       {"extensions", emptyExtensions()}};
 }
 
@@ -743,6 +754,7 @@ class FunctionBodyVisitor final
     std::string Value;
     std::optional<int64_t> ConstantValue;
     std::vector<std::pair<std::string, bool>> Guards;
+    int64_t Order = 0;
   };
 
   struct ReturnEffect {
@@ -751,6 +763,7 @@ class FunctionBodyVisitor final
     int64_t SourceOffset = -1;
     std::optional<ValueOrigin> Origin;
     std::vector<std::pair<std::string, bool>> Guards;
+    int64_t Order = 0;
   };
 
   struct LocalValueEffect {
@@ -760,6 +773,7 @@ class FunctionBodyVisitor final
     std::string Path;
     std::string Operation = "=";
     std::vector<std::pair<std::string, bool>> Guards;
+    int64_t Order = 0;
   };
 
   struct GlobalWriteEffect {
@@ -769,6 +783,7 @@ class FunctionBodyVisitor final
     std::optional<ValueOrigin> Origin;
     int64_t SourceOffset = -1;
     std::vector<std::pair<std::string, bool>> Guards;
+    int64_t Order = 0;
   };
 
 public:
@@ -797,7 +812,7 @@ public:
   llvm::json::Array parameters() const {
     llvm::json::Array Result;
     for (const ParmVarDecl *Param : Decl->parameters()) {
-      llvm::json::Object Value = parameter(Param);
+      llvm::json::Object Value = parameter(Param, &Context);
       Value["is_written"] = WrittenParams.count(Param) != 0;
       llvm::json::Array Accesses;
       auto It = ParameterAccesses.find(Param);
@@ -810,11 +825,10 @@ public:
               {"offset", static_cast<int64_t>(Access.Offset)}});
         }
       }
-      llvm::json::Object Extensions{
-          {"access_paths", std::move(Accesses)}};
+      Value["access_paths"] = std::move(Accesses);
+      llvm::json::Array Writes;
       auto Effects = ParamWriteEffects.find(Param);
       if (Effects != ParamWriteEffects.end()) {
-        llvm::json::Array Writes;
         for (const ParamWriteEffect &Effect : Effects->second) {
           llvm::json::Array Guards;
           for (const auto &Guard : Effect.Guards)
@@ -826,11 +840,20 @@ public:
               {"constant_value", Effect.ConstantValue
                                     ? llvm::json::Value(*Effect.ConstantValue)
                                     : llvm::json::Value(nullptr)},
-              {"guards", std::move(Guards)}});
+              {"source_offset", static_cast<int64_t>(-1)},
+              {"order", Effect.Order},
+              {"guards", std::move(Guards)},
+              {"origin", llvm::json::Value(nullptr)},
+              {"name", llvm::json::Value(nullptr)},
+              {"operator", "="}});
         }
-        Extensions["write_effects"] = std::move(Writes);
       }
-      Value["extensions"] = std::move(Extensions);
+      Value["write_effects"] = std::move(Writes);
+      Value["write_status"] = Param->getType()->isPointerType()
+                                   ? (ParamWriteEffects.count(Param) != 0
+                                          ? llvm::json::Value("known")
+                                          : llvm::json::Value("unknown"))
+                                   : llvm::json::Value("unknown");
       Result.push_back(llvm::json::Value(std::move(Value)));
     }
     return Result;
@@ -843,6 +866,31 @@ public:
     llvm::json::Array Result;
     for (const std::string &Value : Values)
       Result.push_back(jsonText(Value));
+    return Result;
+  }
+
+  llvm::json::Array parameterWriteEffects() const {
+    llvm::json::Array Result;
+    for (const auto &Entry : ParamWriteEffects) {
+      for (const ParamWriteEffect &Effect : Entry.second) {
+        llvm::json::Array Guards;
+        for (const auto &Guard : Effect.Guards)
+          Guards.push_back(llvm::json::Object{
+              {"bid", Guard.first}, {"then", Guard.second}});
+        Result.push_back(llvm::json::Object{
+            {"name", jsonText(Entry.first->getNameAsString())},
+            {"path", jsonText(Effect.Path)},
+            {"value", jsonText(Effect.Value)},
+            {"constant_value", Effect.ConstantValue
+                                  ? llvm::json::Value(*Effect.ConstantValue)
+                                  : llvm::json::Value(nullptr)},
+            {"source_offset", static_cast<int64_t>(-1)},
+            {"order", Effect.Order},
+            {"guards", std::move(Guards)},
+            {"origin", llvm::json::Value(nullptr)},
+            {"operator", "="}});
+      }
+    }
     return Result;
   }
 
@@ -867,8 +915,10 @@ public:
     if (Value.CallOffset >= 0) {
       Result["call_offset"] = Value.CallOffset;
       const int64_t Order = callOrder(Value.CallOffset);
-      if (Order >= 0)
+      if (Order >= 0) {
         Result["call_order"] = Order;
+        Result["call_id"] = "call_" + std::to_string(Order);
+      }
     }
     if (!Value.Base.empty())
       Result["base"] = jsonText(Value.Base);
@@ -891,11 +941,12 @@ public:
         Result.push_back(llvm::json::Object{
             {"name", jsonText(Name)},
             {"path", jsonText(Effect.Path)},
-            {"expression", jsonText(Effect.Origin.Expression)},
+            {"value", jsonText(Effect.Origin.Expression)},
             {"constant_value", Effect.ConstantValue
                                   ? llvm::json::Value(*Effect.ConstantValue)
                                   : llvm::json::Value(nullptr)},
             {"source_offset", Effect.SourceOffset},
+            {"order", Effect.Order},
             {"operator", jsonText(Effect.Operation)},
             {"guards", std::move(Guards)},
             {"origin", origin(Effect.Origin)}});
@@ -917,6 +968,7 @@ public:
                                 ? llvm::json::Value(*Effect.ConstantValue)
                                 : llvm::json::Value(nullptr)},
           {"source_offset", Effect.SourceOffset},
+          {"order", Effect.Order},
           {"guards", std::move(Guards)},
           {"origin", Effect.Origin ? llvm::json::Value(origin(*Effect.Origin))
                                     : llvm::json::Value(nullptr)}});
@@ -938,6 +990,7 @@ public:
                                 ? llvm::json::Value(*Effect.ConstantValue)
                                 : llvm::json::Value(nullptr)},
           {"source_offset", Effect.SourceOffset},
+          {"order", Effect.Order},
           {"guards", std::move(Guards)},
           {"origin", Effect.Origin ? llvm::json::Value(origin(*Effect.Origin))
                                     : llvm::json::Value(nullptr)}});
@@ -973,6 +1026,7 @@ public:
       llvm::json::Array BranchIds;
       for (const std::string &BranchId : Fact.BranchIds)
         BranchIds.push_back(BranchId);
+      llvm::json::Value ValueOriginValue(nullptr);
       llvm::json::Object Extensions{
           {"canonical_var", jsonText(Fact.CanonicalVar)}};
       if (Fact.Origin) {
@@ -995,7 +1049,7 @@ public:
           Origin["index"] = jsonText(Fact.Origin->Index);
         if (!Fact.Origin->Field.empty())
           Origin["field"] = jsonText(Fact.Origin->Field);
-        Extensions["value_origin"] = std::move(Origin);
+        ValueOriginValue = std::move(Origin);
       }
       Result.push_back(llvm::json::Object{
           {"name", jsonText(Fact.Name)},
@@ -1008,6 +1062,8 @@ public:
           {"constant_value", llvm::json::Value(nullptr)},
           {"constant_reason", llvm::json::Value(nullptr)},
           {"branch_ids", std::move(BranchIds)},
+          {"type_info", typeInfo(Fact.Variable->getType(), &Context)},
+          {"value_origin", std::move(ValueOriginValue)},
           {"provenance", provenance(SM, Fact.Range, Fact.ASTKind,
                                      &LangOpts)},
           {"extensions", std::move(Extensions)}});
@@ -1089,14 +1145,14 @@ public:
           {"source_file", jsonText(Fact.SourceFile)},
           {"array_sizes", std::move(ArraySizes)},
           {"field_paths", std::move(FieldPaths)},
+          {"field_accesses", std::move(FieldAccesses)},
+          {"read_line", static_cast<int64_t>(Fact.ReadLine)},
+          {"read_offset", static_cast<int64_t>(Fact.ReadOffset)},
+          {"write_line", static_cast<int64_t>(Fact.WriteLine)},
+          {"write_offset", static_cast<int64_t>(Fact.WriteOffset)},
           {"provenance", provenance(SM, Fact.Range, "DeclRefExpr",
                                      &LangOpts)},
-          {"extensions", llvm::json::Object{
-              {"field_accesses", std::move(FieldAccesses)},
-              {"read_line", static_cast<int64_t>(Fact.ReadLine)},
-              {"read_offset", static_cast<int64_t>(Fact.ReadOffset)},
-              {"write_line", static_cast<int64_t>(Fact.WriteLine)},
-              {"write_offset", static_cast<int64_t>(Fact.WriteOffset)}}}});
+          {"extensions", emptyExtensions()}});
     }
     return Result;
   }
@@ -1513,6 +1569,12 @@ private:
                           : text(Left->getSourceRange(), true)},
         {"var_type", Variable ? llvm::json::Value(Type) : llvm::json::Value(nullptr)},
         {"op", Op},
+        {"right", Boundary ? llvm::json::Value(nullptr)
+                            : llvm::json::Value(
+                                  Right && referencedVar(Right)
+                                      ? accessPath(Right, Context)
+                                      : (Right ? text(Right->getSourceRange(), true)
+                                               : std::string()))},
         {"boundary", Boundary ? llvm::json::Value(*Boundary)
                                 : llvm::json::Value(nullptr)},
         {"boundary_name", llvm::json::Value(nullptr)},
@@ -1522,13 +1584,15 @@ private:
         {"cond_text_expanded", prettyText(Comparison, LangOpts)},
         {"type_spelling", Variable ? llvm::json::Value(Type)
                                      : llvm::json::Value(nullptr)},
-        {"canonical_type", Variable ? llvm::json::Value(
+          {"canonical_type", Variable ? llvm::json::Value(
                                             jsonText(Variable->getType()
                                                          .getCanonicalType()
                                                          .getAsString()))
                                      : llvm::json::Value(nullptr)},
-        {"qualifiers", std::move(QualifierArray)},
-        {"provenance", provenance(SM, Comparison->getSourceRange(),
+          {"qualifiers", std::move(QualifierArray)},
+          {"type_info", typeInfo(Variable ? Variable->getType() : QualType(),
+                                  &Context)},
+          {"provenance", provenance(SM, Comparison->getSourceRange(),
                                    "BinaryOperator", &LangOpts)},
         {"extensions", std::move(Extensions)}};
     if (BoundaryExpr) {
@@ -1693,7 +1757,7 @@ private:
     LocalValueEffects[Variable].push_back(LocalValueEffect{
         *Origin, Constant, Origin->SourceOffset, std::move(Path),
         std::move(Operation),
-        std::move(Guards)});
+        std::move(Guards), NextEffectOrder++});
     LocalOrigins[Variable].push_back(std::move(*Origin));
   }
 
@@ -1720,7 +1784,7 @@ private:
         SM.getExpansionLoc(Call->getExprLoc())));
     LocalValueEffects[Variable].push_back(LocalValueEffect{
         Origin, std::nullopt, Origin.SourceOffset, "", "=",
-        activeGuards(Call)});
+        activeGuards(Call), NextEffectOrder++});
     LocalOrigins[Variable].push_back(std::move(Origin));
   }
 
@@ -1843,7 +1907,7 @@ private:
       return;
     ParamWriteEffects[Parameter].push_back(ParamWriteEffect{
         Path, text(Rhs->getSourceRange(), true), constantInteger(Rhs, Context),
-        activeGuards(Lhs)});
+        activeGuards(Lhs), NextEffectOrder++});
   }
 
   void recordGlobalWriteEffect(const Expr *Lhs, const Expr *Rhs,
@@ -1865,6 +1929,7 @@ private:
     Effect.Guards = activeGuards(Operator);
     if (Effect.Guards.empty())
       Effect.Guards = activeGuards(Lhs);
+    Effect.Order = NextEffectOrder++;
     GlobalWriteEffects.push_back(std::move(Effect));
   }
 
@@ -2087,6 +2152,14 @@ private:
     if (!Expression)
       return llvm::json::Object{{"kind", "unknown"}};
     Expression = Expression->IgnoreParenImpCasts();
+    if (const auto *Unary = dyn_cast<UnaryOperator>(Expression)) {
+      if (Unary->getOpcode() == UO_LNot) {
+        return llvm::json::Object{
+            {"kind", "not"},
+            {"child", conditionTree(Unary->getSubExpr(), AtomIndex)},
+        };
+      }
+    }
     if (const auto *Binary = dyn_cast<BinaryOperator>(Expression)) {
       if (Binary->isLogicalOp()) {
         llvm::json::Array Children;
@@ -2147,6 +2220,7 @@ private:
           {"label", "default"},
           {"value", llvm::json::Value(nullptr)},
           {"is_default", isa<DefaultStmt>(Case)},
+          {"value_proof", llvm::json::Value(nullptr)},
           {"provenance", provenance(SM, Case->getSourceRange(),
                                      isa<DefaultStmt>(Case) ? "DefaultStmt"
                                                             : "CaseStmt",
@@ -2156,6 +2230,8 @@ private:
         Value["label"] = text(CaseStmtNode->getLHS()->getSourceRange(), true);
         if (auto Integer = constantInteger(CaseStmtNode->getLHS(), Context))
           Value["value"] = *Integer;
+        if (Value.getInteger("value"))
+          Value["value_proof"] = "Clang constant evaluation";
       }
       Values.push_back(CaseValue{SM.getSpellingLineNumber(Loc), std::move(Value)});
     }
@@ -2199,9 +2275,19 @@ private:
             Logical->getOpcode()));
     }
     llvm::json::Object Extensions = emptyExtensions();
+    llvm::json::Value ConditionTree(nullptr);
     if (Condition) {
       size_t AtomIndex = 0;
-      Extensions["condition_tree"] = conditionTree(Condition, AtomIndex);
+      ConditionTree = conditionTree(Condition, AtomIndex);
+    }
+    llvm::json::Value Selector(nullptr);
+    if (Kind == "switch" && Condition) {
+      if (const auto Origin = expressionOrigin(Condition))
+        Selector = origin(*Origin);
+      else
+        Selector = llvm::json::Object{
+            {"kind", "selector"},
+            {"expression", variableText(Condition)}};
     }
     llvm::json::Object Branch{
         {"bid", Bid},
@@ -2227,6 +2313,8 @@ private:
                                       : llvm::json::Value(nullptr)},
         {"parent_bid", Parent ? llvm::json::Value(*Parent)
                                : llvm::json::Value(nullptr)},
+        {"condition_tree", std::move(ConditionTree)},
+        {"selector", std::move(Selector)},
         {"provenance", provenance(SM, Statement->getSourceRange(), Kind,
                                    &LangOpts)},
         {"extensions", std::move(Extensions)}};
@@ -2280,8 +2368,11 @@ public:
     if (Callee.empty())
       Callee = "<indirect>";
     llvm::json::Array ArgTypes;
+    llvm::json::Array ArgTypeInfos;
     for (const Expr *Arg : Call->arguments())
       ArgTypes.push_back(jsonText(Arg->getType().getAsString()));
+    for (const Expr *Arg : Call->arguments())
+      ArgTypeInfos.push_back(typeInfo(Arg->getType(), &Context));
     llvm::json::Array Params;
     if (Direct) {
       const FunctionDecl *Definition = Direct->getDefinition();
@@ -2289,14 +2380,13 @@ public:
         Definition = Direct;
       for (unsigned Index = 0; Index < Direct->parameters().size(); ++Index) {
         const ParmVarDecl *Param = Direct->parameters()[Index];
-        llvm::json::Object ParamValue = parameter(Param);
+        llvm::json::Object ParamValue = parameter(Param, &Context);
         if (Param->getType()->isPointerType() && Definition->getBody()) {
           const ParmVarDecl *DefinitionParam = Definition->getParamDecl(Index);
           const bool Written = DefinitionParam &&
               parameterIsWritten(DefinitionParam, Definition->getBody());
           ParamValue["is_written"] = Written;
-          ParamValue["extensions"] = llvm::json::Object{
-              {"write_status", "known"}};
+          ParamValue["write_status"] = "known";
         }
         Params.push_back(std::move(ParamValue));
       }
@@ -2417,8 +2507,15 @@ public:
           Extensions["param_fields"] = std::move(ParamFields);
       }
     }
+    auto takeExtension = [&Extensions](llvm::StringRef Key,
+                                       llvm::json::Value Default) {
+      if (llvm::json::Value *Value = Extensions.get(Key))
+        return std::move(*Value);
+      return Default;
+    };
     llvm::json::Object Value{
         {"order", static_cast<int64_t>(Calls.size())},
+        {"call_id", "call_" + std::to_string(Calls.size())},
         {"callee", Callee},
         // A macro-generated callee (for example an Rte wrapper) has a
         // spelling location in its declaration/header.  The renderer needs
@@ -2433,8 +2530,33 @@ public:
         {"table_base", std::move(TableBase)},
         {"table_member", std::move(TableMember)},
         {"arg_types", std::move(ArgTypes)},
+        {"arg_type_infos", std::move(ArgTypeInfos)},
         {"params", std::move(Params)},
         {"ret_type", jsonText(Call->getType().getAsString())},
+        {"callee_kind", Direct
+                            ? ((DirectName.find("orread_reg") != std::string::npos ||
+                                DirectName.find("orwrite_reg") != std::string::npos)
+                                   ? "memory_helper"
+                                   : "direct")
+                            : "indirect"},
+        {"max_occurrences", takeExtension(
+                                 "call_capacity", llvm::json::Value(static_cast<int64_t>(1)))},
+        {"return_used", takeExtension("return_used", llvm::json::Value(false))},
+        {"pointer_arguments", takeExtension(
+                                   "pointer_arguments", llvm::json::Value(
+                                       llvm::json::Object{}))},
+        {"caller_param_fields", takeExtension(
+                                      "caller_param_fields", llvm::json::Value(
+                                          llvm::json::Object{}))},
+        {"caller_param_output", takeExtension(
+                                      "caller_param_output", llvm::json::Value(
+                                          llvm::json::Object{}))},
+        {"param_fields", takeExtension("param_fields", llvm::json::Value(
+                                             llvm::json::Object{}))},
+        {"return_fields", takeExtension("return_fields", llvm::json::Value(
+                                              llvm::json::Array{}))},
+        {"guards", takeExtension("guards", llvm::json::Value(
+                                      llvm::json::Array{}))},
         {"provenance", provenance(SM, Call->getSourceRange(), "CallExpr",
                                    &LangOpts)},
         {"extensions", std::move(Extensions)}};
@@ -2466,6 +2588,7 @@ public:
           SM.getExpansionLoc(Expression->getBeginLoc())));
     }
     Effect.Guards = activeGuards(Statement);
+    Effect.Order = NextEffectOrder++;
     ReturnEffects.push_back(std::move(Effect));
     return true;
   }
@@ -2619,6 +2742,7 @@ public:
         {"line", static_cast<int64_t>(Source.getSpellingLineNumber(Begin))},
         {"line_end", static_cast<int64_t>(Source.getSpellingLineNumber(Decl->getEndLoc()))},
         {"ret_type", jsonText(Decl->getReturnType().getAsString())},
+        {"is_static", Decl->getStorageClass() == SC_Static},
         {"params", parameters()},
         {"globals_used", globalsUsed()},
         {"locals", locals()},
@@ -2628,6 +2752,11 @@ public:
         {"notes", llvm::json::Array{}},
         {"enums", enums()},
         {"global_writes", globalWrites()},
+        {"parameter_write_effects", parameterWriteEffects()},
+        {"global_write_effects", globalWriteEffects()},
+        {"local_value_effects", localValueEffects()},
+        {"return_effects", returnEffects()},
+        {"global_objects", globalObjects()},
         {"control_vars", controlVariables()},
         {"config_ptrs", llvm::json::Array{}},
         {"memory_vars", memoryVariables()},
@@ -2635,12 +2764,7 @@ public:
         {"provenance", provenance(Source, Decl->getSourceRange(), "FunctionDecl")},
         {"diagnostics", diagnostics()},
         {"extensions", llvm::json::Object{
-            {"is_static_function", Decl->getStorageClass() == SC_Static},
-            {"local_origins", localOrigins()},
-            {"local_value_effects", localValueEffects()},
-            {"return_effects", returnEffects()},
-            {"global_write_effects", globalWriteEffects()},
-            {"global_objects", globalObjects()}}}};
+            {"local_origins", localOrigins()}}}};
     return Function;
   }
 
@@ -2875,6 +2999,7 @@ private:
   std::map<std::pair<std::string, int64_t>, MemoryFact> Memories;
   std::vector<llvm::json::Value> Diagnostics;
   bool HasUnsupported = false;
+  int64_t NextEffectOrder = 0;
 };
 
 class FunctionVisitor final
@@ -3002,7 +3127,8 @@ private:
           IsConst = IsConst || ParamType->getPointeeType().isConstQualified();
         Fact.Params.push_back(FunctionPointerParameterFact{
             Param->getNameAsString(), ParamType.getAsString(),
-            ParamType->isPointerType(), IsConst});
+            ParamType->isPointerType(), IsConst,
+            typeInfo(ParamType, &Context)});
       }
       const std::string Key = normalizeIndexedPath(Path);
       auto &Targets = State.FunctionPointerTargets[Key];
@@ -3413,11 +3539,8 @@ std::optional<bool> evaluateGuard(const llvm::json::Object &Guard,
 std::optional<int64_t> guardedCallCapacity(
     const llvm::json::Object &Call,
     const std::map<std::string, int64_t> &Initializers) {
-  const llvm::json::Object *Extensions = Call.getObject("extensions");
-  if (!Extensions)
-    return std::nullopt;
-  const auto Capacity = Extensions->getInteger("call_capacity");
-  const llvm::json::Array *Guards = Extensions->getArray("guards");
+  const auto Capacity = Call.getInteger("max_occurrences");
+  const llvm::json::Array *Guards = Call.getArray("guards");
   if (!Capacity || !Guards || Guards->empty() || *Capacity <= 0)
     return std::nullopt;
 
@@ -3464,8 +3587,7 @@ void applyGuardedCallCapacities(llvm::json::Object &Function,
     if (const auto Capacity = guardedCallCapacity(*Call,
                                                   State.GlobalInitializers))
       if (*Capacity > 0)
-        if (auto *Extensions = Call->getObject("extensions"))
-          (*Extensions)["call_capacity"] = *Capacity;
+        (*Call)["max_occurrences"] = *Capacity;
   }
 }
 
@@ -3615,9 +3737,7 @@ void applyDerivedControlFacts(llvm::json::Object &Function,
     llvm::json::Object *Control = Raw.getAsObject();
     if (!Control)
       continue;
-    llvm::json::Object *Extensions = Control->getObject("extensions");
-    llvm::json::Object *Origin =
-        Extensions ? Extensions->getObject("value_origin") : nullptr;
+    llvm::json::Object *Origin = Control->getObject("value_origin");
     if (!Origin)
       continue;
     auto Kind = Origin->getString("kind");
@@ -3680,18 +3800,16 @@ void applyDerivedControlFacts(llvm::json::Object &Function,
     if (!Values.empty())
       (*Origin)["table_values"] = std::move(Values);
   };
-  if (auto *FunctionExtensions = Function.getObject("extensions")) {
-    for (llvm::StringRef Key : {"local_value_effects", "global_write_effects",
-                                "return_effects"}) {
-      auto *Effects = FunctionExtensions->getArray(Key);
-      if (!Effects)
+  for (llvm::StringRef Key : {"local_value_effects", "global_write_effects",
+                              "return_effects"}) {
+    auto *Effects = Function.getArray(Key);
+    if (!Effects)
+      continue;
+    for (llvm::json::Value &Raw : *Effects) {
+      auto *Effect = Raw.getAsObject();
+      if (!Effect)
         continue;
-      for (llvm::json::Value &Raw : *Effects) {
-        auto *Effect = Raw.getAsObject();
-        if (!Effect)
-          continue;
-        annotateOrigin(Effect->getObject("origin"));
-      }
+      annotateOrigin(Effect->getObject("origin"));
     }
   }
 }
@@ -3787,6 +3905,7 @@ void applyFunctionPointerTargets(llvm::json::Object &Function,
     const FunctionPointerTargetFact &Target = It->second.front();
     (*Call)["callee"] = jsonText(Target.Name);
     (*Call)["ptr_call"] = false;
+    (*Call)["callee_kind"] = "direct";
     (*Call)["is_static"] = false;
     (*Call)["ret_type"] = jsonText(Target.ReturnType);
     llvm::json::Array Params;
@@ -3797,6 +3916,10 @@ void applyFunctionPointerTargets(llvm::json::Object &Function,
           {"is_ptr", Param.IsPointer},
           {"is_const", Param.IsConst},
           {"is_written", false},
+          {"type_info", llvm::json::Object(Param.TypeInfo)},
+          {"access_paths", llvm::json::Array{}},
+          {"write_effects", llvm::json::Array{}},
+          {"write_status", "unknown"},
           {"extensions", emptyExtensions()}});
     }
     (*Call)["params"] = std::move(Params);
@@ -3818,25 +3941,22 @@ void applyFunctionPointerTargets(llvm::json::Object &Function,
           CallOffset = Spelling->getInteger("offset");
       }
       if (CallOffset) {
-        if (llvm::json::Object *FunctionExtensions =
-                Function.getObject("extensions")) {
-          if (llvm::json::Array *Effects =
-                  FunctionExtensions->getArray("local_value_effects")) {
-            for (llvm::json::Value &RawEffect : *Effects) {
-              llvm::json::Object *Effect = RawEffect.getAsObject();
-              if (!Effect)
-                continue;
-              llvm::json::Object *Origin = Effect->getObject("origin");
-              if (!Origin)
-                continue;
-              const auto Kind = Origin->getString("kind");
-              const auto OriginCallOffset = Origin->getInteger("call_offset");
-              if (!Kind || *Kind != "indirect_param" ||
-                  !OriginCallOffset || *OriginCallOffset != *CallOffset)
-                continue;
-              (*Origin)["kind"] = "stub_param";
-              (*Origin)["callee"] = jsonText(Target.Name);
-            }
+        if (llvm::json::Array *Effects =
+                Function.getArray("local_value_effects")) {
+          for (llvm::json::Value &RawEffect : *Effects) {
+            llvm::json::Object *Effect = RawEffect.getAsObject();
+            if (!Effect)
+              continue;
+            llvm::json::Object *Origin = Effect->getObject("origin");
+            if (!Origin)
+              continue;
+            const auto Kind = Origin->getString("kind");
+            const auto OriginCallOffset = Origin->getInteger("call_offset");
+            if (!Kind || *Kind != "indirect_param" ||
+                !OriginCallOffset || *OriginCallOffset != *CallOffset)
+              continue;
+            (*Origin)["kind"] = "stub_param";
+            (*Origin)["callee"] = jsonText(Target.Name);
           }
         }
       }
@@ -3861,6 +3981,8 @@ void applyFunctionPointerTargets(llvm::json::Object &Function,
     }
   }
 }
+
+using ut_agent::extractor::missingTypedField;
 
 std::string documentStatus(const RunState &State) {
   if (FunctionName.empty() && State.TargetFiles.empty())
@@ -3944,11 +4066,8 @@ llvm::json::Object makeDocument(const CompileContext &Context,
           const auto Callee = Call->getString("callee");
           if (!Callee || *Callee != Definition.Name)
             continue;
-          llvm::json::Object *Extensions = Call->getObject("extensions");
-          if (!Extensions)
-            continue;
           if (!Definition.ParamFields.empty() &&
-              !Extensions->get("param_fields")) {
+              !Call->get("param_fields")) {
             llvm::json::Object ParamFields;
             for (const auto &Entry : Definition.ParamFields) {
               llvm::json::Array Fields;
@@ -3956,14 +4075,14 @@ llvm::json::Object makeDocument(const CompileContext &Context,
                 Fields.push_back(jsonText(Field));
               ParamFields[std::to_string(Entry.first)] = std::move(Fields);
             }
-            (*Extensions)["param_fields"] = std::move(ParamFields);
+            (*Call)["param_fields"] = std::move(ParamFields);
           }
           if (!Definition.ReturnFields.empty() &&
-              !Extensions->get("return_fields")) {
+              !Call->get("return_fields")) {
             llvm::json::Array Fields;
             for (const std::string &Field : Definition.ReturnFields)
               Fields.push_back(jsonText(Field));
-            (*Extensions)["return_fields"] = std::move(Fields);
+            (*Call)["return_fields"] = std::move(Fields);
           }
         }
       }
@@ -3972,6 +4091,13 @@ llvm::json::Object makeDocument(const CompileContext &Context,
     applyGlobalInitializers(Function, State);
     applyDerivedControlFacts(Function, State);
     applyBranchNesting(Function);
+    if (const std::string Missing = missingTypedField(Function);
+        !Missing.empty()) {
+      addIssue(State, "FUNCTIONIR_CONTRACT_MISSING", "error",
+               (std::string("function ") + Fact.Name +
+                " is missing typed field: " + Missing).c_str());
+      Function["status"] = "UNSUPPORTED";
+    }
     if (const auto Status = Function.getString("status"))
       Fact.Value["status"] = Status->str();
     Functions.push_back(llvm::json::Value(std::move(Function)));
@@ -3986,7 +4112,7 @@ llvm::json::Object makeDocument(const CompileContext &Context,
   const std::string Status = documentStatus(State);
   llvm::json::Object CompileContextValue = Context.Raw;
   return llvm::json::Object{
-      {"schema_version", 2},
+      {"schema_version", 3},
       {"extractor", llvm::json::Object{{"name", ExtractorName.str()},
                                         {"version", ExtractorVersion.str()},
                                         {"clang_version", CLANG_VERSION_STRING}}},

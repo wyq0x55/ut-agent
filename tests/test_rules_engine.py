@@ -7,27 +7,33 @@ import pytest
 
 from conftest import ROOT
 from ut_agent import cli
-from ut_agent.ir import Atom, Branch, CallSite, ControlVar, FunctionIR, Param
+from ut_agent.ir import Atom, Branch, CallSite, ControlVar, FunctionIR, Param, TypeInfo
 from ut_agent.rules import (
     NEEDS_REVIEW, UNSUPPORTED, VALIDATED, Rule, RulePack, evaluate_atom,
     approve_rule_pack, generate_intents, infer_rule_pack, load_rule_pack,
     review_rule_pack,
 )
-from ut_agent.rules.infer import _bind_expression_columns, _stub_call_column_match
 from ut_agent.winams.csv_render import render_intents_csv
 from ut_agent.parser import ClangExtractor, default_clang_extractor, make_compile_context
 from ut_agent.cases.boundary import control_candidates
 
 
 def _branch_ir(*, ret_type: str = "void") -> FunctionIR:
+    type_info = TypeInfo(
+        canonical_type="uint8", kind="integer", bit_width=8, signed=False,
+        min_value=0, max_value=255,
+    )
     return FunctionIR(
         name="target", file="target.c", line=1, ret_type=ret_type,
-        params=[Param("value", "uint8")],
+        params=[Param("value", "uint8", type_info=type_info)],
         branches=[Branch(
             bid="B01", kind="if", line=2, cond_text="value == 1",
-            atoms=[Atom("value", "uint8", "==", 1, None, "value == 1")],
+            atoms=[Atom("value", "uint8", "==", 1, None, "value == 1",
+                        type_info=type_info)],
         )],
-        control_vars=[ControlVar("value", "value", "param", var_type="uint8")],
+        control_vars=[ControlVar(
+            "value", "value", "param", var_type="uint8", type_info=type_info,
+        )],
     )
 
 
@@ -36,8 +42,8 @@ def test_expression_evaluator_supports_comparison_and_bitmask():
         Atom("value", "uint8", "==", 1, None, "value == 1"), {"value": 1}
     )
     masked = Atom(
-        "flags & 0x30", "uint32", "!=", 0, None,
-        "0 != (flags & 0x30)",
+        "flags", "uint32", "!=", 0, None,
+        "0 != (flags & 0x30)", mask=0x30,
     )
     assert evaluate_atom(masked, {"flags": 0x30})
     assert not evaluate_atom(masked, {"flags": 0})
@@ -121,16 +127,37 @@ def test_pointer_guard_does_not_empty_generic_solver_domain():
 def test_generic_stub_slots_are_materialized_for_rendering():
     ir = FunctionIR(
         name="stub_target", file="target.c", line=1, ret_type="void",
-        params=[Param("value", "uint8")],
+        params=[Param("value", "uint8", type_info=TypeInfo(
+            canonical_type="uint8", kind="integer", bit_width=8,
+            signed=False, min_value=0, max_value=255,
+        ))],
         branches=[Branch(
             bid="B01", kind="if", line=2, cond_text="value == 1",
-            atoms=[Atom("value", "uint8", "==", 1, None, "value == 1")],
+            atoms=[Atom("value", "uint8", "==", 1, None, "value == 1",
+                        type_info=TypeInfo(
+                            canonical_type="uint8", kind="integer", bit_width=8,
+                            signed=False, min_value=0, max_value=255,
+                        ))],
         )],
-        control_vars=[ControlVar("value", "value", "param", var_type="uint8")],
+        control_vars=[ControlVar(
+            "value", "value", "param", var_type="uint8", type_info=TypeInfo(
+                canonical_type="uint8", kind="integer", bit_width=8,
+                signed=False, min_value=0, max_value=255,
+            ),
+        )],
         calls=[CallSite(
             order=0, callee="stub_api", line=3,
-            params=[Param("data", "uint8 *", is_ptr=True), Param("size", "uint8")],
-            ret_type="uint8", extensions={"call_capacity": 2, "return_used": True},
+            params=[
+                Param("data", "uint8 *", is_ptr=True, type_info=TypeInfo(
+                    canonical_type="uint8 *", kind="pointer", pointer_depth=1,
+                    pointee_type="uint8",
+                )),
+                Param("size", "uint8", type_info=TypeInfo(
+                    canonical_type="uint8", kind="integer", bit_width=8,
+                    signed=False, min_value=0, max_value=255,
+                )),
+            ],
+            ret_type="uint8", max_occurrences=2, return_used=True,
         )],
     )
     result = generate_intents(ir)
@@ -149,6 +176,11 @@ def test_embedded_unsigned_alias_uses_unsigned_domain():
     ir = _branch_ir()
     ir.params[0].type = "u1"
     ir.control_vars[0].var_type = "u1"
+    ir.params[0].type_info = TypeInfo(
+        canonical_type="u1", kind="integer", bit_width=8, signed=False,
+        min_value=0, max_value=255,
+    )
+    ir.control_vars[0].type_info = ir.params[0].type_info
     values = control_candidates(ir)["value"]["values"]
     assert min(values) == 0
     assert max(values) == 255
@@ -331,7 +363,7 @@ def test_rules_collect_cli_batches_samples_with_explicit_include_dirs(tmp_path):
     assert report["candidate_pack"]["samples_are_evidence_only"] is True
 
 
-def test_inference_discovers_local_bitmask_binding(tmp_path):
+def test_inference_does_not_guess_local_bitmask_binding(tmp_path):
     golden = tmp_path / "mask.csv"
     golden.write_bytes(
         ('mod,"target","target",1,0,,,,CPP,,,"",0\r\n'
@@ -349,8 +381,8 @@ def test_inference_discovers_local_bitmask_binding(tmp_path):
         )],
     )
     action = infer_rule_pack(ir, golden)["rules"][0]["action"]
-    assert action["bindings"] == {"local": "U4L_REG"}
-    assert action["scenarios"][0]["inputs"]["local"] == 0x30
+    assert action["bindings"] == {}
+    assert "local" not in action["scenarios"][0]["inputs"]
 
 
 def test_inference_keeps_mcdc_combination_labels_under_current_branch(tmp_path):
@@ -372,7 +404,7 @@ def test_inference_keeps_mcdc_combination_labels_under_current_branch(tmp_path):
 def test_evaluate_atom_supports_source_bound_variable_comparison():
     atom = Atom(
         "cfg[ id ].limit", "uint8", ">", None, None,
-        "cfg[ id ].limit > count[ id ]",
+        "cfg[ id ].limit > count[ id ]", right="count[id]",
     )
     assert evaluate_atom(atom, {
         "cfg[id].limit": 3,
@@ -419,7 +451,7 @@ def test_inference_preserves_switch_case_semantics(tmp_path):
     assert [item["branch_index"] for item in scenarios] == [0, 0, 0, 1]
 
 
-def test_inference_binds_array_expression_to_indexed_winams_column(tmp_path):
+def test_inference_does_not_bind_source_expression_to_golden_column(tmp_path):
     source = tmp_path / "target.c"
     source.write_text("#define IDX 3\n", encoding="utf-8")
     ir = FunctionIR(
@@ -430,21 +462,15 @@ def test_inference_binds_array_expression_to_indexed_winams_column(tmp_path):
                         "state[ IDX ] == 1")],
         )],
     )
-    scenarios = [{"inputs": {"mod/state[3]": 1}}]
-    bindings = _bind_expression_columns(ir, ["mod/state[3]"], scenarios)
-    assert bindings == {"state[ IDX ]": "mod/state[3]"}
-    assert scenarios[0]["inputs"]["state[ IDX ]"] == 1
-
-
-def test_stub_call_binding_strips_winams_cdd_prefix_without_prefix_collision():
-    assert _stub_call_column_match(
-        "Rte_Call_sbcic_req_slp_req_slp",
-        "AMSTB_Rte_Call_CDD_sbcic_req_slp_req_slp@CALLCNT_Rte_Call_CDD_sbcic_req_slp_req_slp",
+    golden = tmp_path / "target.csv"
+    golden.write_bytes(
+        ('mod,"target","target",1,0,,,,CPP,,,"",0\r\n'
+         '#COMMENT,"mod/state[3]"\r\n'
+         ';$L$,state[IDX] == 1\r\n'
+         ';$L$,TRUE\r\n,1\r\n').encode("cp932")
     )
-    assert not _stub_call_column_match(
-        "Rte_Call_sbcic_req_slp_req_slp",
-        "AMSTB_Rte_Call_CDD_sbcic_req_oslp_req_oslp@CALLCNT_Rte_Call_CDD_sbcic_req_oslp_req_oslp",
-    )
+    action = infer_rule_pack(ir, golden)["rules"][0]["action"]
+    assert action["bindings"] == {}
 
 
 def test_clang_recovers_macro_condition_and_mask_from_source_line(tmp_path):

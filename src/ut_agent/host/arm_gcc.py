@@ -167,19 +167,6 @@ def _include_flags(include_dirs: Sequence[Path | str], defines: dict[str, str]) 
     return flags
 
 
-def _winams_stub_symbols(sources: Sequence[Path]) -> tuple[str, ...]:
-    """保留交给 WinAMS 接管的 AMSTB 符号，避免 --gc-sections 丢掉它们。"""
-    names: set[str] = set()
-    pattern = re.compile(r"\b(AMSTB_[A-Za-z_][A-Za-z0-9_]*)\s*\(")
-    for source in sources:
-        try:
-            text = source.read_text(encoding="utf-8", errors="replace")
-        except OSError:
-            continue
-        names.update(pattern.findall(text))
-    return tuple(sorted(names))
-
-
 def build_object(source: Path, output: Path, config: ArmGccConfig,
                  include_dirs: Sequence[Path | str] = (),
                  defines: dict[str, str] | None = None) -> Path:
@@ -210,8 +197,6 @@ def build_elf(sources: Sequence[Path], output: Path, config: ArmGccConfig,
     args = _common_flags(config) + ["-nostdlib", "-Wl,--gc-sections"]
     if entry:
         args.append(f"-Wl,-e,{entry}")
-    for symbol in _winams_stub_symbols(sources):
-        args.append(f"-Wl,--undefined={symbol}")
     if allow_unresolved:
         args.append("-Wl,--unresolved-symbols=ignore-all")
     args += [str(item) for item in objects] + ["-o", str(output)]

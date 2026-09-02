@@ -1,277 +1,97 @@
 """确定性测试意图生成、约束求值和验证门禁。"""
 from __future__ import annotations
 
+from dataclasses import asdict
 from itertools import product
 from pathlib import Path
-import re
 from typing import Any
 
-from ut_agent.cases.boundary import control_candidates, domain_of
-from ut_agent.ir import Atom, Branch, FunctionIR, selected_global_writes
+from ut_agent.cases.boundary import control_candidates
+from ut_agent.ir import Atom, Branch, FunctionIR, TypeInfo
 from ut_agent.rules.model import (
     Constraint, GenerationResult, NEEDS_REVIEW, RuleTrace, TestIntent,
     TestObligation, UNSUPPORTED, VALIDATED, ValidationResult,
 )
 from ut_agent.rules.pack import BUILTIN_PACK, Rule, RulePack
-
-
-_BITMASK = re.compile(
-    r"(?P<var>[A-Za-z_]\w*)\s*&\s*(?:\([^)]*\))*\s*(?P<mask>0[xX][0-9A-Fa-f]+|\d+)[uUlL]*"
+from ut_agent.winams.projection import (
+    call_count_key,
+    qualified_stub_key,
+    global_input_columns as _global_input_columns,
+    global_object_base as _global_object_base,
+    global_output_columns as _global_output_columns,
+    stub_param_keys,
+    stub_return_keys,
+    stub_param_fields as _stub_param_fields,
+    stub_return_fields as _stub_return_fields,
+    is_stub_return_key,
+    stub_capacity as _stub_capacity,
+    visible_stub_calls as _stub_calls,
+    stub_columns as _stub_input_columns,
+    pointer_address,
 )
-_MEMORY_HELPER = re.compile(
-    r".*(?:read|orwrite|andwrite|xorwrite|write).*?reg(?:8|16|32|64)$",
-    re.IGNORECASE,
-)
 
 
-def _stub_calls(ir: FunctionIR) -> list:
-    """Return the first source occurrence for each visible stub callee."""
-    calls = []
-    seen: set[str] = set()
-    for call in sorted(ir.calls, key=lambda item: item.order):
-        callee = (call.callee or "").strip()
-        if (not callee or callee in seen
-                or _MEMORY_HELPER.fullmatch(callee) or call.ptr_call):
-            continue
-        seen.add(callee)
-        calls.append(call)
-    return calls
+def _is_memory_helper(call) -> bool:
+    return call.callee_kind == "memory_helper"
 
 
-def _stub_capacity(ir: FunctionIR, call) -> int:
-    """Mirror the renderer's deterministic visible-slot calculation."""
-    if getattr(call, "via_macro", None):
-        return 1
-    occurrences = [
-        item for item in ir.calls
-        if (item.callee or "").strip() == (call.callee or "").strip()
-        and not _MEMORY_HELPER.fullmatch(item.callee or "")
-        and not item.ptr_call
-    ]
-    total = 0
-    for item in occurrences:
-        try:
-            total += max(1, int((item.extensions or {}).get("call_capacity", 1)))
-        except (TypeError, ValueError):
-            total += 1
-    return max(1, total)
+def _global_records(ir: FunctionIR) -> list[dict[str, Any]]:
+    return [asdict(item) for item in ir.global_objects]
 
 
-def _stub_param_fields(call, index: int) -> list[str]:
-    """Read the same caller-side field metadata used by CSV rendering."""
-    extensions = getattr(call, "extensions", {}) or {}
-    metadata = extensions.get(
-        "caller_param_fields", extensions.get("param_fields")
-    )
-    raw = None
-    if isinstance(metadata, dict):
-        raw = metadata.get(str(index), metadata.get(index))
-    elif isinstance(metadata, list):
-        if metadata and all(isinstance(item, str) for item in metadata):
-            raw = metadata if index == 0 else None
-        elif index < len(metadata):
-            raw = metadata[index]
-    if not isinstance(raw, (list, tuple)):
-        return []
-    return [str(item).lstrip(".") for item in raw if str(item).lstrip(".")]
+def _origin_record(origin: Any) -> dict[str, Any] | None:
+    if origin is None:
+        return None
+    if isinstance(origin, dict):
+        return origin
+    return asdict(origin)
 
 
-def _stub_return_fields(call) -> list[str]:
-    extensions = getattr(call, "extensions", {}) or {}
-    raw = extensions.get("return_fields", ())
-    if not isinstance(raw, (list, tuple)):
-        return []
-    return [str(item).lstrip(".") for item in raw if str(item).lstrip(".")]
+def _effect_records(effects: list[Any]) -> list[dict[str, Any]]:
+    return [asdict(item) if not isinstance(item, dict) else item for item in effects]
 
 
-def _stub_input_columns(ir: FunctionIR) -> tuple[list[str], list[str]]:
-    """Return exact WinAMS stub input and observable argument columns.
+def _split_access_path(path: str) -> tuple[str, list[str], str | None] | None:
+    """Split an extractor-proven object path for projection lookup.
 
-    Generic synthesis has no reference CSV to copy values from, but a
-    validated row still has to contain every column promised by ``#COMMENT``.
-    Keeping this small column model in the engine prevents the renderer from
-    becoming an implicit source of testcase data and preserves the
-    first-callee/call-capacity ordering contract.
+    This is a structural path projection, not a C-expression parser.  The
+    extractor has already identified the object, indexes, and member path;
+    malformed paths are left unresolved for review.
     """
-    param_columns: list[str] = []
-    return_columns: list[str] = []
-    for call in _stub_calls(ir):
-        capacity = _stub_capacity(ir, call)
-        extensions = getattr(call, "extensions", {}) or {}
-        for index, param in enumerate(call.params):
-            slot_name = (
-                f"PTROUT{index:02d}_{call.callee}"
-                if param.is_ptr else f"ARG{index:02d}_{call.callee}"
-            )
-            fields = _stub_param_fields(call, index) if param.is_ptr else []
-            names = (
-                [f"{slot_name}[{slot}].{field}"
-                 for field in fields for slot in range(capacity)]
-                if fields else
-                [f"{slot_name}[{slot}]" for slot in range(capacity)]
-            )
-            qualified = [f"{call.callee}@{name}" for name in names]
-            param_columns.extend(qualified)
-            # The generic AST path treats a non-Rte stub argument as an
-            # observable write-back slot.  Rte_Read receive objects are local
-            # implementation state and remain input-only, matching the CSV
-            # renderer's output-column rule.
-            callee = str(call.callee or "")
-            if not (callee.startswith("Rte_Read_") or (
-                callee.startswith("pal_") and "_get_" in callee
-            )):
-                pointer_arguments = extensions.get("pointer_arguments", {})
-                is_pal_set = callee.startswith("pal_") and "_set_" in callee
-                info = pointer_arguments.get(str(index), {}) \
-                    if isinstance(pointer_arguments, dict) else {}
-                if is_pal_set and param.is_ptr and isinstance(info, dict) \
-                        and info.get("is_address") and not info.get("is_null"):
-                    # WinAMS exposes a PAL setter's address-passed byte as a
-                    # second index (PTROUT[call][0]); this is distinct from
-                    # the stub input slot PTROUT[call].
-                    return_columns.extend(f"{column}[0]" for column in qualified)
-                else:
-                    return_columns.extend(qualified)
-        return_used = extensions.get(
-            "return_used", call.ret_type not in ("", "void")
-        )
-        if return_used:
-            fields = _stub_return_fields(call)
-            if fields:
-                return_columns.extend(
-                    f"{call.callee}@AMIN_return[{slot}].{field}"
-                    for field in fields for slot in range(capacity)
-                )
-            else:
-                return_columns.extend(
-                    f"{call.callee}@AMIN_return[{slot}]"
-                    for slot in range(capacity)
-                )
-    return param_columns, return_columns
-
-
-def _global_input_columns(ir: FunctionIR) -> list[str]:
-    """Expand AST global-object facts into exact WinAMS input spellings."""
-    columns: list[str] = []
-    objects = (ir.extensions or {}).get("global_objects", [])
-    if not isinstance(objects, list):
-        return columns
-    for obj in objects:
-        if not isinstance(obj, dict) or not obj.get("name"):
-            continue
-        if not (obj.get("read") or obj.get("write")):
-            continue
-        # Non-volatile const configuration is compile-time state, not a
-        # controllable WinAMS variable.
-        if obj.get("is_const") and not obj.get("is_volatile"):
-            continue
-        source_file = str(obj.get("source_file") or Path(ir.file).name)
-        prefix = (
-            "" if Path(source_file).suffix.lower() in {".h", ".hh", ".hpp", ".hxx"}
-            else f"{Path(source_file).name}/"
-        )
-        base = f"{prefix}{obj['name']}"
-        field_paths = [
-            str(item).lstrip(".") for item in obj.get("field_paths", ())
-            if str(item).lstrip(".")
-        ]
-        sizes: list[int] = []
-        for raw_size in obj.get("array_sizes", ()):
-            try:
-                sizes.append(max(0, int(raw_size)))
-            except (TypeError, ValueError):
-                sizes = []
-                break
-        indexes = list(product(*(range(size) for size in sizes))) if sizes else [()]
-        for index in indexes:
-            indexed = base + "".join(f"[{item}]" for item in index)
-            if field_paths:
-                columns.extend(
-                    f"{indexed}.{field}" for field in field_paths
-                )
-            else:
-                columns.append(indexed)
-    return columns
-
-
-def _global_object_base(ir: FunctionIR, obj: dict[str, Any]) -> str:
-    source_file = str(obj.get("source_file") or Path(ir.file).name)
-    suffix = Path(source_file).suffix.lower()
-    prefix = "" if suffix in {".h", ".hh", ".hpp", ".hxx"} \
-        else f"{Path(source_file).name}/"
-    if obj.get("is_const") and obj.get("is_volatile"):
-        prefix = ""
-    return f"{prefix}{obj['name']}"
-
-
-def _global_output_columns(ir: FunctionIR) -> list[str]:
-    """Expand only AST-proven global write columns like the CSV renderer."""
-    columns: list[str] = []
-    objects = (ir.extensions or {}).get("global_objects", [])
-    if not isinstance(objects, list):
-        return columns
-    for obj in objects:
-        if not isinstance(obj, dict) or not obj.get("name") or not obj.get("write"):
-            continue
-        if obj.get("is_const") and not obj.get("is_volatile"):
-            continue
-        base = _global_object_base(ir, obj)
-        field_paths = [
-            str(item).lstrip(".") for item in obj.get("field_paths", ())
-            if str(item).lstrip(".")
-        ]
-        raw_accesses = (obj.get("extensions") or {}).get("field_accesses", [])
-        accesses = {
-            str(item.get("path", "")).lstrip("."): (
-                bool(item.get("read")), bool(item.get("write"))
-            )
-            for item in raw_accesses if isinstance(item, dict)
-            and item.get("path")
-        } if isinstance(raw_accesses, list) else {}
-        if field_paths and accesses:
-            field_paths = [
-                path for path in field_paths
-                if any(
-                    (read or write)
-                    and (path == access or path.startswith(access + ".")
-                         or access.startswith(path + "."))
-                    for access, (read, write) in accesses.items()
-                )
-            ]
-        sizes: list[int] = []
-        for raw_size in obj.get("array_sizes", ()):
-            try:
-                sizes.append(max(0, int(raw_size)))
-            except (TypeError, ValueError):
-                sizes = []
-                break
-        indexes = list(product(*(range(size) for size in sizes))) if sizes else [()]
-        if any(size == 0 for size in sizes):
-            continue
-        if field_paths:
-            columns.extend(
-                f"{base}{''.join(f'[{item}]' for item in index)}.{field}"
-                for field in field_paths for index in indexes
-            )
-        else:
-            columns.extend(
-                f"{base}{''.join(f'[{item}]' for item in index)}"
-                for index in indexes
-            )
-    return columns
+    text = _norm(path)
+    if not text:
+        return None
+    cursor = 0
+    while cursor < len(text) and text[cursor] not in "[.":
+        cursor += 1
+    name = text[:cursor]
+    if not name:
+        return None
+    indexes: list[str] = []
+    while cursor < len(text) and text[cursor] == "[":
+        close = text.find("]", cursor + 1)
+        if close <= cursor + 1:
+            return None
+        indexes.append(text[cursor + 1:close])
+        cursor = close + 1
+    field: str | None = None
+    if cursor < len(text):
+        if text[cursor] != "." or cursor + 1 >= len(text):
+            return None
+        field = text[cursor + 1:]
+        if any(char in "[]" for char in field):
+            return None
+    return name, indexes, field
 
 
 def _global_effect_column(ir: FunctionIR, effect: dict[str, Any],
                           env: dict[str, Any]) -> str | None:
     path = _norm(str(effect.get("path", "")))
-    match = re.fullmatch(
-        r"([A-Za-z_]\w*)((?:\[[^\]]+\])*)(?:\.([A-Za-z_]\w*(?:\.[A-Za-z_]\w*)*))?",
-        path,
-    )
-    if match is None:
+    parts = _split_access_path(path)
+    if parts is None:
         return None
-    name, indexes_text, field = match.groups()
-    objects = (ir.extensions or {}).get("global_objects", [])
+    name, index_expressions, field = parts
+    objects = _global_records(ir)
     obj = next(
         (item for item in objects if isinstance(item, dict)
          and str(item.get("name")) == name), None,
@@ -279,7 +99,7 @@ def _global_effect_column(ir: FunctionIR, effect: dict[str, Any],
     if obj is None:
         return None
     indexes: list[int] = []
-    for expression in re.findall(r"\[([^\]]+)\]", indexes_text):
+    for expression in index_expressions:
         try:
             value = _lookup(env, expression)
         except KeyError:
@@ -307,9 +127,6 @@ def _global_effect_value(ir: FunctionIR, effect: dict[str, Any],
     try:
         return _lookup(env, expression)
     except KeyError:
-        value = _integer_expression_value(expression, env)
-        if value is not None:
-            return value
         origin = effect.get("origin")
         if not isinstance(origin, dict):
             return None
@@ -328,148 +145,6 @@ def _global_effect_value(ir: FunctionIR, effect: dict[str, Any],
     return None
 
 
-def _integer_expression_value(expression: str,
-                              env: dict[str, Any]) -> int | None:
-    """Evaluate a small, AST-proven integer expression without ``eval``.
-
-    Clang emits compound global writes such as ``value[index] & 0xdf`` as a
-    single RHS expression.  The expression is still deterministic, but it is
-    not a direct environment key.  Keep the evaluator deliberately narrow:
-    C integer casts, literals, source variable paths, parentheses and the
-    ordinary bitwise/arithmetic operators are supported; unknown syntax stays
-    unresolved and therefore remains reviewable.
-    """
-    text = str(expression or "").strip()
-    if not text:
-        return None
-    cast = re.compile(
-        r"\(\s*(?:const\s+|volatile\s+|unsigned\s+|signed\s+)*"
-        r"(?:u\d+|s\d+|b\d+|f\d+|d\d+|"
-        r"uint\d*_t|int\d*_t|char|short|int|long|void)\s*\)"
-    )
-    previous = None
-    while text != previous:
-        previous = text
-        text = cast.sub("", text)
-    text = re.sub(r"(?<=\d)[uUlL]+\b", "", text)
-    def normalize_index(match: re.Match[str]) -> str:
-        index = _norm(match.group(1))
-        while index.startswith("(") and index.endswith(")"):
-            index = index[1:-1]
-        return f"[{index}]"
-    text = re.sub(r"\[([^\]]+)\]", normalize_index, text)
-    token_re = re.compile(
-        r"\s*(?:(0[xX][0-9A-Fa-f]+|[0-9]+)|"
-        r"([A-Za-z_]\w*(?:\[[^\]]+\])?(?:\.|->)[A-Za-z_]\w*|"
-        r"[A-Za-z_]\w*(?:\[[^\]]+\])?)|"
-        r"(<<|>>|[|^&+\-*/%~()]))"
-    )
-    tokens: list[tuple[str, str]] = []
-    offset = 0
-    while offset < len(text):
-        match = token_re.match(text, offset)
-        if match is None:
-            return None
-        number, identifier, operator = match.groups()
-        if number is not None:
-            tokens.append(("number", number))
-        elif identifier is not None:
-            tokens.append(("identifier", _norm(identifier)))
-        else:
-            tokens.append(("operator", operator))
-        offset = match.end()
-    if not tokens:
-        return None
-
-    precedence = {
-        "|": 1, "^": 2, "&": 3, "<<": 4, ">>": 4,
-        "+": 5, "-": 5, "*": 6, "/": 6, "%": 6,
-    }
-    position = 0
-
-    def primary() -> int | None:
-        nonlocal position
-        if position >= len(tokens):
-            return None
-        kind, value = tokens[position]
-        if kind == "operator" and value in {"+", "-", "~"}:
-            position += 1
-            operand = primary()
-            if operand is None:
-                return None
-            if value == "+":
-                return operand
-            if value == "-":
-                return -operand
-            return ~operand
-        if kind == "operator" and value == "(":
-            position += 1
-            result = parse_expression(0)
-            if (position >= len(tokens)
-                    or tokens[position] != ("operator", ")")):
-                return None
-            position += 1
-            return result
-        if kind == "number":
-            position += 1
-            try:
-                return int(value, 0)
-            except ValueError:
-                return None
-        if kind == "identifier":
-            position += 1
-            try:
-                resolved = _lookup(env, value)
-            except KeyError:
-                return None
-            return resolved if isinstance(resolved, int) else None
-        return None
-
-    def parse_expression(minimum: int) -> int | None:
-        nonlocal position
-        left = primary()
-        if left is None:
-            return None
-        while position < len(tokens):
-            kind, operator = tokens[position]
-            if kind != "operator" or operator not in precedence:
-                break
-            level = precedence[operator]
-            if level < minimum:
-                break
-            position += 1
-            right = parse_expression(level + 1)
-            if right is None:
-                return None
-            try:
-                if operator == "|":
-                    left |= right
-                elif operator == "^":
-                    left ^= right
-                elif operator == "&":
-                    left &= right
-                elif operator == "<<":
-                    left <<= right
-                elif operator == ">>":
-                    left >>= right
-                elif operator == "+":
-                    left += right
-                elif operator == "-":
-                    left -= right
-                elif operator == "*":
-                    left *= right
-                elif operator == "/":
-                    left = int(left / right)
-                elif operator == "%":
-                    left %= right
-            except (ArithmeticError, TypeError, ValueError):
-                return None
-        return left
-
-    result = parse_expression(0)
-    return result if position == len(tokens) else None
-
-
 def _global_output_values(ir: FunctionIR, selected: dict[str, Any]) -> dict[str, Any] | None:
     columns = _global_output_columns(ir)
     if not columns:
@@ -481,9 +156,7 @@ def _global_output_values(ir: FunctionIR, selected: dict[str, Any]) -> dict[str,
             expected[column] = _lookup(selected, column)
         except KeyError:
             expected[column] = 0
-    raw_effects = (ir.extensions or {}).get("global_write_effects", [])
-    if not isinstance(raw_effects, list):
-        return None
+    raw_effects = _effect_records(ir.global_write_effects)
     touched: set[str] = set()
     unknown: set[str] = set()
     for effect in raw_effects:
@@ -497,7 +170,7 @@ def _global_output_values(ir: FunctionIR, selected: dict[str, Any]) -> dict[str,
         # Do not let an alias in the testcase environment collapse a
         # whole-record automatic-local copy into a scalar.  The extractor
         # emits leaf effects for the local record; those leaves are the only
-        # precise values for the expanded WinAMS columns.
+        # precise values for the expanded target columns.
         has_leaf_columns = bool(
             column and any(key.startswith(column + ".") for key in expected)
         )
@@ -511,9 +184,9 @@ def _global_output_values(ir: FunctionIR, selected: dict[str, Any]) -> dict[str,
         if column and isinstance(origin, dict) \
                 and origin.get("kind") == "stub_return":
             # A structured return is assigned to a global/union member as a
-            # single C expression, but WinAMS observes the returned record as
-            # separate leaf columns.  Resolve those leaves from the exact
-            # AMIN return slot instead of treating the aggregate as the
+            # single C expression, but the target adapter observes the returned
+            # record as separate leaf columns.  Resolve those leaves from the
+            # exact return slot instead of treating the aggregate as the
             # scalar value of the return slot.  The scalar slot is populated
             # with zero by generic input synthesis, so checking ``value is
             # None`` here would silently bypass the structured mapping.
@@ -551,20 +224,16 @@ def _global_output_values(ir: FunctionIR, selected: dict[str, Any]) -> dict[str,
             # leaf expressions, so replay them onto every statically sized
             # array element selected by the loop index.
             targets: list[tuple[str, dict[str, Any]]] = [(column, env)]
-            path_match = re.fullmatch(
-                r"[A-Za-z_]\w*\[([^\]]+)\].*",
-                _norm(str(effect.get("path", ""))),
-            )
-            if path_match:
-                index_expression = path_match.group(1)
+            path_parts = _split_access_path(str(effect.get("path", "")))
+            if path_parts and path_parts[1]:
+                index_expression = path_parts[1][0]
                 try:
                     index_value = int(index_expression, 0)
                 except ValueError:
                     index_value = None
                 if index_value is None:
                     obj = next(
-                        (item for item in (ir.extensions or {}).get(
-                            "global_objects", [])
+                        (item for item in _global_records(ir)
                          if isinstance(item, dict)
                          and str(item.get("name")) == root),
                         None,
@@ -619,7 +288,7 @@ def _global_output_values(ir: FunctionIR, selected: dict[str, Any]) -> dict[str,
         touched.add(root)
     if not raw_effects and any(
         isinstance(obj, dict) and obj.get("write")
-        for obj in (ir.extensions or {}).get("global_objects", [])
+        for obj in _global_records(ir)
     ):
         return None
     for name in touched:
@@ -634,18 +303,17 @@ def _global_output_values(ir: FunctionIR, selected: dict[str, Any]) -> dict[str,
             if tail == name or tail.startswith(name + "[") or tail.startswith(name + "."):
                 expected.pop(column, None)
         expected.pop(name, None)
-    objects = (ir.extensions or {}).get("global_objects", [])
-    if isinstance(objects, list):
-        for obj in objects:
-            if isinstance(obj, dict) and obj.get("write") and obj.get("name"):
-                # Validation uses the semantic object name for completeness;
-                # rendering consumes the fully expanded field columns above.
-                expected.setdefault(str(obj["name"]), 0)
+    objects = _global_records(ir)
+    for obj in objects:
+        if obj.get("write") and obj.get("name"):
+            # Validation uses the semantic object name for completeness;
+            # rendering consumes the fully expanded field columns above.
+            expected.setdefault(str(obj["name"]), 0)
     return expected
 
 
 def _norm(value: str) -> str:
-    return re.sub(r"\s+", "", value or "")
+    return "".join(str(value or "").split())
 
 
 def _lookup(env: dict[str, Any], name: str) -> Any:
@@ -659,7 +327,7 @@ def _lookup(env: dict[str, Any], name: str) -> Any:
 
 
 def _expanded_env(values: dict[str, Any]) -> dict[str, Any]:
-    """给 WinAMS 全限定列名建立只读语义别名。"""
+    """建立全限定目标列名的只读语义别名。"""
     env = dict(values)
     for key, value in values.items():
         compact = _norm(key)
@@ -678,7 +346,7 @@ def _control_env(values: dict[str, Any], ir: FunctionIR) -> dict[str, Any]:
     The C++ extractor records when an automatic control is produced by a
     const-table lookup or a stub return.  Those automatic names are semantic
     aliases only; the actual testcase value remains the parameter/table index
-    or the WinAMS ``AMIN_return`` column.
+    or the target adapter's return column.
     """
     env = _expanded_env(values)
     for control in ir.control_vars:
@@ -686,8 +354,8 @@ def _control_env(values: dict[str, Any], ir: FunctionIR) -> dict[str, Any]:
         try:
             value = _lookup(env, control.name)
         except KeyError:
-            origin = control.extensions.get("value_origin", {})
-            if isinstance(origin, dict):
+            origin = _origin_record(control.value_origin)
+            if origin is not None:
                 kind = origin.get("kind")
                 if kind == "stub_return":
                     callee = str(origin.get("callee", ""))
@@ -705,15 +373,9 @@ def _control_env(values: dict[str, Any], ir: FunctionIR) -> dict[str, Any]:
                         # still bound to its source callee here.
                         slot = _stub_return_slot(
                             ir, callee, order,
-                            control.extensions.get("value_origin", {}).get(
-                                "call_offset"
-                            ),
+                            origin.get("call_offset"),
                         )
-                        aliases.append(
-                            f"AMSTB_SrcFile.c/AMSTB_{callee}@AMIN_return[{slot}]"
-                        )
-                        aliases.append(f"AMSTB_{callee}@AMIN_return[{slot}]")
-                        aliases.append(f"AMIN_return[{slot}]")
+                        aliases.extend(stub_return_keys(callee, slot))
                     for alias in aliases:
                         try:
                             value = _lookup(env, alias)
@@ -738,7 +400,7 @@ def _control_env(values: dict[str, Any], ir: FunctionIR) -> dict[str, Any]:
             else:
                 continue
             if value is None:
-                # Automatic locals are not WinAMS IO.  If Clang recorded the
+                # Automatic locals are not target IO.  If Clang recorded the
                 # local's assignment chain, resolve its value at the control
                 # expression instead of promoting the local to an input.
                 # The source offset prevents a later branch assignment from
@@ -758,27 +420,21 @@ def _control_env(values: dict[str, Any], ir: FunctionIR) -> dict[str, Any]:
                     continue
         env.setdefault(_norm(control.var), value)
         env.setdefault(control.name, value)
-        origin = control.extensions.get("value_origin", {})
-        if isinstance(origin, dict) and origin.get("kind") == "stub_return":
+        origin = _origin_record(control.value_origin)
+        if origin is not None and origin.get("kind") == "stub_return":
             callee = str(origin.get("callee", ""))
             if callee:
                 # The local control candidate is the semantic value selected
-                # by the solver.  Reflect it back to the concrete WinAMS
+                # by the solver.  Reflect it back to the concrete target
                 # return slot; leaving the generic fixed zero here would make
                 # the branch proof correct only through the local alias while
-                # the rendered AMIN_return column contained a different value.
-                origin = control.extensions.get("value_origin", {})
+                # the rendered return column contained a different value.
                 slot = _stub_return_slot(
                     ir, callee, origin.get("call_order"),
                     origin.get("call_offset"),
                 )
-                concrete = (
-                    f"AMSTB_SrcFile.c/AMSTB_{callee}"
-                    f"@AMIN_return[{slot}]"
-                )
-                env[concrete] = value
-                env[f"AMSTB_{callee}@AMIN_return[{slot}]"] = value
-                env[f"AMIN_return[{slot}]"] = value
+                for concrete in stub_return_keys(callee, slot):
+                    env[concrete] = value
     return env
 
 
@@ -793,25 +449,17 @@ def evaluate_atom(atom: Atom, env: dict[str, Any],
         left = _lookup(env, atom.var)
         right = 0
         return bool(left == right) if atom.op == "==" else bool(left != right)
-    match = _BITMASK.search(atom.var) or _BITMASK.search(atom.text)
-    if match:
-        mask = atom.mask if atom.mask is not None else int(match.group("mask"), 0)
-        left = int(_lookup(env, match.group("var"))) & mask
-    elif atom.mask is not None:
-        identifier = re.match(r"[A-Za-z_]\w*", atom.var)
-        if identifier is None:
-            raise ValueError(f"位掩码变量不可解析: {atom.var}")
-        left = int(_lookup(env, identifier.group(0))) & atom.mask
+    if atom.mask is not None:
+        left = int(_lookup(env, atom.var)) & atom.mask
     else:
         left = _lookup(env, atom.var)
     if atom.boundary is None:
         # Source-derived variable-to-variable comparisons (typically a static
         # table field versus an indexed error counter) remain deterministic
-        # when both operands were bound from the same WinAMS scenario.
-        dynamic = re.search(r"(?P<op>==|!=|<=|>=|<|>)\s*(?P<rhs>[^<>=]+?)\s*$", atom.text)
-        if dynamic is None:
+        # when both operands were bound from the same target scenario.
+        rhs = atom.right
+        if not rhs:
             raise ValueError(f"原子条件没有可求值边界: {atom.text}")
-        rhs = dynamic.group("rhs").strip().strip("()")
         # A dynamic comparison may read a state variable updated by a stub
         # call earlier in the function.  When a Golden oracle supplies the
         # post-call value, use it for the RHS while keeping the left/config
@@ -824,7 +472,7 @@ def evaluate_atom(atom: Atom, env: dict[str, Any],
                 right = _lookup(env, rhs)
         else:
             right = _lookup(env, rhs)
-        op = dynamic.group("op")
+        op = atom.op
     else:
         right = atom.boundary
         op = atom.op
@@ -864,6 +512,11 @@ def _evaluate_condition_tree(tree: Any, atoms: list[Atom],
         if tree.get("op") == "||":
             return any(values)
         raise ValueError(f"condition_tree 不支持连接词: {tree.get('op')}")
+    if kind == "not":
+        child = tree.get("child")
+        if not isinstance(child, dict):
+            raise ValueError("condition_tree not 节点没有 child")
+        return not _evaluate_condition_tree(child, atoms, env, post_env)
     raise ValueError(f"condition_tree 不支持节点: {kind}")
 
 
@@ -871,7 +524,7 @@ def evaluate_branch(branch: Branch, env: dict[str, Any],
                     post_env: dict[str, Any] | None = None) -> bool:
     if branch.constant_value is not None:
         return branch.constant_value
-    tree = (branch.extensions or {}).get("condition_tree")
+    tree = branch.condition_tree
     if tree is not None:
         return _evaluate_condition_tree(tree, branch.atoms, env, post_env)
     if not branch.atoms:
@@ -886,36 +539,33 @@ def evaluate_branch(branch: Branch, env: dict[str, Any],
     raise ValueError(f"分支 {branch.bid} 的混合连接词尚不支持")
 
 
-def _type_ok(value: Any, var_type: str | None, enums: dict) -> bool:
-    if not isinstance(value, (int, float)):
-        return True
-    dom = domain_of(var_type, enums)
-    if dom is None:
-        return True
-    if dom[0] == "set":
-        return value in dom[1]
-    return dom[1] <= value <= dom[2]
-
-
 def _required_outputs(ir: FunctionIR) -> list[str]:
     required = []
     if ir.ret_type not in ("", "void"):
         required.append("ret")
     required.extend(param.name for param in ir.params if param.is_ptr and param.is_written)
     required.extend(memory.name for memory in ir.memory_vars if memory.write)
-    required.extend(selected_global_writes(ir))
-    # A dead branch can make ``selected_global_writes`` intentionally empty,
-    # while WinAMS still exposes the AST global object on the output side of
-    # #COMMENT.  Keep validation aligned with the rendered contract so such a
-    # row becomes NEEDS_REVIEW before rendering rather than failing on a
-    # missing oracle.
-    global_objects = (ir.extensions or {}).get("global_objects", [])
-    if isinstance(global_objects, list):
-        required.extend(
-            str(obj["name"]) for obj in global_objects
-            if isinstance(obj, dict) and obj.get("name") and obj.get("write")
-        )
+    required.extend(
+        obj.name for obj in ir.global_objects if obj.name and obj.write
+    )
     return list(dict.fromkeys(required))
+
+
+def _type_ok(value: Any, type_info: TypeInfo | None) -> bool:
+    """Validate against extractor-owned TypeInfo without spelling inference."""
+    if not isinstance(value, (int, float)):
+        return True
+    if type_info is None or type_info.kind == "unknown":
+        return False
+    if type_info.kind == "bool" and value not in {0, 1}:
+        return False
+    if type_info.enum_values and value not in type_info.enum_values.values():
+        return False
+    if type_info.min_value is not None and value < type_info.min_value:
+        return False
+    if type_info.max_value is not None and value > type_info.max_value:
+        return False
+    return True
 
 
 def _has_key(values: dict[str, Any], wanted: str) -> bool:
@@ -933,7 +583,7 @@ def _has_key(values: dict[str, Any], wanted: str) -> bool:
 def _loop_only_local_controls(ir: FunctionIR) -> set[str]:
     """Return local induction variables, not external testcase controls.
 
-    A ``for`` condition is still retained as a branch header for WinAMS, but
+    A ``for`` condition is still retained as a branch header for the target, but
     its iterator is assigned by the function itself.  Treating it as an
     input makes the generic solver fail before it can solve the real global
     or parameter controls in the function.  The fallback atom/branch match
@@ -960,15 +610,15 @@ def _loop_only_local_controls(ir: FunctionIR) -> set[str]:
 def _remap_derived_candidates(ir: FunctionIR, candidates: dict) -> None:
     """Move const-table branch values onto the controllable index.
 
-    A local such as ``table[index].field`` is not a WinAMS column.  When the
+    A local such as ``table[index].field`` is not a target column.  When the
     extractor supplied constant initializer facts, invert the finite table
     relation so the input domain contains ``index`` values instead.
     """
     by_name = {cv.name: cv for cv in ir.control_vars}
     by_var = {_norm(cv.var): cv for cv in ir.control_vars}
     for control in ir.control_vars:
-        origin = control.extensions.get("value_origin", {})
-        if not isinstance(origin, dict) or origin.get("kind") != "const_table_field":
+        origin = _origin_record(control.value_origin)
+        if origin is None or origin.get("kind") != "const_table_field":
             continue
         table_values = origin.get("table_values", {})
         driver_name = str(origin.get("driver", ""))
@@ -1018,10 +668,7 @@ def _write_effect_value(ir: FunctionIR, effect: dict[str, Any],
     try:
         return _lookup(env, expression)
     except KeyError:
-        match = re.fullmatch(r"\(?\s*([A-Za-z_]\w*)\s*\)?", expression)
-        if match:
-            return _local_value(ir, match.group(1), env)
-        return None
+        return _origin_value(ir, effect.get("origin"), env, set())
 
 
 def _guards_active(ir: FunctionIR, guards: Any, env: dict[str, Any]) -> bool | None:
@@ -1047,7 +694,7 @@ def _guards_active(ir: FunctionIR, guards: Any, env: dict[str, Any]) -> bool | N
 
 def _stub_return_slot(ir: FunctionIR, callee: str, call_order: Any,
                       call_offset: Any = None) -> int:
-    """Map a Clang call order/offset to the visible WinAMS return slot."""
+    """Map a Clang call order/offset to the visible target return slot."""
     try:
         target_order = int(call_order)
     except (TypeError, ValueError):
@@ -1099,12 +746,7 @@ def _stub_return_value(ir: FunctionIR, origin: dict[str, Any],
     slot = _stub_return_slot(
         ir, callee, origin.get("call_order"), origin.get("call_offset")
     )
-    candidates = (
-        f"AMSTB_SrcFile.c/AMSTB_{callee}@AMIN_return[{slot}]",
-        f"AMSTB_{callee}@AMIN_return[{slot}]",
-        f"{callee}@AMIN_return[{slot}]",
-        f"AMIN_return[{slot}]",
-    )
+    candidates = stub_return_keys(callee, slot)
     for candidate in candidates:
         try:
             return _lookup(env, candidate)
@@ -1161,12 +803,7 @@ def _stub_param_value(ir: FunctionIR, origin: dict[str, Any],
             break
         if (item.callee or "") == callee:
             slot += _stub_capacity(ir, item)
-    name = f"PTROUT{index:02d}_{callee}[{slot}]"
-    candidates = (
-        f"AMSTB_SrcFile.c/AMSTB_{callee}@{name}",
-        f"AMSTB_{callee}@{name}",
-        f"{callee}@{name}",
-    )
+    candidates = stub_param_keys(callee, index, slot)
     for candidate in candidates:
         try:
             return _lookup(env, candidate)
@@ -1180,7 +817,7 @@ def _stub_return_field_values(ir: FunctionIR, origin: dict[str, Any],
     """Resolve the visible fields of one structured stub return slot.
 
     Clang records a whole-record assignment as one global write effect, while
-    WinAMS exposes the return object field-by-field.  Keep that conversion in
+    The target adapter exposes the return object field-by-field.  Keep that conversion in
     the engine so a proven ``global[local_index].member = stub_return`` write
     can populate the same leaf columns that the renderer emits.
     """
@@ -1205,12 +842,7 @@ def _stub_return_field_values(ir: FunctionIR, origin: dict[str, Any],
     slot = _stub_return_slot(ir, callee, call.order)
     values: dict[str, Any] = {}
     for field in fields:
-        candidates = (
-            f"AMSTB_SrcFile.c/AMSTB_{callee}@AMIN_return[{slot}].{field}",
-            f"AMSTB_{callee}@AMIN_return[{slot}].{field}",
-            f"{callee}@AMIN_return[{slot}].{field}",
-            f"AMIN_return[{slot}].{field}",
-        )
+        candidates = stub_return_keys(callee, slot, field)
         for candidate in candidates:
             try:
                 values[field] = _lookup(env, candidate)
@@ -1221,9 +853,7 @@ def _stub_return_field_values(ir: FunctionIR, origin: dict[str, Any],
 
 
 def _local_value_effects(ir: FunctionIR) -> list[dict[str, Any]]:
-    raw = (ir.extensions or {}).get("local_value_effects", [])
-    return [item for item in raw if isinstance(item, dict)] \
-        if isinstance(raw, list) else []
+    return _effect_records(ir.local_value_effects)
 
 
 def _origin_value(ir: FunctionIR, origin: Any, env: dict[str, Any],
@@ -1291,7 +921,7 @@ def _local_value(ir: FunctionIR, name: str, env: dict[str, Any],
         if active is not True:
             continue
         constant = effect.get("constant_value")
-        expression = str(effect.get("expression", "")).strip()
+        expression = str(effect.get("value", "")).strip()
         if constant is not None:
             value = constant
         else:
@@ -1301,8 +931,6 @@ def _local_value(ir: FunctionIR, name: str, env: dict[str, Any],
                 value = _origin_value(
                     ir, effect.get("origin"), env, set(seen),
                 )
-                if value is None and expression:
-                    value = _integer_expression_value(expression, env)
         if value is None:
             continue
         operation = str(effect.get("operator", "="))
@@ -1371,7 +999,7 @@ def _local_field_value(ir: FunctionIR, name: str, path: str,
         constant = effect.get("constant_value")
         if constant is not None:
             return constant
-        expression = str(effect.get("expression", "")).strip()
+        expression = str(effect.get("value", "")).strip()
         try:
             return _lookup(env, expression)
         except KeyError:
@@ -1383,14 +1011,12 @@ def _local_field_value(ir: FunctionIR, name: str, path: str,
 
 def _return_value(ir: FunctionIR, selected: dict[str, Any]) -> Any | None:
     """Prove the tested-function return for the selected AST path."""
-    raw = (ir.extensions or {}).get("return_effects", [])
-    if not isinstance(raw, list) or not raw:
+    raw = _effect_records(ir.return_effects)
+    if not raw:
         return None
     env = _control_env(selected, ir)
     applicable: list[Any] = []
     for effect in raw:
-        if not isinstance(effect, dict):
-            continue
         if _guards_active(ir, effect.get("guards", []), env) is not True:
             continue
         constant = effect.get("constant_value")
@@ -1403,20 +1029,6 @@ def _return_value(ir: FunctionIR, selected: dict[str, Any]) -> Any | None:
             except KeyError:
                 origin = effect.get("origin")
                 value = _origin_value(ir, origin, env, set())
-                if value is None:
-                    # A return of a local automatic object is only
-                    # controllable through its AST assignment chain.
-                    name_match = re.fullmatch(
-                        r"\(?\s*([A-Za-z_]\w*)\s*\)?", expression
-                    )
-                    if name_match:
-                        try:
-                            offset = int(effect.get("source_offset", -1))
-                        except (TypeError, ValueError):
-                            offset = -1
-                        value = _local_value(
-                            ir, name_match.group(1), env, before_offset=offset,
-                        )
             if value is None:
                 return None
         applicable.append(value)
@@ -1448,9 +1060,8 @@ def _pointer_output_columns(param, effects: list[dict[str, Any]]) -> list[str]:
 def _pointer_output_values(ir: FunctionIR, param,
                            selected: dict[str, Any]) -> dict[str, Any] | None:
     """Prove each caller-visible pointer output path from AST effects."""
-    extensions = param.extensions or {}
-    effects = extensions.get("write_effects", [])
-    if not isinstance(effects, list) or not effects:
+    effects = _effect_records(param.write_effects)
+    if not effects:
         return None
     env = _control_env(selected, ir)
     output_effects = [effect for effect in effects if isinstance(effect, dict)
@@ -1520,9 +1131,7 @@ def _generic_expected(ir: FunctionIR, selected: dict[str, Any]) -> dict[str, Any
         value = _return_value(ir, selected)
         if value is not None:
             expected["ret"] = value
-            static_function = bool(
-                (ir.extensions or {}).get("is_static_function", False)
-            )
+            static_function = ir.is_static
             return_comment = (
                 f"{Path(ir.file).name}/{ir.name}@@"
                 if static_function else f"{ir.name}@@"
@@ -1531,17 +1140,16 @@ def _generic_expected(ir: FunctionIR, selected: dict[str, Any]) -> dict[str, Any
     global_values = _global_output_values(ir, selected)
     if global_values is not None:
         expected.update(global_values)
-    # CALLCNT is emitted as a comparison column on both sides of #COMMENT.
-    # Generic synthesis stores the semantic short name, so materialize the
-    # exact output spelling as well.
+    # Call-count comparison fields are emitted on both sides by the target
+    # adapter.  Materialize their exact adapter spelling as well.
     for call in _stub_calls(ir):
-        name = f"CALLCNT_{call.callee}"
+        name = call_count_key(call.callee)
         try:
             value = _lookup(selected, name)
         except KeyError:
             continue
         expected[name] = value
-        expected[f"AMSTB_SrcFile.c/AMSTB_{call.callee}@{name}"] = value
+        expected[qualified_stub_key(call.callee, name)] = value
     for param in ir.params:
         if not param.is_ptr or not param.is_written:
             continue
@@ -1551,7 +1159,7 @@ def _generic_expected(ir: FunctionIR, selected: dict[str, Any]) -> dict[str, Any
         value = _pointer_output_value(ir, param, selected)
         if value is not None:
             expected[param.name] = value
-            # The renderer uses the exact pointee spelling in #COMMENT while
+            # The renderer uses the exact pointee spelling while
             # the solver traditionally stores the semantic parameter name.
             # Keep both forms so a proven pointer write is renderable for
             # static (``@p[0]``) and external (``*p``) targets.
@@ -1559,17 +1167,16 @@ def _generic_expected(ir: FunctionIR, selected: dict[str, Any]) -> dict[str, Any
             expected[f"{param.name}[0]"] = value
             expected[f"*{param.name}"] = value
 
-    # Stub argument write-back columns are observable WinAMS outputs for the
+    # Stub argument write-back columns are observable target outputs for the
     # ordinary non-Rte helpers.  Their deterministic generic oracle is the
     # selected input slot; callee side effects remain represented separately
     # by AST-proven tested-function pointer/global write effects.
     _, stub_output_columns = _stub_input_columns(ir)
     for column in stub_output_columns:
-        if "@AMIN_return[" in column:
+        if is_stub_return_key(column):
             continue
         try:
-            canonical = f"AMSTB_SrcFile.c/AMSTB_{column}"
-            expected[canonical] = _lookup(selected, canonical)
+            expected[column] = _lookup(selected, column)
         except KeyError:
             # The corresponding exact input key is installed by
             # ``_generic_inputs``.  Keeping this guard explicit makes an
@@ -1592,9 +1199,10 @@ def validate_intent(ir: FunctionIR, intent: TestIntent) -> ValidationResult:
     # stub 调用列属于输入契约，但其调用次数/参数只有场景规则或执行证据
     # 能确定；通用边界求解器不得伪造这些值。
     for call in ir.calls:
-        if _MEMORY_HELPER.fullmatch(call.callee or "") or call.ptr_call:
+        if _is_memory_helper(call) or call.ptr_call:
             continue
-        if not any(f"CALLCNT_{call.callee}" in str(key) for key in intent.inputs):
+        if not any(call_count_key(call.callee) in str(key)
+                   for key in intent.inputs):
             errors.append(f"缺少 stub 调用次数证据: {call.callee}")
     for cv in ir.control_vars:
         if cv.constant_value is not None:
@@ -1613,7 +1221,7 @@ def validate_intent(ir: FunctionIR, intent: TestIntent) -> ValidationResult:
             if cv.source in ("param", "global", "local_from_global", "stub"):
                 errors.append(f"缺少控制变量输入: {cv.name}")
             continue
-        if not _type_ok(value, cv.var_type, ir.enums):
+        if not _type_ok(value, cv.type_info):
             errors.append(f"控制变量越界: {cv.name}={value}")
     checks.append("input-domain")
 
@@ -1686,16 +1294,6 @@ def _find_switch_case(branch: Branch, obligation: TestObligation):
             return case
         if case.is_default and wanted.lower().startswith("default"):
             return case
-        if case.value is not None:
-            literals = re.findall(
-                r"(?<![A-Za-z0-9_])(?:0[xX][0-9A-Fa-f]+|\d+)", wanted,
-            )
-            if any(
-                (int(literal, 16) if literal.lower().startswith("0x")
-                 else int(literal, 10)) == case.value
-                for literal in literals
-            ):
-                return case
     return None
 
 
@@ -1704,17 +1302,17 @@ def _switch_selector_value(branch: Branch, ir: FunctionIR,
     """Resolve a switch selector from the proof environment only.
 
     The selector may be an automatic loop/local variable.  It is still a
-    useful proof value, but it must not become a rendered WinAMS input column.
+    useful proof value, but it must not become a rendered target input column.
     """
-    condition = str(branch.cond_text or "").strip()
-    if condition.startswith("switch(") and condition.endswith(")"):
-        condition = condition[len("switch("):-1].strip()
+    selector = branch.selector
+    if selector is None:
+        raise KeyError(f"switch {branch.bid} 缺少 selector fact")
+    condition = selector.driver or selector.expression
     try:
         return _lookup(env, condition)
     except KeyError:
-        normalized = _norm(condition)
         for control in ir.control_vars:
-            if normalized not in {_norm(control.var), _norm(control.name)}:
+            if condition not in {control.var, control.name}:
                 continue
             return _lookup(env, control.name)
     raise KeyError(condition)
@@ -1757,9 +1355,9 @@ def _scenario_intents(ir: FunctionIR, rule: Rule) -> list[TestIntent]:
         # for missing evidence.  Generic synthesis still requires explicit
         # call-count evidence and is therefore unaffected.
         for call in ir.calls:
-            if (_MEMORY_HELPER.fullmatch(call.callee or "") or call.ptr_call):
+            if (_is_memory_helper(call) or call.ptr_call):
                 continue
-            scenario_inputs.setdefault(f"CALLCNT_{call.callee}", 0)
+            scenario_inputs.setdefault(call_count_key(call.callee), 0)
         intent = TestIntent(
             case_id=str(raw.get("case_id", f"U{index:03d}")),
             obligation=obligation,
@@ -1812,16 +1410,13 @@ def _generic_inputs(ir: FunctionIR) -> tuple[dict[str, list[Any]], dict[str, Any
         # Loop iterators are not testcase inputs, but a switch nested under a
         # loop is exercised by a concrete iteration value.  Keep those values
         # in the proof environment only; the renderer excludes local controls
-        # from the WinAMS input columns.
+        # from the target input columns.
         if (name in allowed or name in loop_locals) and item["values"]
     }
     fixed: dict[str, Any] = {}
     for cv in ir.control_vars:
         if cv.constant_value is not None:
             fixed[cv.name] = cv.constant_value
-    pointer_rule = BUILTIN_PACK.approved(ir.name, "pointer")[0]
-    base = int(pointer_rule.action["base"])
-    stride = int(pointer_rule.action["stride"])
     pointer_index = 0
     for param in ir.params:
         if not param.is_ptr:
@@ -1831,10 +1426,10 @@ def _generic_inputs(ir: FunctionIR) -> tuple[dict[str, list[Any]], dict[str, Any
             # mistake an omitted parameter for an unresolved local.
             fixed.setdefault(param.name, 0)
             continue
-        fixed[param.name] = base + pointer_index * stride
+        fixed[param.name] = pointer_address(pointer_index)
         pointer_index += 1
         # Address columns and dereferenced value columns are distinct
-        # WinAMS variables.  A generic row starts with a deterministic zero
+        # target variables.  A generic row starts with a deterministic zero
         # pointee; AST write effects may replace it in the expected half.
         fixed[f"@{param.name}[0]"] = 0
         fixed[f"{param.name}[0]"] = 0
@@ -1851,18 +1446,18 @@ def _generic_inputs(ir: FunctionIR) -> tuple[dict[str, list[Any]], dict[str, Any
         fixed.setdefault(name, 0)
     known_call_counts: dict[str, int] = {}
     for call in ir.calls:
-        if _MEMORY_HELPER.fullmatch(call.callee or "") or call.ptr_call:
+        if _is_memory_helper(call) or call.ptr_call:
             continue
-        capacity = (call.extensions or {}).get("call_capacity")
-        if isinstance(capacity, int) and capacity >= 0:
+        capacity = call.max_occurrences
+        if isinstance(capacity, int) and capacity >= 1:
             known_call_counts[call.callee] = (
                 known_call_counts.get(call.callee, 0) + capacity
             )
     for callee, count in known_call_counts.items():
-        fixed[f"CALLCNT_{callee}"] = count
+        fixed[call_count_key(callee)] = count
     stub_input_columns, stub_return_columns = _stub_input_columns(ir)
     for column in (*stub_input_columns, *stub_return_columns):
-        fixed[f"AMSTB_SrcFile.c/AMSTB_{column}"] = 0
+        fixed[column] = 0
     return domains, fixed
 
 
@@ -1977,14 +1572,13 @@ def _generic_intents(
                 for rule in semantic_rules
                 if str(rule.match.get("family_id", "")) in family_ids
             )
-        if branch and any(_BITMASK.search(atom.var) or _BITMASK.search(atom.text)
-                          for atom in branch.atoms):
+        if branch and any(atom.mask is not None for atom in branch.atoms):
             trace_items.append(RuleTrace(
                 "builtin.bitmask", "FunctionIR.Atom.text", "bitmask candidate proof"
             ))
         if any(param.is_ptr for param in ir.params):
             trace_items.append(RuleTrace(
-                "builtin.pointer", "WinAMS address contract", "non-overlapping address"
+                "builtin.pointer", "target address contract", "non-overlapping address"
             ))
         intent = TestIntent(
             case_id=f"U{len(intents) + 1:03d}", obligation=obligation,
@@ -2083,7 +1677,7 @@ def _targeted_branch_candidate(ir: FunctionIR,
             raw[key] = values[0]
 
     atoms = list(branch.atoms)
-    tree = (branch.extensions or {}).get("condition_tree")
+    tree = branch.condition_tree
     if tree is not None:
         target_atoms = _condition_target_atoms(tree, outcome)
     else:
@@ -2149,10 +1743,14 @@ def _targeted_generic_candidates(ir: FunctionIR,
     # extractor preserved the condition AST.  Hand-built/legacy IR without
     # that provenance must retain the original UNSUPPORTED gate instead of
     # guessing a flattened multi-atom expression.
-    if not (branch.extensions or {}).get("condition_tree"):
+    if branch.condition_tree is None:
         return
     if obligation.kind == "case":
-        key = _domain_key_for(ir, branch.cond_text, domains)
+        selector = branch.selector
+        selector_expression = (
+            selector.driver or selector.expression if selector is not None else ""
+        )
+        key = _domain_key_for(ir, selector_expression, domains)
         if key is None:
             yield _control_env(raw, ir)
             return
@@ -2258,16 +1856,6 @@ def generate_intents(ir: FunctionIR, pack: RulePack | None = None) -> Generation
     issues = tuple(
         error for item in intents for error in item.validation.errors
     )
-    action = scenario_rules[0].action if scenario_rules else {}
     return GenerationResult(
         ir.name, status, tuple(intents), issues, pack.name,
-        tuple(str(item) for item in action.get("input_columns", [])),
-        tuple(str(item) for item in action.get("output_columns", [])),
-        tuple(str(item) for item in action.get("golden_branch_labels", [])),
-        tuple(
-            tuple(str(label) for label in labels)
-            for labels in action.get("golden_outcome_labels", [])
-        ),
-        tuple(tuple(str(cell) for cell in row)
-              for row in action.get("stub_declarations", [])),
     )

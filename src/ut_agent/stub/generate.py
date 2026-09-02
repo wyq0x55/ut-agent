@@ -10,18 +10,29 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Sequence
 
-from ut_agent.ir import FunctionIR, is_scalar_type
+from ut_agent.ir import FunctionIR, Param, TypeInfo
 
 CALL_MAX_DEFAULT = 16
 
 
-def _base_type(ptr_type: str) -> str:
-    """剥掉一层指针与 const：'const T *' → 'T'；'const T **' → 'T *'（指向物类型）。"""
-    t = " ".join(ptr_type.replace("*", " * ").split())
-    t = " ".join(w for w in t.split() if w != "const")
-    if t.endswith("*"):
-        t = t[:-1].strip()
-    return t or "int"
+def _pointee_type(param: Param) -> str:
+    """Read the extractor-owned pointee spelling for generated C declarations."""
+    if param.type_info is None or not param.type_info.pointee_type:
+        raise ValueError(f"形参 {param.name} 缺少 typed pointee fact")
+    return param.type_info.pointee_type.replace("const ", "").strip()
+
+
+def _is_scalar(type_info: TypeInfo | None) -> bool:
+    return bool(type_info and type_info.is_scalar)
+
+
+def _pointee_is_scalar(type_info: TypeInfo | None) -> bool:
+    return bool(
+        type_info
+        and type_info.kind == "pointer"
+        and type_info.pointee_info
+        and type_info.pointee_info.is_scalar
+    )
 
 
 def table_stub_name(call) -> str:
@@ -67,14 +78,14 @@ def render_spec_stub_c(ir: FunctionIR, call_max: int = CALL_MAX_DEFAULT,
             sig = ", ".join(f"{t} arg{i}" for i, t in enumerate(call.arg_types)) or "void"
             out.append(f"uint32 callcnt{k} = 0;   /* 每用例执行前置 0 */")
             for i, t in enumerate(call.arg_types):
-                if is_scalar_type(t, ir.enums):
+                if i < len(call.arg_type_infos) and _is_scalar(call.arg_type_infos[i]):
                     out.append(f"{t} ARG{k}_arg{i}[CALL_MAX];  /* 入力记录 */")
             out.append(f"static void {name}({sig})   /* 安装至 {call.table_base}"
                        f"{'.' + call.table_member if call.table_member else '[]'} */")
             out.append("{")
             out.append(f"    if (callcnt{k} >= CALL_MAX) return;")
             for i, t in enumerate(call.arg_types):
-                if is_scalar_type(t, ir.enums):
+                if i < len(call.arg_type_infos) and _is_scalar(call.arg_type_infos[i]):
                     out.append(f"    ARG{k}_arg{i}[callcnt{k}] = arg{i};")
             out.append(f"    callcnt{k}++;   /* 先记录后递增, 索引从 0 起 */")
             out.append("}")
@@ -84,8 +95,8 @@ def render_spec_stub_c(ir: FunctionIR, call_max: int = CALL_MAX_DEFAULT,
         ptin_scalar, ptout_scalar = {}, {}
         for p in call.params:
             if p.is_ptr:
-                elem = _base_type(p.type)
-                if not is_scalar_type(elem, ir.enums):
+                elem = _pointee_type(p)
+                if not _pointee_is_scalar(p.type_info):
                     out.append(f"/* {p.name}: 指向物为结构体（含 const 成员），v0 不记录/不设定 */")
                     continue
                 if p.is_const or not _call_param_is_written(p):
@@ -160,16 +171,8 @@ def _ordered_stub_calls(ir: FunctionIR) -> list:
     return calls
 
 
-def _winams_pointer_base(ptr_type: str) -> str:
-    """WinAMS の PTROUT 配列に使う指向物型を取り出す。"""
-    return _base_type(ptr_type)
-
-
-def _winams_is_scalar(type_name: str, ir: FunctionIR) -> bool:
-    """补充参考项目的 u1/u2/u4、s1/s2/s4 基础类型。"""
-    return is_scalar_type(type_name, ir.enums) or type_name.strip() in {
-        "u1", "u2", "u4", "s1", "s2", "s4", "f4", "f8",
-    }
+def _winams_is_scalar(type_info: TypeInfo | None) -> bool:
+    return _pointee_is_scalar(type_info)
 
 
 def _call_param_is_written(param) -> bool:
@@ -180,9 +183,9 @@ def _call_param_is_written(param) -> bool:
     parser has a definition, ``write_status=known`` makes a read-only pointer
     input-only and prevents the stub from fabricating a write-back.
     """
-    if param.extensions.get("write_status") == "known":
+    if param.write_status == "known":
         return param.is_written
-    return param.is_written or (param.is_ptr and not param.is_const)
+    return param.is_written
 
 
 def render_stub_c(ir: FunctionIR, call_max: int = WINAMS_CALL_MAX_DEFAULT,
@@ -255,8 +258,8 @@ def render_stub_c(ir: FunctionIR, call_max: int = WINAMS_CALL_MAX_DEFAULT,
                     f"    static volatile {param.type} ARG{slot}_{callee}[ CALL_MAX ];"
                 )
                 continue
-            base = _winams_pointer_base(param.type)
-            if _call_param_is_written(param) and _winams_is_scalar(base, ir):
+            base = _pointee_type(param)
+            if _call_param_is_written(param) and _winams_is_scalar(param.type_info):
                 body.append(
                     f"    static volatile {base} PTROUT{slot}_{callee}[ CALL_MAX ];"
                 )
@@ -278,8 +281,7 @@ def render_stub_c(ir: FunctionIR, call_max: int = WINAMS_CALL_MAX_DEFAULT,
                 body.append(
                     f"    ARG{slot}_{callee}[{index}] = {param.name};"
                 )
-            elif _call_param_is_written(param) and _winams_is_scalar(
-                    _winams_pointer_base(param.type), ir):
+            elif _call_param_is_written(param) and _winams_is_scalar(param.type_info):
                 body += [
                     "",
                     "    /* WinAMS 参考 stub：按调用序设定传出值 */",

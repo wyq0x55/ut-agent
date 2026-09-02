@@ -7,25 +7,18 @@ from __future__ import annotations
 
 import csv
 import io
+from dataclasses import asdict
 from itertools import product
 import re
 from pathlib import Path
 
 from ut_agent.cases import boundary
-from ut_agent.ir import (
-    FunctionIR,
-    infer_branch_nesting,
-    is_scalar_type,
-    selected_global_writes,
-)
+from ut_agent.ir import FunctionIR
 from ut_agent.rules.model import GenerationResult, TestIntent
 from ut_agent.rules.engine import evaluate_branch
+from ut_agent.winams.projection import WinAMSProjection
 
 
-_MEMORY_HELPER = re.compile(
-    r".*(?:read|orwrite|andwrite|xorwrite|write).*?reg(?:8|16|32|64)$",
-    re.IGNORECASE,
-)
 _WINAMS_RTE_PORT_ORDER = (
     "dlsw", "slsw", "npc", "ig", "pulse", "haf", "ful", "ntrl",
     "clsw", "main", "pwl", "vipsw", "fosw", "ohsw", "ihopsw",
@@ -46,7 +39,20 @@ def _skip_memory_helpers(ir: FunctionIR, call) -> bool:
     即使当前函数因已有返回值/指针结果而没有选中写寄存器，helper 调用
     本身也不能表示新的测试分歧，因此仍然跳过。
     """
-    return bool(_MEMORY_HELPER.fullmatch(call.callee or ""))
+    return call.callee_kind == "memory_helper"
+
+
+def _is_scalar(type_info) -> bool:
+    return bool(type_info and type_info.is_scalar)
+
+
+def _global_write_names(ir: FunctionIR) -> list[str]:
+    """Projection policy: use extractor-proven global write facts verbatim."""
+    return list(ir.global_writes)
+
+
+def _global_records(ir: FunctionIR) -> list[dict]:
+    return [asdict(item) for item in ir.global_objects]
 
 
 def build_columns(ir: FunctionIR, cand: dict) -> list:
@@ -61,7 +67,7 @@ def build_columns(ir: FunctionIR, cand: dict) -> list:
         if call.ptr_call:
             cols.append({"header": f"callcnt{k}(期待·指针表)", "kind": "expect", "values": None})
             for i, t in enumerate(call.arg_types):
-                if is_scalar_type(t, ir.enums):
+                if i < len(call.arg_type_infos) and _is_scalar(call.arg_type_infos[i]):
                     cols.append({"header": f"ARG{k}_arg{i}(记录)", "kind": "record",
                                  "values": None})
             continue   # 函数指针调用：stub 经安装接入（ARG 列仅标量实参）
@@ -75,7 +81,7 @@ def build_columns(ir: FunctionIR, cand: dict) -> list:
                 cols.append({"header": f"ARG{k}_{p.name}(记录)", "kind": "record", "values": None})
         # CALLRET：仅当返回值参与分支判定（source=stub）；flow 接入前不生成
     for p in ir.params:
-        if p.is_ptr and "**" not in p.type.replace(" ", ""):
+        if p.is_ptr and p.type_info is not None and p.type_info.pointer_depth < 2:
             if p.is_written:
                 cols.append({"header": f"{p.name}_out(期待)", "kind": "expect", "values": None,
                              "cv": None, "ptr_param": p})
@@ -94,7 +100,7 @@ def build_columns(ir: FunctionIR, cand: dict) -> list:
             continue
         cols.append({"header": f"{name}(设定)", "kind": "set",
                      "values": sorted(c["values"]), "enum": c["enum"], "cv": c["cv"]})
-    for w in selected_global_writes(ir):
+    for w in _global_write_names(ir):
         key = w.replace(" ", "")
         last = key.split(".")[-1].split("[")[0]
         cols.append({"header": f"{last}_after(期待)", "kind": "expect", "values": None})
@@ -108,10 +114,7 @@ def _fmt(v, col) -> str:
             return f"{v}({name})"
     values = col.get("values") or []
     cv = col.get("cv")
-    vt = (cv.var_type or "") if cv else ""
-    # boolean 标注：类型为 boolean，或值域整体 ⊆ {0,1}（旧版绑定把 boolean 归一成 int）
-    is_bool = vt == "boolean" or (
-        not col.get("enum") and len(values) >= 2 and set(values) <= {0, 1})
+    is_bool = bool(cv and cv.type_info and cv.type_info.kind == "bool")
     if is_bool:
         return f"{v}({'TRUE' if v else 'FALSE'})"
     if values and v == max(values) and len(values) > 1 \
@@ -412,8 +415,7 @@ def _winams_static_function(ir: FunctionIR) -> bool:
     type rule, so it must come from the parser rather than from a CSV-shaped
     heuristic.
     """
-    extensions = getattr(ir, "extensions", {}) or {}
-    return bool(extensions.get("is_static_function", False))
+    return bool(ir.is_static)
 
 
 def _winams_function_return_comment(ir: FunctionIR) -> str:
@@ -431,8 +433,7 @@ def _winams_function_return_comment(ir: FunctionIR) -> str:
 
 def _winams_param_access_paths(param, *, writes_only: bool = False) -> list[str]:
     """Return deterministic AST lvalue paths carried by a parameter."""
-    extensions = getattr(param, "extensions", {}) or {}
-    raw = extensions.get("access_paths", ())
+    raw = param.access_paths
     if not isinstance(raw, (list, tuple)):
         return []
     entries: list[tuple[int, int, str]] = []
@@ -503,13 +504,12 @@ def _winams_param_read_columns(param, *, static_function: bool = False) -> list[
 def _winams_call_capacity(call) -> int:
     """Return the statically derivable number of slots for one call site.
 
-    The extractor records loop trip counts in ``extensions``.  Legacy IRs do
-    not have that fact, so one source occurrence remains one slot.  This keeps
-    the renderer deterministic without consulting a reference TestCsv.
+    The extractor records loop trip counts in the formal ``max_occurrences``
+    field.  An IR without that fact remains one source slot; this keeps the
+    renderer deterministic without consulting a reference TestCsv.
     """
-    extensions = getattr(call, "extensions", {}) or {}
     try:
-        return max(1, int(extensions.get("call_capacity", 1)))
+        return max(1, int(call.max_occurrences))
     except (TypeError, ValueError):
         return 1
 
@@ -540,20 +540,14 @@ def _winams_return_used(call) -> bool:
     The Clang extractor writes this fact explicitly.  Treat absent metadata as
     used for compatibility with older FunctionIR documents.
     """
-    extensions = getattr(call, "extensions", {}) or {}
-    if "return_used" in extensions:
-        return bool(extensions["return_used"])
-    return call.ret_type not in ("", "void")
+    return bool(call.return_used)
 
 
 def _winams_param_fields(call, index: int) -> list[str]:
     """Read optional Clang-provided fields observed through a pointer param."""
-    extensions = getattr(call, "extensions", {}) or {}
     # The caller-side observation is narrower and takes precedence over the
     # complete callee struct shape discovered from a context source.
-    metadata = extensions.get(
-        "caller_param_fields", extensions.get("param_fields")
-    )
+    metadata = call.caller_param_fields or call.param_fields
     raw = None
     if isinstance(metadata, dict):
         raw = metadata.get(str(index), metadata.get(index))
@@ -568,8 +562,7 @@ def _winams_param_fields(call, index: int) -> list[str]:
 
 
 def _winams_pointer_argument_info(call, index: int) -> dict:
-    extensions = getattr(call, "extensions", {}) or {}
-    raw = extensions.get("pointer_arguments", {})
+    raw = call.pointer_arguments
     if not isinstance(raw, dict):
         return {}
     value = raw.get(str(index), raw.get(index, {}))
@@ -607,8 +600,7 @@ def _winams_stub_return_first(call) -> bool:
 
 
 def _winams_return_fields(call) -> list[str]:
-    extensions = getattr(call, "extensions", {}) or {}
-    raw = extensions.get("return_fields", ())
+    raw = call.return_fields
     if not isinstance(raw, (list, tuple)):
         return []
     return [str(item).lstrip(".") for item in raw if str(item).lstrip(".")]
@@ -641,8 +633,7 @@ def _winams_stub_param_columns(ir: FunctionIR, call) -> list[str]:
 def _winams_stub_param_output_columns(ir: FunctionIR, call) -> list[str]:
     """Expand only caller-observable stub argument write-back fields."""
     callee = call.callee or ""
-    extensions = getattr(call, "extensions", {}) or {}
-    raw_observable = extensions.get("caller_param_output")
+    raw_observable = call.caller_param_output
     if not isinstance(raw_observable, dict):
         if not callee.startswith("Rte_Read_") and not (
             callee.startswith("pal_") and "_get_" in callee
@@ -752,29 +743,27 @@ def _winams_global_columns(
     ]
     field_accesses = {}
     field_access_order: dict[str, tuple[int, int, int]] = {}
-    extensions = obj.get("extensions", {})
-    if isinstance(extensions, dict):
-        raw_accesses = extensions.get("field_accesses", ())
-        if isinstance(raw_accesses, (list, tuple)):
-            for item in raw_accesses:
-                if not isinstance(item, dict):
-                    continue
-                path = str(item.get("path", "")).lstrip(".")
-                if not path:
-                    continue
-                field_accesses[path] = (
-                    bool(item.get("read", False)),
-                    bool(item.get("write", False)),
-                )
-                try:
-                    line = int(item.get("line", 0))
-                except (TypeError, ValueError):
-                    line = 0
-                try:
-                    offset = int(item.get("offset", 0))
-                except (TypeError, ValueError):
-                    offset = 0
-                field_access_order[path] = (line, offset, len(field_access_order))
+    raw_accesses = obj.get("field_accesses", ())
+    if isinstance(raw_accesses, (list, tuple)):
+        for item in raw_accesses:
+            if not isinstance(item, dict):
+                continue
+            path = str(item.get("path", "")).lstrip(".")
+            if not path:
+                continue
+            field_accesses[path] = (
+                bool(item.get("read", False)),
+                bool(item.get("write", False)),
+            )
+            try:
+                line = int(item.get("line", 0))
+            except (TypeError, ValueError):
+                line = 0
+            try:
+                offset = int(item.get("offset", 0))
+            except (TypeError, ValueError):
+                offset = 0
+            field_access_order[path] = (line, offset, len(field_access_order))
     if field_paths and field_accesses:
         def has_access(path: str, direction_name: str) -> bool:
             """Match a field or descendant for ordinary record objects."""
@@ -906,9 +895,7 @@ def _winams_global_column_line(
     obj: dict, column: str, fallback: int, *, direction: str = ""
 ) -> int:
     """Return the first source line for one expanded global field."""
-    extensions = obj.get("extensions", {})
-    raw_accesses = extensions.get("field_accesses", ()) \
-        if isinstance(extensions, dict) else ()
+    raw_accesses = obj.get("field_accesses", ())
     matches: list[tuple[int, int]] = []
     if isinstance(raw_accesses, (list, tuple)):
         for item in raw_accesses:
@@ -941,9 +928,7 @@ def _winams_global_column_line(
 
 def _winams_global_input_anchor(obj: dict, fallback: int) -> int:
     """Return the first AST event that establishes a global input object."""
-    extensions = obj.get("extensions", {})
-    raw_accesses = extensions.get("field_accesses", ()) \
-        if isinstance(extensions, dict) else ()
+    raw_accesses = obj.get("field_accesses", ())
     lines: list[int] = []
     if isinstance(raw_accesses, (list, tuple)):
         for item in raw_accesses:
@@ -965,9 +950,6 @@ def _winams_global_object_line(
     obj: dict, fallback: int, *, direction: str = ""
 ) -> int:
     """Return the first read/write source line for a scalar global fact."""
-    extensions = obj.get("extensions", {})
-    if not isinstance(extensions, dict):
-        return fallback
     access_direction = {"input": "read", "output": "write"}.get(
         direction, direction,
     )
@@ -979,7 +961,7 @@ def _winams_global_object_line(
         candidates: list[int] = []
         for key in ("read_line", "write_line"):
             try:
-                line = int(extensions.get(key, 0))
+                line = int(obj.get(key, 0))
             except (TypeError, ValueError):
                 continue
             if line > 0:
@@ -989,19 +971,18 @@ def _winams_global_object_line(
     key = f"{access_direction}_line" if access_direction else "line"
     fallback_key = "write_line" if access_direction == "read" else "read_line"
     try:
-        line = int(extensions.get(key, 0))
+        line = int(obj.get(key, 0))
     except (TypeError, ValueError):
         return fallback
     if line <= 0:
         try:
-            line = int(extensions.get(fallback_key, 0))
+            line = int(obj.get(fallback_key, 0))
         except (TypeError, ValueError):
             return fallback
     return line if line > 0 else fallback
 
 
-def _winams_columns(ir: FunctionIR) -> tuple[list[tuple[str, str | None]],
-                                                list[tuple[str, str | None]]]:
+def _winams_columns(ir: FunctionIR) -> WinAMSProjection:
     """推导 WinAMS ``#COMMENT`` 的输入列与输出列。
 
     列顺序是 WinAMS 工程契约的一部分：两侧先放按首次调用顺序排列的
@@ -1049,7 +1030,7 @@ def _winams_columns(ir: FunctionIR) -> tuple[list[tuple[str, str | None]],
     # reproduces the stable order used by the reference WinAMS projects: a
     # global read before a call is listed before that call's stub variable.
     param_names = {param.name for param in ir.params}
-    global_objects = ir.extensions.get("global_objects", [])
+    global_objects = _global_records(ir)
     expanded_global_names: set[str] = set()
     global_object_bases: set[str] = set()
     branch_inputs: list[tuple[int, int, int, str, str | None]] = []
@@ -1109,10 +1090,7 @@ def _winams_columns(ir: FunctionIR) -> tuple[list[tuple[str, str | None]],
                 ) <= last_call_line
             ]
             if pre_call_objects and all(
-                not (
-                    isinstance(obj.get("extensions"), dict)
-                    and obj["extensions"].get("field_accesses")
-                )
+                not obj.get("field_accesses")
                 for obj in pre_call_objects
             ):
                 grouped_global_names = {
@@ -1129,9 +1107,8 @@ def _winams_columns(ir: FunctionIR) -> tuple[list[tuple[str, str | None]],
             line = _winams_global_object_line(
                 obj, _provenance_line(obj, ir.line), direction="input",
             )
-            extensions = obj.get("extensions", {})
             try:
-                original_offset = int(extensions.get("read_offset", 0))
+                original_offset = int(obj.get("read_offset", 0))
             except (AttributeError, TypeError, ValueError):
                 original_offset = 0
             return (line, line, original_offset, str(obj["name"]))
@@ -1306,7 +1283,7 @@ def _winams_columns(ir: FunctionIR) -> tuple[list[tuple[str, str | None]],
                     else object_line,
                     priority=1,
                 )
-    for name in selected_global_writes(ir):
+    for name in _global_write_names(ir):
         if name not in expanded_global_names and not _is_local_fact(name, ir):
             add_branch_output(name, ir.line + 1_000_000, priority=1)
 
@@ -1319,31 +1296,32 @@ def _winams_columns(ir: FunctionIR) -> tuple[list[tuple[str, str | None]],
             outputs, output_seen,
             (_winams_function_return_comment(ir), None),
         )
-    return inputs, outputs
+    return WinAMSProjection.from_pairs(inputs, outputs)
 
 
 def _switch_control_key(branch, ir: FunctionIR) -> str | None:
-    condition = (branch.cond_text or "").replace(" ", "")
-    if condition.startswith("switch(") and condition.endswith(")"):
-        condition = condition[len("switch("):-1]
-    for cv in sorted(ir.control_vars, key=lambda item: len(item.var), reverse=True):
-        var = cv.var.replace(" ", "")
-        if condition == var or var in condition:
+    selector = branch.selector
+    if selector is None:
+        return None
+    expression = selector.driver or selector.expression
+    for cv in ir.control_vars:
+        if expression in {cv.var, cv.name}:
             return cv.name
     return None
 
 
 def _branch_control_keys(branch, ir: FunctionIR) -> tuple[str, ...]:
     """Return settable IR keys that can affect a branch outcome."""
-    expressions = [branch.cond_text]
-    expressions.extend(atom.var for atom in branch.atoms)
-    expressions.extend(atom.text for atom in branch.atoms)
-    normalized = " ".join(expressions).replace(" ", "")
     keys = {
         cv.name for cv in ir.control_vars
-        if cv.name.replace(" ", "") in normalized
-        or cv.var.replace(" ", "") in normalized
+        if any(atom.var in {cv.name, cv.var} for atom in branch.atoms)
     }
+    if branch.selector is not None:
+        expression = branch.selector.driver or branch.selector.expression
+        keys.update(
+            cv.name for cv in ir.control_vars
+            if expression in {cv.name, cv.var}
+        )
     return tuple(sorted(keys))
 
 
@@ -1530,8 +1508,7 @@ def _span_contains(outer: tuple[int, int] | None,
 
 
 def _branch_tree(ir: FunctionIR) -> tuple[list, dict[str, list]]:
-    """Return roots/children after applying source-range nesting."""
-    infer_branch_nesting(ir.branches)
+    """Return roots/children from extractor-provided parent_bid facts."""
     children: dict[str, list] = {branch.bid: [] for branch in ir.branches}
     roots = []
     for branch in ir.branches:
@@ -1604,7 +1581,8 @@ def render_intents_csv(ir: FunctionIR, result: GenerationResult, *,
     # Column names and their order are engine output, not rule-pack payload.
     # A rule pack may have been inferred from an older WinAMS CSV, but those
     # learned names must not become a hidden CSV template during generation.
-    input_columns, output_columns = _winams_columns(ir)
+    projection = _winams_columns(ir)
+    input_columns, output_columns = projection.inputs, projection.outputs
     label = source_label or f"{Path(ir.file).name}/{ir.name}"
     csv_title = title or f"{ir.name} 単体テスト"
     header = [
@@ -1656,16 +1634,11 @@ def render_intents_csv(ir: FunctionIR, result: GenerationResult, *,
 
         def emit_branch(branch) -> None:
             branch_index = branch_indexes[branch.bid]
-            golden_label = (
-                result.branch_labels[branch_index]
-                if branch_index < len(result.branch_labels)
-                else None
-            )
             if branch.kind == "switch":
                 # Switch cases are first-class TestCsv semantics.  Case
                 # vectors carry ``outcome=None`` and therefore cannot be
                 # emitted through the ordinary TRUE/FALSE branch buckets.
-                out.append(f";$L$,{golden_label or _winams_condition(branch)}")
+                out.append(f";$L$,{_winams_condition(branch)}")
                 case_intents = [
                     item for item in intents
                     if item.obligation.branch_id == branch.bid
@@ -1725,7 +1698,7 @@ def render_intents_csv(ir: FunctionIR, result: GenerationResult, *,
                     if child.bid not in emitted_children:
                         emit_branch(child)
                 return
-            out.append(f";$L$,{golden_label or _winams_condition(branch)}")
+            out.append(f";$L$,{_winams_condition(branch)}")
             labeled = [
                 item for item in intents
                 if item.obligation.branch_id == branch.bid
@@ -1733,33 +1706,39 @@ def render_intents_csv(ir: FunctionIR, result: GenerationResult, *,
                 and item.obligation.description
                 and item.obligation.description != "approved scenario"
             ]
-            golden_outcomes = (
-                result.golden_outcome_labels[branch_index]
-                if branch_index < len(result.golden_outcome_labels)
-                else ()
-            )
-            if golden_outcomes:
-                remaining = list(labeled)
-                for label_text in golden_outcomes:
-                    out.append(f";$L$,{label_text}")
-                    matched = [
-                        item for item in remaining
-                        if item.obligation.description == label_text
-                    ]
-                    out.extend(data_line(item) for item in matched)
-                    remaining = [item for item in remaining if item not in matched]
-            elif labeled and result.branch_labels:
-                seen_labels: set[str] = set()
-                for item in labeled:
-                    label_text = item.obligation.description
-                    if label_text in seen_labels:
-                        continue
-                    seen_labels.add(label_text)
-                    out.append(f";$L$,{label_text}")
-                    out.extend(
-                        data_line(vector) for vector in labeled
-                        if vector.obligation.description == label_text
-                    )
+            scenario_labeled = [
+                item for item in labeled
+                if item.obligation.kind == "scenario"
+            ]
+            if scenario_labeled:
+                # Scenario labels are carried by the generic obligation, not
+                # by the rules result.  This keeps target-format evidence out
+                # of the rules model while preserving approved Golden rows.
+                descriptions = [
+                    item.obligation.description for item in scenario_labeled
+                    if item.obligation.description != "approved scenario"
+                ]
+                if descriptions:
+                    seen_labels: set[str] = set()
+                    for item in scenario_labeled:
+                        label_text = item.obligation.description
+                        if label_text in seen_labels:
+                            continue
+                        seen_labels.add(label_text)
+                        out.append(f";$L$,{label_text}")
+                        out.extend(
+                            data_line(vector) for vector in scenario_labeled
+                            if vector.obligation.description == label_text
+                        )
+                else:
+                    for outcome, label_text in ((True, "TRUE"), (False, "FALSE")):
+                        matching = [
+                            item for item in scenario_labeled
+                            if item.obligation.outcome is outcome
+                        ]
+                        if matching:
+                            out.append(f";$L$,{label_text}")
+                            out.extend(data_line(item) for item in matching)
             else:
                 for outcome, label_text in ((True, "TRUE"), (False, "FALSE")):
                     dead = branch.constant_value is not None and branch.constant_value != outcome
@@ -1769,7 +1748,7 @@ def render_intents_csv(ir: FunctionIR, result: GenerationResult, *,
                         out.extend(data_line(item) for item in grouped.get((branch.bid, outcome), []))
 
             # Non-switch children are still kept under their parent branch.
-            # Without a dedicated then/else range in the v2 schema, the
+            # Without a dedicated then/else range in the v3 schema, the
             # source-order fallback places them after the parent's labels.
             for child in children.get(branch.bid, []):
                 emit_branch(child)
@@ -1791,7 +1770,8 @@ def render_csv(ir: FunctionIR, cfg_display: str = "", *,
     ``cfg_display`` 保留在签名中是为了让已有调用点平滑迁移；WinAMS
     的 mod 行不保存自定义 CFG 行，配置应通过编译命令的 ``-D`` 输入。
     """
-    input_columns, output_columns = _winams_columns(ir)
+    projection = _winams_columns(ir)
+    input_columns, output_columns = projection.inputs, projection.outputs
     input_count = len(input_columns)
     output_count = len(output_columns)
     label = source_label or f"{Path(ir.file).name}/{ir.name}"

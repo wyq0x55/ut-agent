@@ -1,11 +1,13 @@
-"""IR：全流水线中间表示（M0 契约）。
+"""Typed FunctionIR contract shared by the extractor and Python adapters.
 
-消费方：flow(来源判定) / cases(边界值组合) / stub(生成) / winams(CSV 渲染)。
-字段语义与 docs/用例表与CSV格式规格.md 对齐。
+The standalone C++ extractor is the only producer of C semantic facts.  The
+Python side may project and validate those facts, but must not recover them
+from source spelling, type names, or source ranges.
 """
 from __future__ import annotations
 
 from dataclasses import asdict, dataclass, field
+import dataclasses
 from typing import Any, Optional, Union
 
 
@@ -27,6 +29,97 @@ class Provenance:
 
 
 @dataclass
+class TypeInfo:
+    """Extractor-proven type and value-domain facts.
+
+    ``kind=unknown`` is an explicit extractor result, not a permission for a
+    consumer to infer a category from ``canonical_type``.
+    """
+
+    canonical_type: str = ""
+    kind: str = "unknown"
+    bit_width: Optional[int] = None
+    signed: Optional[bool] = None
+    min_value: Optional[Union[int, float]] = None
+    max_value: Optional[Union[int, float]] = None
+    enum_values: dict[str, int] = field(default_factory=dict)
+    pointer_depth: int = 0
+    pointee_type: Optional[str] = None
+    pointee_info: Optional["TypeInfo"] = None
+    is_const: bool = False
+    is_volatile: bool = False
+
+    @property
+    def is_scalar(self) -> bool:
+        return self.kind in {"integer", "enum", "bool", "float"}
+
+
+@dataclass
+class ValueOrigin:
+    """Typed provenance for a value used by a branch or effect."""
+
+    kind: str
+    expression: str = ""
+    driver: Optional[str] = None
+    callee: Optional[str] = None
+    call_id: Optional[str] = None
+    call_offset: Optional[int] = None
+    call_order: Optional[int] = None
+    base: Optional[str] = None
+    index: Optional[str] = None
+    field: Optional[str] = None
+    table_values: dict[str, int] = dataclasses.field(default_factory=dict)
+
+
+@dataclass
+class Effect:
+    """A source-proven value effect with guards and ordering."""
+
+    path: str = ""
+    value: str = ""
+    constant_value: Optional[int] = None
+    source_offset: int = -1
+    order: int = -1
+    guards: list[dict[str, Any]] = field(default_factory=list)
+    origin: Optional[ValueOrigin] = None
+    name: Optional[str] = None
+    operator: str = "="
+
+
+@dataclass
+class FieldAccess:
+    path: str
+    read: bool = False
+    write: bool = False
+    copied_from_local: bool = False
+    line: int = 1
+    offset: int = 0
+    read_line: int = 0
+    read_offset: int = 0
+    write_line: int = 0
+    write_offset: int = 0
+
+
+@dataclass
+class GlobalObject:
+    name: str
+    read: bool = False
+    write: bool = False
+    is_const: bool = False
+    is_volatile: bool = False
+    is_union: bool = False
+    source_file: str = ""
+    array_sizes: list[int] = field(default_factory=list)
+    field_paths: list[str] = field(default_factory=list)
+    field_accesses: list[FieldAccess] = field(default_factory=list)
+    read_line: int = 0
+    read_offset: int = 0
+    write_line: int = 0
+    write_offset: int = 0
+    provenance: Optional[Provenance] = None
+
+
+@dataclass
 class Atom:
     """原子条件：不可再拆的比较。多原子经 && / || 组合成判定。"""
 
@@ -37,11 +130,13 @@ class Atom:
     boundary_name: Optional[str]   # 枚举名（CANIF_GET_ONLINE）；纯字面值/宏为 None
     text: str                      # 展开后的原子条件文本
     mask: Optional[int] = None     # 位掩码条件的已解析掩码（例如 x & 0x30）
+    right: Optional[str] = None    # extractor-provided RHS for dynamic comparisons
     cond_text_spelling: str = ""
     cond_text_expanded: str = ""
     type_spelling: Optional[str] = None
     canonical_type: Optional[str] = None
     qualifiers: list[str] = field(default_factory=list)
+    type_info: Optional[TypeInfo] = None
     provenance: Optional[Provenance] = None
     extensions: dict[str, Any] = field(default_factory=dict)
 
@@ -53,6 +148,7 @@ class Case:
     label: str
     value: Optional[int]
     is_default: bool
+    value_proof: Optional[str] = None
     provenance: Optional[Provenance] = None
     extensions: dict[str, Any] = field(default_factory=dict)
 
@@ -80,6 +176,8 @@ class Branch:
     cond_text_spelling: str = ""
     cond_text_expanded: str = ""
     parent_bid: Optional[str] = None
+    condition_tree: Optional[dict[str, Any]] = None
+    selector: Optional[ValueOrigin] = None
     provenance: Optional[Provenance] = None
     extensions: dict[str, Any] = field(default_factory=dict)
 
@@ -97,21 +195,21 @@ class CallSite:
     table_base: Optional[str] = None  # 指针表全局名（CanIfDispatchConfig / CanIfUserTxConfirmations）
     table_member: Optional[str] = None  # 分发表成员名（回调数组为 None）
     arg_types: list[str] = field(default_factory=list)  # 调用点实参类型（表 stub 签名）
+    arg_type_infos: list[Optional[TypeInfo]] = field(default_factory=list)
     params: list[Param] = field(default_factory=list)  # 被调函数签名（stub 生成用）
     ret_type: str = "void"
+    callee_kind: str = "direct"
+    max_occurrences: int = 1
+    return_used: bool = False
+    pointer_arguments: dict[str, dict[str, bool]] = field(default_factory=dict)
+    caller_param_fields: dict[str, list[str]] = field(default_factory=dict)
+    caller_param_output: dict[str, bool] = field(default_factory=dict)
+    param_fields: dict[str, list[str]] = field(default_factory=dict)
+    return_fields: list[str] = field(default_factory=list)
+    guards: list[dict[str, Any]] = field(default_factory=list)
     provenance: Optional[Provenance] = None
     extensions: dict[str, Any] = field(default_factory=dict)
-
-
-def is_scalar_type(t: str, enums: dict) -> bool:
-    """标量类型判定（int 族 / boolean / 枚举）——ARG 列与指向物设定可否上表的依据。"""
-    t = (t or "").strip()
-    if not t:
-        return False
-    if any(k in t for k in ("uint", "sint", "int", "char", "long", "short",
-                            "float", "double", "boolean", "_Bool")):
-        return True
-    return t in enums
+    call_id: str = ""
 
 
 @dataclass
@@ -127,6 +225,8 @@ class ControlVar:
     constant_value: Optional[int] = None
     constant_reason: Optional[str] = None
     branch_ids: list[str] = field(default_factory=list)
+    type_info: Optional[TypeInfo] = None
+    value_origin: Optional[ValueOrigin] = None
     provenance: Optional[Provenance] = None
     extensions: dict[str, Any] = field(default_factory=dict)
 
@@ -161,6 +261,10 @@ class Param:
     is_ptr: bool = False
     is_const: bool = False   # const 修饰（含指向物 const → 传入指针 PTIN）
     is_written: bool = False # 函数体是否直接写入指针指向物
+    type_info: Optional[TypeInfo] = None
+    access_paths: list[dict[str, Any]] = field(default_factory=list)
+    write_effects: list[Effect] = field(default_factory=list)
+    write_status: str = "unknown"
     extensions: dict[str, Any] = field(default_factory=dict)
 
 
@@ -171,6 +275,7 @@ class FunctionIR:
     line: int
     ret_type: str
     line_end: int = 0            # 函数体结束行（含），函数抽取窗口用
+    is_static: bool = False
     params: list[Param] = field(default_factory=list)
     globals_used: list[str] = field(default_factory=list)
     locals: list[str] = field(default_factory=list)
@@ -188,68 +293,16 @@ class FunctionIR:
     diagnostics: list[dict[str, Any]] = field(default_factory=list)
     compile_context: dict[str, Any] = field(default_factory=dict)
     extractor: dict[str, str] = field(default_factory=lambda: {
-        "name": "ut-agent-legacy-parser", "version": "0.1.0", "clang_version": "unknown"
+        "name": "ut-clang-extract", "version": "0.3.0", "clang_version": "unknown"
     })
+    parameter_write_effects: list[Effect] = field(default_factory=list)
+    global_write_effects: list[Effect] = field(default_factory=list)
+    local_value_effects: list[Effect] = field(default_factory=list)
+    return_effects: list[Effect] = field(default_factory=list)
+    global_objects: list[GlobalObject] = field(default_factory=list)
     extensions: dict[str, Any] = field(default_factory=dict)
 
     def to_dict(self) -> dict:
         from ut_agent.parser.ir_json import function_ir_to_document
 
         return function_ir_to_document(self)
-
-
-def selected_global_writes(ir: FunctionIR) -> list[str]:
-    """返回 testcase 需要登录/期待的全局写回。
-
-    当函数的所有分支都已由源码配置传播确定时，单纯的初始化状态写回
-    不会带来路径差异；这类列会让 WinAMS 变量集合膨胀，因此不进入
-    自动生成的 testcase。存在未确定分支时保留原有写回素材。
-    """
-    if ir.branches and all(branch.constant_value is not None for branch in ir.branches):
-        return []
-    return list(ir.global_writes)
-
-
-def infer_branch_nesting(branches: list[Branch]) -> None:
-    """Fill missing branch parents from deterministic source ranges.
-
-    The standalone extractor preserves source spelling ranges, but an AST
-    visitor can still report an ``if`` nested in a ``switch`` as a flat list.
-    Choose the smallest earlier branch whose source range strictly contains
-    the child. Existing explicit ``parent_bid`` values remain authoritative.
-    """
-    by_bid = {branch.bid: branch for branch in branches}
-
-    def span(branch: Branch) -> tuple[int, int] | None:
-        provenance = branch.provenance
-        if provenance is None or provenance.spelling is None:
-            return None
-        start = int(provenance.spelling.offset or 0)
-        end = int(provenance.spelling.end_offset or 0)
-        if start <= 0 or end <= start:
-            return None
-        return start, end
-
-    for child_index, child in enumerate(branches):
-        if child.parent_bid is not None:
-            continue
-        child_span = span(child)
-        if child_span is None:
-            continue
-        candidates: list[tuple[int, int, Branch]] = []
-        for parent_index, parent in enumerate(branches[:child_index]):
-            if parent.file and child.file and parent.file != child.file:
-                continue
-            parent_span = span(parent)
-            if parent_span is None:
-                continue
-            if (parent_span[0] <= child_span[0]
-                    and child_span[1] <= parent_span[1]
-                    and parent_span != child_span):
-                candidates.append((
-                    parent_span[1] - parent_span[0], parent_index, parent,
-                ))
-        if candidates:
-            _, _, parent = min(candidates, key=lambda item: (item[0], item[1]))
-            if parent.bid in by_bid:
-                child.parent_bid = parent.bid
