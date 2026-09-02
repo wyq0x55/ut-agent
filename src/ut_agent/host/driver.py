@@ -9,7 +9,7 @@
 """
 from __future__ import annotations
 
-from ut_agent.ir import FunctionIR
+from ut_agent.ir import FunctionIR, TypeInfo
 
 
 class UnsupportedGen(Exception):
@@ -20,24 +20,19 @@ def _norm(text: str) -> str:
     return (text or "").replace(" ", "")
 
 
-def _base_type(ptr_type: str) -> str:
-    """'const CanIf_ControllerModeType *' → 'CanIf_ControllerModeType'（只剥一层星）。"""
-    t = " ".join(ptr_type.replace("*", " * ").split())
-    t = " ".join(w for w in t.split() if w != "const")
-    if t.endswith("*"):
-        t = t[:-1].strip()
-    return t or "int"
+def _numeric_base(type_info: TypeInfo | None) -> bool:
+    return bool(
+        type_info
+        and type_info.kind == "pointer"
+        and type_info.pointee_info
+        and type_info.pointee_info.is_scalar
+    )
 
 
-def _numeric_base(base: str, ir: FunctionIR) -> bool:
-    """指向物是否为可枚举数值类型（int 族 / boolean / 枚举）；结构体等返回 False。"""
-    b = base.strip()
-    if not b:
-        return False
-    if any(k in b for k in ("uint", "sint", "int", "char", "long", "short",
-                            "float", "double", "boolean", "_Bool")):
-        return True
-    return b in ir.enums
+def _pointee_type(param) -> str:
+    if param.type_info is None or not param.type_info.pointee_type:
+        raise UnsupportedGen(f"形参 {param.name} 缺少 typed pointee fact")
+    return param.type_info.pointee_type.replace("const ", "").strip()
 
 
 def render_driver(ir: FunctionIR, columns, cols, rows,
@@ -73,10 +68,10 @@ def render_driver(ir: FunctionIR, columns, cols, rows,
     for p in ir.params:
         if not p.is_ptr:
             continue
-        if "**" in p.type.replace(" ", ""):
+        if p.type_info is not None and p.type_info.pointer_depth >= 2:
             raise UnsupportedGen(f"双重指针形参 {p.name}: {p.type}")
-        base = _base_type(p.type)
-        if _numeric_base(base, ir):
+        base = _pointee_type(p)
+        if _numeric_base(p.type_info):
             init = f"({base})c->{p.name}" if not p.is_written else "0"
             setup.append(f"        {base} v_{p.name} = {init};")
         else:
@@ -89,13 +84,6 @@ def render_driver(ir: FunctionIR, columns, cols, rows,
             setup.append(f"        {param_types[p.name]} {p.name} = "
                          f"({param_types[p.name]})c->{p.name};")
 
-    # 全局设定（global / local_from_global）；下标为非引数局部变量的表达式跳过（记 note）
-    import re as _re
-    idx_re = _re.compile(r"\[(\w+)\]")
-
-    def _bad_index(expr: str) -> list:
-        return [i for i in idx_re.findall(expr) if i not in param_types]
-
     def notes_note(msg: str) -> None:
         ir.notes.append(f"[driver] {msg}")
 
@@ -103,13 +91,12 @@ def render_driver(ir: FunctionIR, columns, cols, rows,
         if cv is None or cv.source not in ("global", "local_from_global"):
             continue
         expr = _norm(cv.var if cv.source == "global" else cv.set_via)
-        bad = _bad_index(expr)
-        if bad:
-            notes_note(f"设定 {expr} 的下标 {bad} 为被测函数局部变量（值运行时产生），"
-                       f"跳过设定")
-            continue
-        cast = f"({cv.var_type})" if cv.var_type and cv.var_type != "int" else ""
-        if f"[{guard_param}]" in expr:
+        cast = (
+            f"({cv.type_info.canonical_type})"
+            if cv.type_info and cv.type_info.canonical_type else ""
+        )
+        origin = cv.value_origin
+        if origin is not None and origin.index == guard_param:
             setup.append(f"        if ({guard_param} < {guard_bound}) {{ {expr} = "
                          f"{cast}c->{name}; }}")
         else:
@@ -121,8 +108,8 @@ def render_driver(ir: FunctionIR, columns, cols, rows,
         k = f"{call.order:02d}"
         if call.ptr_call:
             for i, t in enumerate(call.arg_types):
-                from ut_agent.ir import is_scalar_type
-                if is_scalar_type(t, ir.enums):
+                if i < len(call.arg_type_infos) and call.arg_type_infos[i] \
+                        and call.arg_type_infos[i].is_scalar:
                     arg_ref[f"ARG{k}_arg{i}(记录)"] = f"(int)ARG{k}_arg{i}[0]"
             continue
         for p in call.params:
@@ -140,7 +127,8 @@ def render_driver(ir: FunctionIR, columns, cols, rows,
         elif h.endswith("_out(期待)"):
             pname = h.split("(")[0][:-4]
             ptype = next((p.type for p in ir.params if p.name == pname), None)
-            if ptype and _numeric_base(_base_type(ptype), ir):
+            param = next((p for p in ir.params if p.name == pname), None)
+            if param and _numeric_base(param.type_info):
                 print_expr[h] = f"(int)v_{pname}"
             else:
                 print_expr[h] = "0"
@@ -151,14 +139,14 @@ def render_driver(ir: FunctionIR, columns, cols, rows,
             else:
                 print_expr[h] = "after"
     if ir.global_writes:
-        after_expr = _norm(ir.global_writes[0])
+        write_effect = next(iter(ir.global_write_effects), None)
+        after_expr = _norm(
+            write_effect.path if write_effect is not None else ir.global_writes[0]
+        )
         fallback = next((cv.name for cv in ir.control_vars
                          if cv.source == "local_from_global"), None)
-        if _bad_index(after_expr):
-            after_stmt = (f"        int after = (int)c->{fallback};"
-                          f"   /* 写回下标为局部变量，以设定值代 */"
-                          ) if fallback else "        int after = 0;"
-        elif f"[{guard_param}]" in after_expr:
+        if (write_effect is not None and write_effect.origin is not None
+                and write_effect.origin.index == guard_param):
             alt = f"(int)c->{fallback}" if fallback else "0"
             after_stmt = (f"        int after = ({guard_param} < {guard_bound}) ? "
                           f"(int)({after_expr}) : {alt};")

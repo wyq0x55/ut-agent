@@ -36,6 +36,7 @@ from ut_agent.parser import (
     make_compile_context,
 )
 from ut_agent.rules import generate_intents, load_rule_pack
+from ut_agent.winams.golden import semantic_csv_signature
 from ut_agent.stub import generate as stub_generate
 from ut_agent.winams import csv_render
 from ut_agent.winams.define_var import (
@@ -474,8 +475,6 @@ def compare_bytes(actual: Path, expected: Path) -> bool:
 
 def compare_testcsv(project: GeneratedProject) -> list[tuple[str, bool]]:
     """验证生成用例与 TestCsv golden 的分支、列和取值语义等价。"""
-    from ut_agent.rules import semantic_csv_signature
-
     result = []
     for unit in project.units:
         if unit.expected is None:

@@ -1,6 +1,6 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
-  "$id": "https://ut-agent.local/schema/function-ir-v2.json",
+  "$id": "https://ut-agent.local/schema/function-ir-v3.json",
   "title": "ut-agent FunctionIR document",
   "type": "object",
   "additionalProperties": false,
@@ -13,7 +13,7 @@
     "functions"
   ],
   "properties": {
-    "schema_version": { "const": 2 },
+    "schema_version": { "const": 3 },
     "extractor": { "$ref": "#/$defs/extractor" },
     "status": { "$ref": "#/$defs/status" },
     "compile_context": { "$ref": "#/$defs/compile_context" },
@@ -126,16 +126,135 @@
       "description": "Versioned extension data retained by adapters.",
       "additionalProperties": true
     },
+    "type_info": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "canonical_type", "kind", "bit_width", "signed", "min_value", "max_value",
+        "enum_values", "pointer_depth", "pointee_type", "pointee_info", "is_const", "is_volatile"
+      ],
+      "properties": {
+        "canonical_type": { "type": "string" },
+        "kind": { "type": "string", "enum": ["integer", "enum", "bool", "pointer", "record", "float", "other", "unknown"] },
+        "bit_width": { "type": ["integer", "null"], "minimum": 1 },
+        "signed": { "type": ["boolean", "null"] },
+        "min_value": { "type": ["integer", "number", "null"] },
+        "max_value": { "type": ["integer", "number", "null"] },
+        "enum_values": { "type": "object", "additionalProperties": { "type": "integer" } },
+        "pointer_depth": { "type": "integer", "minimum": 0 },
+        "pointee_type": { "type": ["string", "null"] },
+        "pointee_info": { "anyOf": [{ "$ref": "#/$defs/type_info" }, { "type": "null" }] },
+        "is_const": { "type": "boolean" },
+        "is_volatile": { "type": "boolean" }
+      }
+    },
+    "value_origin": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["kind", "expression"],
+      "properties": {
+        "kind": { "type": "string", "minLength": 1 },
+        "expression": { "type": "string" },
+        "driver": { "type": ["string", "null"] },
+        "callee": { "type": ["string", "null"] },
+        "call_id": { "type": ["string", "null"] },
+        "call_offset": { "type": ["integer", "null"] },
+        "call_order": { "type": ["integer", "null"] },
+        "base": { "type": ["string", "null"] },
+        "index": { "type": ["string", "null"] },
+        "field": { "type": ["string", "null"] },
+        "table_values": { "type": "object", "additionalProperties": { "type": "integer" } }
+      }
+    },
+    "guard": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["bid", "then"],
+      "properties": {
+        "bid": { "type": "string", "minLength": 1 },
+        "then": { "type": "boolean" }
+      }
+    },
+    "effect": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["path", "value", "constant_value", "source_offset", "order", "guards", "origin", "operator"],
+      "properties": {
+        "path": { "type": "string" },
+        "value": { "type": "string" },
+        "constant_value": { "type": ["integer", "null"] },
+        "source_offset": { "type": "integer" },
+        "order": { "type": "integer" },
+        "guards": { "type": "array", "items": { "$ref": "#/$defs/guard" } },
+        "origin": { "anyOf": [{ "$ref": "#/$defs/value_origin" }, { "type": "null" }] },
+        "name": { "type": ["string", "null"] },
+        "operator": { "type": "string" }
+      }
+    },
+    "field_access": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["path", "read", "write", "copied_from_local", "line", "offset", "read_line", "read_offset", "write_line", "write_offset"],
+      "properties": {
+        "path": { "type": "string" },
+        "read": { "type": "boolean" },
+        "write": { "type": "boolean" },
+        "copied_from_local": { "type": "boolean" },
+        "line": { "type": "integer", "minimum": 1 },
+        "offset": { "type": "integer", "minimum": 0 },
+        "read_line": { "type": "integer", "minimum": 0 },
+        "read_offset": { "type": "integer", "minimum": 0 },
+        "write_line": { "type": "integer", "minimum": 0 },
+        "write_offset": { "type": "integer", "minimum": 0 }
+      }
+    },
+    "global_object": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["name", "read", "write", "is_const", "is_volatile", "is_union", "source_file", "array_sizes", "field_paths", "field_accesses", "read_line", "read_offset", "write_line", "write_offset", "provenance"],
+      "properties": {
+        "name": { "type": "string", "minLength": 1 },
+        "read": { "type": "boolean" },
+        "write": { "type": "boolean" },
+        "is_const": { "type": "boolean" },
+        "is_volatile": { "type": "boolean" },
+        "is_union": { "type": "boolean" },
+        "source_file": { "type": "string" },
+        "array_sizes": { "type": "array", "items": { "type": "integer", "minimum": 0 } },
+        "field_paths": { "type": "array", "items": { "type": "string" } },
+        "field_accesses": { "type": "array", "items": { "$ref": "#/$defs/field_access" } },
+        "read_line": { "type": "integer", "minimum": 0 },
+        "read_offset": { "type": "integer", "minimum": 0 },
+        "write_line": { "type": "integer", "minimum": 0 },
+        "write_offset": { "type": "integer", "minimum": 0 },
+        "provenance": { "$ref": "#/$defs/provenance" }
+      }
+    },
+    "access_path": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["path", "read", "write", "offset"],
+      "properties": {
+        "path": { "type": "string" },
+        "read": { "type": "boolean" },
+        "write": { "type": "boolean" },
+        "offset": { "type": "integer", "minimum": 0 }
+      }
+    },
     "param": {
       "type": "object",
       "additionalProperties": false,
-      "required": ["name", "type", "is_ptr", "is_const", "is_written", "extensions"],
+      "required": ["name", "type", "is_ptr", "is_const", "is_written", "type_info", "access_paths", "write_effects", "write_status", "extensions"],
       "properties": {
         "name": { "type": "string" },
         "type": { "type": "string" },
         "is_ptr": { "type": "boolean" },
         "is_const": { "type": "boolean" },
         "is_written": { "type": "boolean" },
+        "type_info": { "$ref": "#/$defs/type_info" },
+        "access_paths": { "type": "array", "items": { "$ref": "#/$defs/access_path" } },
+        "write_effects": { "type": "array", "items": { "$ref": "#/$defs/effect" } },
+        "write_status": { "type": "string", "enum": ["known", "unknown", "unsupported"] },
         "extensions": { "$ref": "#/$defs/extensions" }
       }
     },
@@ -143,14 +262,15 @@
       "type": "object",
       "additionalProperties": false,
       "required": [
-        "var", "var_type", "op", "boundary", "boundary_name", "text", "mask",
+        "var", "var_type", "op", "right", "boundary", "boundary_name", "text", "mask",
         "cond_text_spelling", "cond_text_expanded", "type_spelling", "canonical_type",
-        "qualifiers", "provenance", "extensions"
+        "qualifiers", "type_info", "provenance", "extensions"
       ],
       "properties": {
         "var": { "type": "string" },
         "var_type": { "type": ["string", "null"] },
         "op": { "type": "string", "enum": ["==", "!=", "<", "<=", ">", ">="] },
+        "right": { "type": ["string", "null"] },
         "boundary": { "type": ["integer", "number", "null"] },
         "boundary_name": { "type": ["string", "null"] },
         "text": { "type": "string" },
@@ -160,6 +280,7 @@
         "type_spelling": { "type": ["string", "null"] },
         "canonical_type": { "type": ["string", "null"] },
         "qualifiers": { "type": "array", "items": { "type": "string" } },
+        "type_info": { "$ref": "#/$defs/type_info" },
         "provenance": { "$ref": "#/$defs/provenance" },
         "extensions": { "$ref": "#/$defs/extensions" }
       }
@@ -167,11 +288,12 @@
     "case": {
       "type": "object",
       "additionalProperties": false,
-      "required": ["label", "value", "is_default", "provenance", "extensions"],
+      "required": ["label", "value", "is_default", "value_proof", "provenance", "extensions"],
       "properties": {
         "label": { "type": "string" },
         "value": { "type": ["integer", "null"] },
         "is_default": { "type": "boolean" },
+        "value_proof": { "type": ["string", "null"] },
         "provenance": { "$ref": "#/$defs/provenance" },
         "extensions": { "$ref": "#/$defs/extensions" }
       }
@@ -183,7 +305,7 @@
         "bid", "kind", "line", "file", "cond_text", "cond_text_spelling",
         "cond_text_expanded", "atoms", "cases", "from_macro", "chain_index",
         "connective", "reach_min", "reach_max", "constant_value", "constant_reason",
-        "parent_bid", "provenance", "extensions"
+        "parent_bid", "condition_tree", "selector", "provenance", "extensions"
       ],
       "properties": {
         "bid": { "type": "string", "minLength": 1 },
@@ -203,6 +325,8 @@
         "constant_value": { "type": ["boolean", "null"] },
         "constant_reason": { "type": ["string", "null"] },
         "parent_bid": { "type": ["string", "null"] },
+        "condition_tree": { "type": ["object", "null"] },
+        "selector": { "anyOf": [{ "$ref": "#/$defs/value_origin" }, { "type": "null" }] },
         "provenance": { "$ref": "#/$defs/provenance" },
         "extensions": { "$ref": "#/$defs/extensions" }
       }
@@ -211,11 +335,14 @@
       "type": "object",
       "additionalProperties": false,
       "required": [
-        "order", "callee", "line", "via_macro", "ptr_call", "is_static", "table_base",
-        "table_member", "arg_types", "params", "ret_type", "provenance", "extensions"
+        "order", "call_id", "callee", "line", "via_macro", "ptr_call", "is_static", "table_base",
+        "table_member", "arg_types", "arg_type_infos", "params", "ret_type", "callee_kind", "max_occurrences",
+        "return_used", "pointer_arguments", "caller_param_fields", "caller_param_output",
+        "param_fields", "return_fields", "guards", "provenance", "extensions"
       ],
       "properties": {
         "order": { "type": "integer", "minimum": 0 },
+        "call_id": { "type": "string", "minLength": 1 },
         "callee": { "type": "string", "minLength": 1 },
         "line": { "type": "integer", "minimum": 1 },
         "via_macro": { "type": ["string", "null"] },
@@ -224,8 +351,25 @@
         "table_base": { "type": ["string", "null"] },
         "table_member": { "type": ["string", "null"] },
         "arg_types": { "type": "array", "items": { "type": "string" } },
+        "arg_type_infos": { "type": "array", "items": { "$ref": "#/$defs/type_info" } },
         "params": { "type": "array", "items": { "$ref": "#/$defs/param" } },
         "ret_type": { "type": "string" },
+        "callee_kind": { "type": "string", "enum": ["direct", "indirect", "memory_helper", "unknown"] },
+        "max_occurrences": { "type": "integer", "minimum": 1 },
+        "return_used": { "type": "boolean" },
+        "pointer_arguments": {
+          "type": "object",
+          "additionalProperties": {
+            "type": "object", "additionalProperties": false,
+            "required": ["is_address", "is_null"],
+            "properties": { "is_address": { "type": "boolean" }, "is_null": { "type": "boolean" } }
+          }
+        },
+        "caller_param_fields": { "type": "object", "additionalProperties": { "type": "array", "items": { "type": "string" } } },
+        "caller_param_output": { "type": "object", "additionalProperties": { "type": "boolean" } },
+        "param_fields": { "type": "object", "additionalProperties": { "type": "array", "items": { "type": "string" } } },
+        "return_fields": { "type": "array", "items": { "type": "string" } },
+        "guards": { "type": "array", "items": { "$ref": "#/$defs/guard" } },
         "provenance": { "$ref": "#/$defs/provenance" },
         "extensions": { "$ref": "#/$defs/extensions" }
       }
@@ -235,7 +379,7 @@
       "additionalProperties": false,
       "required": [
         "name", "var", "source", "set_via", "var_type", "constant_value",
-        "constant_reason", "branch_ids", "provenance", "extensions"
+        "constant_reason", "branch_ids", "type_info", "value_origin", "provenance", "extensions"
       ],
       "properties": {
         "name": { "type": "string" },
@@ -246,6 +390,8 @@
         "constant_value": { "type": ["integer", "null"] },
         "constant_reason": { "type": ["string", "null"] },
         "branch_ids": { "type": "array", "items": { "type": "string" } },
+        "type_info": { "$ref": "#/$defs/type_info" },
+        "value_origin": { "anyOf": [{ "$ref": "#/$defs/value_origin" }, { "type": "null" }] },
         "provenance": { "$ref": "#/$defs/provenance" },
         "extensions": { "$ref": "#/$defs/extensions" }
       }
@@ -274,10 +420,11 @@
       "type": "object",
       "additionalProperties": false,
       "required": [
-        "name", "file", "line", "line_end", "ret_type", "params", "globals_used",
+        "name", "file", "line", "line_end", "ret_type", "is_static", "params", "globals_used",
         "locals", "calls", "branches", "config", "notes", "enums", "global_writes",
-        "control_vars", "config_ptrs", "memory_vars", "status", "provenance",
-        "diagnostics", "extensions"
+        "control_vars", "config_ptrs", "memory_vars", "parameter_write_effects",
+        "global_write_effects", "local_value_effects", "return_effects", "global_objects",
+        "status", "provenance", "diagnostics", "extensions"
       ],
       "properties": {
         "name": { "type": "string", "minLength": 1 },
@@ -285,6 +432,7 @@
         "line": { "type": "integer", "minimum": 1 },
         "line_end": { "type": "integer", "minimum": 1 },
         "ret_type": { "type": "string" },
+        "is_static": { "type": "boolean" },
         "params": { "type": "array", "items": { "$ref": "#/$defs/param" } },
         "globals_used": { "type": "array", "items": { "type": "string" } },
         "locals": { "type": "array", "items": { "type": "string" } },
@@ -303,6 +451,11 @@
         "control_vars": { "type": "array", "items": { "$ref": "#/$defs/control_var" } },
         "config_ptrs": { "type": "array", "items": { "type": "string" } },
         "memory_vars": { "type": "array", "items": { "$ref": "#/$defs/memory_var" } },
+        "parameter_write_effects": { "type": "array", "items": { "$ref": "#/$defs/effect" } },
+        "global_write_effects": { "type": "array", "items": { "$ref": "#/$defs/effect" } },
+        "local_value_effects": { "type": "array", "items": { "$ref": "#/$defs/effect" } },
+        "return_effects": { "type": "array", "items": { "$ref": "#/$defs/effect" } },
+        "global_objects": { "type": "array", "items": { "$ref": "#/$defs/global_object" } },
         "status": { "$ref": "#/$defs/status" },
         "provenance": { "$ref": "#/$defs/provenance" },
         "diagnostics": { "type": "array", "items": { "$ref": "#/$defs/issue" } },

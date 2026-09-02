@@ -217,7 +217,7 @@ def compress_corpora(
         min_projects=min_projects,
     )
     result["source_corpora"] = [
-        str(corpus.get("roots", {}).get("winams", "")) for corpus in corpora
+        str(corpus.get("roots", {}).get("evidence", "")) for corpus in corpora
     ]
     result["candidate_pack"]["profile"] = merged["candidate_pack"].get("profile", {})
     return result

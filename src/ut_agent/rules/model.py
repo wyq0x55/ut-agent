@@ -1,6 +1,6 @@
 """规则引擎的语义模型。
 
-这些 dataclass 是 FunctionIR 与 WinAMS CSV 之间的确定性契约。生成器只把
+这些 dataclass 是 FunctionIR 与目标输出适配器之间的确定性契约。生成器只把
 ``VALIDATED`` 的 TestIntent 交给渲染层；不能证明的用例保留在 manifest 中。
 """
 from __future__ import annotations
@@ -79,11 +79,6 @@ class GenerationResult:
     intents: tuple[TestIntent, ...] = ()
     issues: tuple[str, ...] = ()
     rule_pack: str = "builtin"
-    input_columns: tuple[str, ...] = ()
-    output_columns: tuple[str, ...] = ()
-    branch_labels: tuple[str, ...] = ()
-    golden_outcome_labels: tuple[tuple[str, ...], ...] = ()
-    stub_declarations: tuple[tuple[str, ...], ...] = ()
 
     @property
     def validated_intents(self) -> tuple[TestIntent, ...]:
@@ -95,11 +90,6 @@ class GenerationResult:
             "function": self.function,
             "status": self.status,
             "rule_pack": self.rule_pack,
-            "input_columns": list(self.input_columns),
-            "output_columns": list(self.output_columns),
-            "branch_labels": list(self.branch_labels),
-            "golden_outcome_labels": [list(item) for item in self.golden_outcome_labels],
-            "stub_declarations": [list(item) for item in self.stub_declarations],
             "issues": list(self.issues),
             "intents": [item.to_dict() for item in self.intents],
         }

@@ -6,7 +6,7 @@ from types import SimpleNamespace
 
 import pytest
 
-from ut_agent.ir import FunctionIR
+from ut_agent.ir import FunctionIR, Provenance, SourceLocation
 from ut_agent.parser.clang_extractor import (
     ClangExtractor,
     ClangExtractorError,
@@ -18,8 +18,25 @@ from ut_agent.winams.csv_render import render_csv
 
 
 def _document(status: str = "PARTIAL") -> dict:
+    location = SourceLocation("sample.c", 1, 1, 0, 1)
     document = FunctionIR(
-        name="target", file="sample.c", line=1, line_end=1, ret_type="void"
+        name="target", file="sample.c", line=1, line_end=1, ret_type="void",
+        provenance=Provenance(location, location, ast_kind="FunctionDecl"),
+        compile_context={
+            "schema_version": 1,
+            "language": "c",
+            "standard": "c11",
+            "source_files": ["sample.c"],
+            "include_dirs": [],
+            "defines": {},
+            "force_includes": [],
+            "target_triple": None,
+            "cpu": None,
+            "abi": None,
+            "sysroot": None,
+            "resource_dir": None,
+            "extra_args": [],
+        },
     ).to_dict()
     document["status"] = status
     if status == "ERROR":

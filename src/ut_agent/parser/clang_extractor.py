@@ -148,7 +148,7 @@ def make_compile_context(
 
 @dataclass(frozen=True)
 class ClangExtractor:
-    """Invoke one pinned extractor executable and map its v2 result."""
+    """Invoke one pinned extractor executable and map its v3 result."""
 
     executable: Path
     timeout: float = 120.0
@@ -171,7 +171,7 @@ class ClangExtractor:
         with tempfile.TemporaryDirectory(prefix="ut-agent-clang-") as directory:
             directory_path = Path(directory)
             context_path = directory_path / "compile-context.json"
-            output_path = directory_path / "function-ir-v2.json"
+            output_path = directory_path / "function-ir-v3.json"
             context_path.write_text(
                 json.dumps(
                     context.to_dict(),

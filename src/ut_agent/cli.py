@@ -66,7 +66,7 @@ def main(argv=None) -> int:
                    help="全局/静态初始化所在的 C 源文件（可多次指定）")
     p.add_argument("--watch-macro", action="append", default=[],
                    help="需标记来源的函数宏（默认 VALIDATE_RV 等）")
-    p.add_argument("--clang-extractor", default=_default_clang_extractor(),
+    p.add_argument("--clang-extractor", default=None,
                    help="使用指定的 standalone Clang extractor")
     p.add_argument("-o", "--output", help="IR JSON 输出路径（缺省打印）")
     p.add_argument("--list", action="store_true", help="只列出文件内函数")
@@ -84,7 +84,7 @@ def main(argv=None) -> int:
     g.add_argument("--cfg-display", default="", help="CSV 头部 CFG 行的展示文本")
     g.add_argument("--reference-csv", help="已废弃：TestCsv 只可用于生成后对照，不参与生成")
     g.add_argument("--rules", help="已审批的 JSON 规则包")
-    g.add_argument("--clang-extractor", default=_default_clang_extractor(),
+    g.add_argument("--clang-extractor", default=None,
                    help="使用指定的 standalone Clang extractor")
     g.add_argument("--intent-manifest", help="测试意图 manifest 路径；缺省写入输出目录")
     g.add_argument("--winams-source-label", default="", help="WinAMS mod 行的被测对象标识")
@@ -96,7 +96,7 @@ def main(argv=None) -> int:
     b.add_argument("-I", "--include", action="append", default=[])
     b.add_argument("-D", "--define", action="append", default=[], metavar="NAME=VALUE")
     b.add_argument("--include-config")
-    b.add_argument("--clang-extractor", default=_default_clang_extractor(),
+    b.add_argument("--clang-extractor", default=None,
                    help="使用指定的 standalone Clang extractor")
     b.add_argument("--out", default=".build/batch")
     b.add_argument("--exec-limit", type=int, default=20000)
@@ -115,7 +115,7 @@ def main(argv=None) -> int:
                      help="一次 C++ 提取的超时秒数")
     psd.add_argument("-D", "--define", action="append", default=[], metavar="NAME=VALUE")
     psd.add_argument("--rules", help="已审批的 JSON 规则包")
-    psd.add_argument("--clang-extractor", default=_default_clang_extractor(),
+    psd.add_argument("--clang-extractor", default=None,
                      help="使用指定的 standalone Clang extractor")
     arm = sub.add_parser("arm-build", help="使用 Arm GNU Toolchain 生成带 DWARF 的 ARM ELF")
     arm.add_argument("source", nargs="+", help="一个或多个 C 源文件")
@@ -157,7 +157,7 @@ def main(argv=None) -> int:
                          help="SSTManager.exe 路径")
     project.add_argument("--timeout", type=float, default=120.0,
                          help="每个 WinAMS 用例超时秒数")
-    project.add_argument("--clang-extractor", default=_default_clang_extractor(),
+    project.add_argument("--clang-extractor", default=None,
                          help="使用指定的 standalone Clang extractor")
     project.add_argument("--rules", help="已审批的 JSON 规则包")
     rules = sub.add_parser("rules", help="规则包归纳与审查辅助")
@@ -169,6 +169,8 @@ def main(argv=None) -> int:
     infer.add_argument("-I", "--include", action="append", default=[])
     infer.add_argument("-D", "--define", action="append", default=[], metavar="NAME=VALUE")
     infer.add_argument("--include-config")
+    infer.add_argument("--clang-extractor", default=None,
+                       help="使用指定的 standalone Clang extractor")
     infer.add_argument("-o", "--output", required=True, help="候选规则 JSON 输出路径")
     infer.add_argument("--merge", action="store_true",
                        help="输出已存在时合并候选规则，供多函数规则包归纳")
@@ -268,7 +270,8 @@ def main(argv=None) -> int:
             Path(a.product_root),
             Path(a.out),
             reference_root=Path(a.reference_root) if a.reference_root else None,
-            clang_extractor=Path(a.clang_extractor),
+            clang_extractor=(Path(a.clang_extractor)
+                             if a.clang_extractor else None),
             rules_path=Path(a.rules) if a.rules else None,
             defines=defines,
             call_max=a.call_max,
@@ -428,7 +431,7 @@ def main(argv=None) -> int:
             return 0
 
         if a.rules_cmd == "collect":
-            from ut_agent.rules.corpus import collect_rule_corpus
+            from ut_agent.parser.rule_corpus import collect_rule_corpus
 
             defines = {}
             for item in a.define:
@@ -509,7 +512,10 @@ def main(argv=None) -> int:
         source = Path(a.source)
         from ut_agent.parser import ClangExtractor, make_compile_context
         from ut_agent.parser import default_clang_extractor
-        extractor = ClangExtractor(default_clang_extractor())
+        extractor = ClangExtractor(
+            Path(a.clang_extractor) if a.clang_extractor
+            else default_clang_extractor()
+        )
         context = make_compile_context(
             _compile_sources(source, [], discover=True),
             a.include,
@@ -564,7 +570,11 @@ def main(argv=None) -> int:
             defines,
             [Path(a.include_config)] if a.include_config else (),
         )
-        extractor = ClangExtractor(Path(a.clang_extractor))
+        from ut_agent.parser import default_clang_extractor
+        extractor = ClangExtractor(
+            Path(a.clang_extractor) if a.clang_extractor
+            else default_clang_extractor()
+        )
         ir = extractor.extract_from_source(
             context, a.function, source, cwd=source.parent
         )
@@ -604,7 +614,11 @@ def main(argv=None) -> int:
     from ut_agent.parser.ir_json import serialize_document
 
     source = Path(a.source)
-    client = ClangExtractor(Path(a.clang_extractor))
+    from ut_agent.parser import default_clang_extractor
+    client = ClangExtractor(
+        Path(a.clang_extractor) if a.clang_extractor
+        else default_clang_extractor()
+    )
     context = make_compile_context(
         _compile_sources(source, a.context_source, discover=not a.list),
         a.include,

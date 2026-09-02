@@ -1,4 +1,4 @@
-"""P0 contract tests for FunctionIR v2 and the public C evidence fixtures."""
+"""FunctionIR v3 contract tests and the public C evidence fixtures."""
 from __future__ import annotations
 
 import copy
@@ -16,6 +16,7 @@ from ut_agent.ir import (
     Param,
     Provenance,
     SourceLocation,
+    TypeInfo,
 )
 from ut_agent.parser.ir_json import (
     FunctionIRSchemaError,
@@ -44,12 +45,17 @@ def _provenance(kind: str = "FixtureNode") -> Provenance:
 
 
 def _document() -> dict:
+    type_info = TypeInfo(
+        canonical_type="int", kind="integer", bit_width=32, signed=True,
+        min_value=-(2**31), max_value=2**31 - 1,
+    )
     atom = Atom(
         var="value", var_type="int", op="==", boundary=1,
         boundary_name=None, text="value == 1", mask=None,
         cond_text_spelling="value == MODE_ON",
         cond_text_expanded="value == 1",
-        type_spelling="int", canonical_type="int", provenance=_provenance("BinaryOperator"),
+        type_spelling="int", canonical_type="int", type_info=type_info,
+        provenance=_provenance("BinaryOperator"),
     )
     branch = Branch(
         bid="B01", kind="if", line=9, file=str(FIXTURE_ROOT / "sample.c"),
@@ -59,10 +65,11 @@ def _document() -> dict:
     )
     ir = FunctionIR(
         name="target", file=str(FIXTURE_ROOT / "sample.c"), line=7, line_end=25,
-        ret_type="int", params=[Param("value", "int")], branches=[branch],
+        ret_type="int", params=[Param("value", "int", type_info=type_info)], branches=[branch],
         control_vars=[ControlVar(
             name="value", var="value", source="param", var_type="int",
-            branch_ids=["B01"], provenance=_provenance("DeclRefExpr"),
+            branch_ids=["B01"], type_info=type_info,
+            provenance=_provenance("DeclRefExpr"),
         )],
         provenance=_provenance("FunctionDecl"),
         compile_context={
@@ -96,8 +103,9 @@ def test_fixture_fact_manifest_is_complete_and_deterministic():
     assert all(item["source"] and item["reason"] for item in manifest["facts"])
 
 
-def test_valid_document_round_trips_and_function_ir_to_dict_is_top_level_v2():
+def test_valid_document_round_trips_and_function_ir_to_dict_is_top_level_v3():
     document = _document()
+    assert document["schema_version"] == 3
     validate_document(document)
     restored = document_to_function_ir(document)
     assert restored.name == "target"
@@ -149,12 +157,17 @@ def test_duplicate_branch_and_invalid_branch_reference_are_rejected():
         validate_document(invalid_reference)
 
 
-def test_legacy_ir_without_ranges_is_explicitly_partial():
+def test_ir_without_extractor_provenance_is_rejected():
     ir = FunctionIR(name="legacy", file="legacy.c", line=1, ret_type="void", line_end=1)
-    document = ir.to_dict()
-    assert document["status"] == "PARTIAL"
-    assert document["diagnostics"][0]["code"] == "LEGACY_PROVENANCE_APPROXIMATION"
-    validate_document(document)
+    with pytest.raises(FunctionIRSchemaError, match="缺少 extractor provenance"):
+        ir.to_dict()
+
+
+def test_untyped_semantic_fact_is_rejected():
+    document = _document()
+    document["functions"][0]["params"][0]["type_info"] = None
+    with pytest.raises(FunctionIRSchemaError, match="type_info"):
+        validate_document(document)
 
 
 def test_invalid_c_fixture_fails_without_success_document():

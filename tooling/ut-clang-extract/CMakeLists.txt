@@ -1,4 +1,8 @@
-add_executable(ut-clang-extract main.cpp)
+add_executable(ut-clang-extract
+  main.cpp
+  passes/contract_validation.cpp
+  passes/type_facts.cpp
+)
 
 target_include_directories(ut-clang-extract PRIVATE
   ${LLVM_INCLUDE_DIRS}
