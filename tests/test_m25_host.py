@@ -8,10 +8,10 @@ import re
 import pytest
 
 from conftest import CP, CFG, DEFINES, ROOT, build_tu_ir
-from ut_agent.cases import boundary
-from ut_agent.host import driver as driver_gen
-from ut_agent.host import extract, run
-from ut_agent.winams.csv_render import render_spec_csv
+from ut_agent.generation import boundary
+from ut_agent.toolchain import driver as driver_gen
+from ut_agent.toolchain import harness, process
+from ut_agent.targets.winams.csv import render_spec_csv
 
 GOLDEN = ROOT / "examples" / "golden" / "CanIf_SetPduMode"
 BUILD = ROOT / ".build" / "host"
@@ -40,11 +40,11 @@ def _repo_defines() -> dict:
 @pytest.fixture(scope="module")
 def executed():
     tu, ir = build_tu_ir()
-    from ut_agent.winams.csv_render import build_columns
+    from ut_agent.targets.winams.csv import build_columns
     cols, rows = boundary.enumerate_rows(ir)
     columns = build_columns(ir, boundary.control_candidates(ir))
     driver_code = driver_gen.render_driver(ir, columns, cols, rows)
-    source = extract.build_harness_source(tu, ir, driver_code)
+    source = harness.build_harness_source(tu, ir, driver_code)
     BUILD.mkdir(parents=True, exist_ok=True)
     c_file = BUILD / "harness.c"
     c_file.write_text(source, encoding="utf-8")
@@ -52,7 +52,7 @@ def executed():
     includes = [CP / "include", CP / "include" / "generic", CP / "base" / "compiler",
                 CP / "drivers" / "CanTrcv", CFG]
     includes += sorted(p for p in CP.rglob("inc") if p.is_dir())
-    lines = run.compile_and_run(c_file, BUILD, includes, DEFINES)
+    lines = process.compile_and_run(c_file, BUILD, includes, DEFINES)
     results = run.parse_result_lines(lines)
     return ir, cols, rows, results
 

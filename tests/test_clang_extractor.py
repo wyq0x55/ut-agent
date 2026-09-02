@@ -7,14 +7,14 @@ from types import SimpleNamespace
 import pytest
 
 from ut_agent.ir import FunctionIR, Provenance, SourceLocation
-from ut_agent.parser.clang_extractor import (
+from ut_agent.toolchain.extractor import (
     ClangExtractor,
     ClangExtractorError,
     default_clang_extractor,
     make_compile_context,
 )
-from ut_agent.parser.ir_json import serialize_document
-from ut_agent.winams.csv_render import render_csv
+from ut_agent.ir.codec import serialize_document
+from ut_agent.targets.winams.csv import render_csv
 
 
 def _document(status: str = "PARTIAL") -> dict:
@@ -75,7 +75,7 @@ def test_client_validates_and_maps_extractor_output(tmp_path: Path, monkeypatch)
         return SimpleNamespace(returncode=0, stdout="", stderr="")
 
     monkeypatch.setattr(
-        "ut_agent.parser.clang_extractor.subprocess.run", fake_run
+        "ut_agent.toolchain.extractor.subprocess.run", fake_run
     )
     client = ClangExtractor(executable)
     context = make_compile_context([tmp_path / "sample.c"])
@@ -98,7 +98,7 @@ def test_client_rejects_error_document(tmp_path: Path, monkeypatch):
         return SimpleNamespace(returncode=1, stdout="", stderr="clang failed")
 
     monkeypatch.setattr(
-        "ut_agent.parser.clang_extractor.subprocess.run", fake_run
+        "ut_agent.toolchain.extractor.subprocess.run", fake_run
     )
     with pytest.raises(ClangExtractorError, match="synthetic extractor failure"):
         ClangExtractor(executable).extract(

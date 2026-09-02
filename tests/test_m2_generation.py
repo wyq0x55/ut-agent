@@ -8,9 +8,9 @@ golden 是契约（docs/用例表与CSV格式规格.md）：
 import re
 
 from conftest import ROOT, build_ir
-from ut_agent.cases import boundary
-from ut_agent.stub.generate import render_spec_stub_c
-from ut_agent.winams.csv_render import build_columns, render_spec_csv
+from ut_agent.generation import boundary
+from ut_agent.targets.winams.stub import render_spec_stub_c
+from ut_agent.targets.winams.csv import build_columns, render_spec_csv
 
 GOLDEN = ROOT / "examples" / "golden" / "CanIf_SetPduMode"
 CFG_DISPLAY = ("CANIF_CHANNEL_CNT=2 ; CANIF_PUBLIC_DEV_ERROR_DETECT=STD_ON ; "

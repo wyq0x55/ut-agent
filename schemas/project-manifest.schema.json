@@ -1,0 +1,36 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://ut-agent.local/schema/project-manifest.json",
+  "title": "ut-agent ProjectManifest",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["project", "baseline"],
+  "properties": {
+    "project": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["id"],
+      "properties": {"id": {"type": "string", "minLength": 1}}
+    },
+    "baseline": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["id", "version"],
+      "properties": {
+        "id": {"type": "string", "minLength": 1},
+        "version": {"type": "string", "minLength": 1}
+      }
+    },
+    "targets": {"type": "object"},
+    "rules": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "project_pack": {"type": ["string", "null"]}
+      }
+    },
+    "build": {"type": "object"},
+    "winams": {"type": "object"},
+    "profile": {"type": "object"}
+  }
+}

@@ -1,0 +1,23 @@
+baseline:
+  id: psd-rebuild-mcdc
+  version: "1.0"
+  status: approved
+  base_profile: "PSD再構築"
+  mcdc_enabled: true
+  approved_exceptions: []
+  source:
+    document: "単体テスト項目基準書_Ver.1.6.xlsx"
+  coverage:
+    criterion: "PSD再構築"
+  condition_policy:
+    mcdc: true
+  boundary_policy:
+    typed: true
+  switch_policy:
+    preserve_cases: true
+  loop_policy: {}
+  array_policy: {}
+  stub_policy:
+    external_calls_are_environment: true
+  ordering_policy:
+    deterministic: true

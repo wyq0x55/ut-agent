@@ -2,7 +2,7 @@ import json
 import struct
 
 from ut_agent import cli
-from ut_agent.artifacts import (
+from ut_agent.reporting import (
     analyze_artifacts,
     read_elf,
     read_map,

@@ -1,0 +1,32 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://ut-agent.local/schema/test-baseline.json",
+  "title": "ut-agent TestBaseline",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["baseline"],
+  "properties": {
+    "baseline": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["id", "version", "status"],
+      "properties": {
+        "id": {"type": "string", "minLength": 1},
+        "version": {"type": "string", "minLength": 1},
+        "status": {"const": "approved"},
+        "base_profile": {"type": "string"},
+        "mcdc_enabled": {"type": "boolean"},
+        "approved_exceptions": {"type": "array", "items": {"type": "string"}},
+        "source": {"type": "object"},
+        "coverage": {"type": "object"},
+        "condition_policy": {"type": "object"},
+        "boundary_policy": {"type": "object"},
+        "switch_policy": {"type": "object"},
+        "loop_policy": {"type": "object"},
+        "array_policy": {"type": "object"},
+        "stub_policy": {"type": "object"},
+        "ordering_policy": {"type": "object"}
+      }
+    }
+  }
+}

@@ -4,7 +4,7 @@ from pathlib import Path
 
 import pytest
 
-from ut_agent.parser import (
+from ut_agent.toolchain import (
     ClangExtractor,
     default_clang_extractor,
     make_compile_context,

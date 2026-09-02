@@ -1,0 +1,5 @@
+profile:
+  id: standard
+  encoding: cp932
+  newline: CRLF
+  fixed_schema: true

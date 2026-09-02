@@ -1,9 +1,9 @@
 import json
 
 from ut_agent.ir import Atom, Branch, ControlVar, FunctionIR, Param
-from ut_agent.rules import generate_intents
-from ut_agent.rules.compress import _branch_family, _digest, compress_corpus, compress_corpora
-from ut_agent.rules.pack import Rule, RulePack, approve_rule_pack, load_rule_pack, review_rule_pack
+from ut_agent.generation import generate_intents
+from ut_agent.learning.compress import _branch_family, _digest, compress_corpus, compress_corpora
+from ut_agent.generation.pack import Rule, RulePack, approve_rule_pack, load_rule_pack, review_rule_pack
 
 
 def _corpus(function: str, project: str = "P"):

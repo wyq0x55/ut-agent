@@ -7,16 +7,16 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from ut_agent.cases import boundary
-from ut_agent.host import driver as driver_gen
-from ut_agent.host import extract, run
-from ut_agent.parser import (
+from ut_agent.generation import boundary
+from ut_agent.toolchain import driver as driver_gen
+from ut_agent.toolchain import harness, process
+from ut_agent.toolchain import (
     ClangExtractor,
     default_clang_extractor,
     discover_compile_sources,
     make_compile_context,
 )
-from ut_agent.winams.csv_render import build_columns
+from ut_agent.targets.winams.csv import build_columns
 
 EXEC_LIMIT = 20000   # 用例数超过即跳过执行（pairwise 降维前的保护）
 
@@ -76,12 +76,12 @@ def run_batch(source: Path, functions=None, includes=(), gcc_includes=None,
                 results.append(rec)
                 continue
             driver_code = driver_gen.render_driver(ir, columns, cols, rows)
-            harness = extract.build_harness_source(ir, driver_code)
+            harness_source = harness.build_harness_source(ir, driver_code)
             d = out_dir / fn
             d.mkdir(parents=True, exist_ok=True)
             c_file = d / "harness.c"
-            c_file.write_text(harness, encoding="utf-8")
-            lines = run.compile_and_run(c_file, d, gcc_includes, defines)
+            c_file.write_text(harness_source, encoding="utf-8")
+            lines = process.compile_and_run(c_file, d, gcc_includes, defines)
             if len(lines) == len(rows):
                 if not rows:
                     rec["status"] = "NEEDS_REVIEW"

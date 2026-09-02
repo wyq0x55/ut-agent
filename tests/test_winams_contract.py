@@ -9,14 +9,14 @@ from ut_agent.ir import (
     Atom, Branch, CallSite, Case, ControlVar, FunctionIR, MemoryVar, Param,
     Provenance, SourceLocation,
 )
-from ut_agent.parser import ClangExtractor, default_clang_extractor, make_compile_context
-from ut_agent.stub.generate import render_spec_stub_c, render_stub_c
-from ut_agent.winams.define_var import (
+from ut_agent.toolchain import ClangExtractor, default_clang_extractor, make_compile_context
+from ut_agent.targets.winams.stub import render_spec_stub_c, render_stub_c
+from ut_agent.targets.winams.define_var import (
     DefineVarEntry,
     entries_from_ir,
     render_define_var,
 )
-from ut_agent.winams.project import (
+from ut_agent.targets.winams.project import (
     GeneratedUnit,
     _amsy_text,
     _winams_batch_args,
@@ -24,8 +24,11 @@ from ut_agent.winams.project import (
     _winams_mpu_for_cpu,
     _wsl_to_windows,
 )
-from ut_agent.rules.model import GenerationResult, NEEDS_REVIEW
-from ut_agent.winams.csv_render import build_columns, render_csv, render_intents_csv
+from ut_agent.generation.model import (
+    GenerationResult, NEEDS_REVIEW, TestIntent, TestObligation,
+    ValidationResult, VALIDATED,
+)
+from ut_agent.targets.winams.csv import build_columns, render_csv, render_intents_csv
 
 
 def _ir() -> FunctionIR:
@@ -162,7 +165,7 @@ def test_csv_qualifies_only_static_test_function_return():
     )
     assert comment[-1] == "target@@"
 
-    ir.extensions["is_static_function"] = True
+    ir.is_static = True
     static_comment = next(
         row for row in __import__("csv").reader(
             __import__("io").StringIO(render_csv(ir))
@@ -170,6 +173,43 @@ def test_csv_qualifies_only_static_test_function_return():
         if row and row[0] == "#COMMENT"
     )
     assert static_comment[-1] == "Dma.c/target@@"
+
+
+def test_static_pointer_pointee_column_uses_canonical_semantic_key():
+    ir = FunctionIR(
+        name="target",
+        file="Dma.c",
+        line=1,
+        ret_type="void",
+        params=[Param(
+            "data", "uint8 *", is_ptr=True, is_written=True,
+            access_paths=[{
+                "path": "*data", "read": True, "write": True,
+            }],
+        )],
+    )
+    ir.is_static = True
+    intent = TestIntent(
+        case_id="U001",
+        obligation=TestObligation("ENTRY", "execution"),
+        inputs={"param:data:address": 1, "param:data:pointee:value": 0},
+        expected={"param:data:pointee:value": 1},
+        validation=ValidationResult(VALIDATED, checks=("oracle",)),
+    )
+
+    rows = list(__import__("csv").reader(
+        __import__("io").StringIO(render_intents_csv(
+            ir, GenerationResult("target", VALIDATED, (intent,)),
+        ))
+    ))
+    comment = next(row for row in rows if row and row[0] == "#COMMENT")
+    data = next(row for row in rows if row and row[0] == "")
+
+    pointee_positions = [
+        index for index, value in enumerate(comment) if value == "@data[0]"
+    ]
+    assert len(pointee_positions) == 2
+    assert data[pointee_positions[-1]] == "0x1"
 
 
 def test_render_intents_includes_stub_declarations_and_columns():
