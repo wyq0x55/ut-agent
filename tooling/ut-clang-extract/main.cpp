@@ -758,6 +758,7 @@ class FunctionBodyVisitor final
   };
 
   struct ReturnEffect {
+    std::string Path = "return";
     std::string Value;
     std::optional<int64_t> ConstantValue;
     int64_t SourceOffset = -1;
@@ -779,6 +780,7 @@ class FunctionBodyVisitor final
   struct GlobalWriteEffect {
     std::string Path;
     std::string Value;
+    std::string Operation = "=";
     std::optional<int64_t> ConstantValue;
     std::optional<ValueOrigin> Origin;
     int64_t SourceOffset = -1;
@@ -963,6 +965,7 @@ public:
         Guards.push_back(llvm::json::Object{
             {"bid", Guard.first}, {"then", Guard.second}});
       Result.push_back(llvm::json::Object{
+          {"path", jsonText(Effect.Path)},
           {"value", jsonText(Effect.Value)},
           {"constant_value", Effect.ConstantValue
                                 ? llvm::json::Value(*Effect.ConstantValue)
@@ -971,7 +974,8 @@ public:
           {"order", Effect.Order},
           {"guards", std::move(Guards)},
           {"origin", Effect.Origin ? llvm::json::Value(origin(*Effect.Origin))
-                                    : llvm::json::Value(nullptr)}});
+                                    : llvm::json::Value(nullptr)},
+          {"operator", "return"}});
     }
     return Result;
   }
@@ -993,7 +997,8 @@ public:
           {"order", Effect.Order},
           {"guards", std::move(Guards)},
           {"origin", Effect.Origin ? llvm::json::Value(origin(*Effect.Origin))
-                                    : llvm::json::Value(nullptr)}});
+                                    : llvm::json::Value(nullptr)},
+          {"operator", jsonText(Effect.Operation)}});
     }
     return Result;
   }
@@ -1151,8 +1156,7 @@ public:
           {"write_line", static_cast<int64_t>(Fact.WriteLine)},
           {"write_offset", static_cast<int64_t>(Fact.WriteOffset)},
           {"provenance", provenance(SM, Fact.Range, "DeclRefExpr",
-                                     &LangOpts)},
-          {"extensions", emptyExtensions()}});
+                                     &LangOpts)}});
     }
     return Result;
   }
@@ -1922,6 +1926,8 @@ private:
     Effect.Value = text(Rhs->getSourceRange(), true);
     if (Effect.Value.empty())
       Effect.Value = prettyText(Rhs, LangOpts);
+    Effect.Operation =
+        BinaryOperator::getOpcodeStr(Operator->getOpcode()).str();
     Effect.ConstantValue = constantInteger(Rhs, Context);
     Effect.Origin = expressionOrigin(Rhs);
     Effect.SourceOffset = static_cast<int64_t>(SM.getFileOffset(

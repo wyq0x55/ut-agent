@@ -221,7 +221,7 @@ def test_standalone_resolves_function_pointer_table_initializer(tmp_path: Path):
     assert call.table_member == "get"
     assert call.extensions["resolved_via"] == "function_pointer_initializer"
     assert call.params[0].is_ptr is True
-    assert call.extensions["caller_param_output"]["0"] is False
+    assert call.caller_param_output["0"] is False
 
 
 def test_standalone_propagates_scalar_global_initializer_from_context_tu(
@@ -292,15 +292,15 @@ def test_standalone_tracks_local_control_value_origin(tmp_path: Path):
 
     table_control = next(item for item in ir.control_vars if item.name == "table_value")
     assert table_control.source == "derived"
-    assert table_control.extensions["value_origin"]["kind"] == "const_table_field"
-    assert table_control.extensions["value_origin"]["driver"] == "index"
-    assert table_control.extensions["value_origin"]["table_values"] == {
+    assert table_control.value_origin.kind == "const_table_field"
+    assert table_control.value_origin.driver == "index"
+    assert table_control.value_origin.table_values == {
         "0": 0, "1": 1,
     }
     status_control = next(item for item in ir.control_vars if item.name == "status")
     assert status_control.source == "stub"
-    assert status_control.extensions["value_origin"]["kind"] == "stub_return"
-    assert status_control.extensions["value_origin"]["callee"] == "get_status"
+    assert status_control.value_origin.kind == "stub_return"
+    assert status_control.value_origin.callee == "get_status"
 
 
 def test_standalone_keeps_function_scope_static_out_of_external_io(tmp_path: Path):
@@ -376,9 +376,8 @@ def test_standalone_tracks_return_and_local_value_effects(tmp_path: Path):
     ir = ClangExtractor(executable).extract(
         make_compile_context([source]), "target", cwd=tmp_path
     )
-    effects = ir.extensions["return_effects"]
-    assert effects and effects[0]["value"].strip("() ") == "result"
-    local_effects = ir.extensions["local_value_effects"]
-    assert {item["name"] for item in local_effects} == {"result"}
-    assert any(item["constant_value"] == 1 for item in local_effects)
-    assert any(item["origin"]["kind"] == "stub_return" for item in local_effects)
+    assert ir.return_effects and ir.return_effects[0].value.strip("() ") == "result"
+    local_effects = ir.local_value_effects
+    assert {item.name for item in local_effects} == {"result"}
+    assert any(item.constant_value == 1 for item in local_effects)
+    assert any(item.origin and item.origin.kind == "stub_return" for item in local_effects)
