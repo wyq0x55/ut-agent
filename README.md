@@ -9,7 +9,7 @@ C 源码 + 配置头
   │
   ▼
 ┌─────────────────────────────────────┐
-│  parser/  libclang 解析 → FunctionIR │
+│  parser/  C++ Clang LibTooling 提取 → FunctionIR │
 ├─────────────────────────────────────┤
 │  flow/     控制流 → 原子条件 + 控制变量 │
 ├─────────────────────────────────────┤
@@ -25,6 +25,10 @@ C 源码 + 配置头
 └─────────────────────────────────────┘
 ```
 
+用例生成核心采用确定性规则引擎：先产生带分支义务、约束、oracle 和证据链的
+`TestIntent`，验证通过后才渲染 WinAMS CSV。规则归纳与审批流程见
+[`docs/确定性规则引擎.md`](docs/确定性规则引擎.md)。
+
 ## 批量验证结果
 
 | 模块 | 函数数 | 全自动 | 说明 |
@@ -39,7 +43,7 @@ C 源码 + 配置头
 ## 快速开始
 
 ```bash
-# 安装（需要系统安装 libclang 16+）
+# 安装（需要先构建 C++ Clang LibTooling 提取器）
 pip install -e ".[dev]"
 
 # 批量跑某个源文件
@@ -47,7 +51,7 @@ ut-agent batch <source.c> -D MACRO=val --out .build/batch/<name> -I <include> ..
 
 # 生成 WinAMS 原生 stub 与 TestCsv（CSV 写为 CP932/CRLF）
 ut-agent gen <source.c> -f <function> --out .build/winams/<function> \
-  -I <include> --reference-csv <参考 TestCsv>
+  -I <include>
 
 # 用 Arm GNU Toolchain 生成带 DWARF 的 ARM ELF
 ut-agent arm-build <source.c> -o .build/winams/<function>.elf \
@@ -87,7 +91,7 @@ pytest tests/
 ## 依赖
 
 - Python >= 3.10
-- libclang >= 16
+- LLVM/Clang 16+ 与 C++ `ut-clang-extract`（LibTooling）
 - Arm GNU Toolchain（`arm-none-eabi-gcc`，生成 WinAMS 使用的 ARM ELF）
 - GCC（可选，仅用于 host 回放模式）
 

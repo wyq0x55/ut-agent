@@ -1,0 +1,15 @@
+{
+  "schema_version": 1,
+  "language": "c",
+  "standard": "c11",
+  "source_files": ["tests/fixtures/function_ir_v2/invalid.c"],
+  "include_dirs": ["tests/fixtures/function_ir_v2"],
+  "defines": {},
+  "force_includes": [],
+  "target_triple": null,
+  "cpu": null,
+  "abi": null,
+  "sysroot": null,
+  "resource_dir": null,
+  "extra_args": []
+}

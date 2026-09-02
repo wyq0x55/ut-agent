@@ -8,7 +8,7 @@ from pathlib import Path
 
 import pytest
 
-from ut_agent.parser import clang_parser
+from ut_agent.parser import ClangExtractor, default_clang_extractor, make_compile_context
 
 ROOT = Path(__file__).resolve().parents[1]
 CP = Path(os.environ.get("UT_AGENT_CLASSIC_PLATFORM",
@@ -27,9 +27,10 @@ def build_ir(function="CanIf_SetPduMode"):
                 CP / "drivers" / "CanTrcv", CFG, CFG / "libc_stub"]
     includes += sorted(p for p in CP.rglob("inc") if p.is_dir())
     defines = {"CANIF_CHANNEL_CNT": "2"}  # 其余配置在 CanIf_Cfg.h 内
-    # 函数级容忍：文件内其他函数的诊断错误不阻塞目标函数抽取
-    tu = clang_parser.parse_tu(SRC, includes, defines, strict=False)
-    return clang_parser.extract_function(tu, SRC, function, defines)
+    context = make_compile_context([SRC], includes, defines)
+    return ClangExtractor(default_clang_extractor()).extract(
+        context, function, cwd=SRC.parent
+    )
 
 
 @pytest.fixture(scope="module")

@@ -5,8 +5,10 @@ __pycache__/
 dist/
 build/
 *.egg-info/
-
+.pytest*
+.tmp
+tmp
 # 基准仓库体积大（数百 MB），暂不入库；是否走 Git LFS 另行决策
-examples/classic-platform/
-examples/asusar-comstack/
+examples
+examples
 .build/

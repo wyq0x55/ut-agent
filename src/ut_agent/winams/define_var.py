@@ -1,8 +1,9 @@
 """确定性生成 WinAMS 的 IO 登录副文件 ``DefineVar.dat``。
 
-WinAMS 没有公开的 ``DefineVar.dat`` 命令行注册接口。生成器从源码 AST
-只提取 memory-mapped IO 宏的地址和访问宽度；普通全局、指针和 stub
-变量不生成空定义记录。原工程 DefineVar 只作为显式兼容模式的输入，
+WinAMS 没有公开的 ``DefineVar.dat`` 命令行注册接口。生成器以源码 AST
+提取 memory-mapped IO 宏的地址和访问宽度；规则引擎的证据阶段可只读引用
+``Soft.map``/``Soft.out`` 对地址和符号进行交叉确认。普通全局、指针和 stub
+变量不生成空定义记录。原工程 DefineVar 只作为显式兼容模式的对照输入，
 不是默认数据源。
 """
 from __future__ import annotations

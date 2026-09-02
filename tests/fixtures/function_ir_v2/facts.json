@@ -1,0 +1,48 @@
+{
+  "schema_version": 1,
+  "fixture": "sample.c",
+  "facts": [
+    {
+      "id": "config-object-macro",
+      "source": "config.h:4",
+      "expected": "FEATURE_ON expands to integer constant 1",
+      "reason": "The object-like macro is defined in the force/include context and is consumed by target."
+    },
+    {
+      "id": "function-macro-condition",
+      "source": "sample.c:9",
+      "expected": "CHECK_NONZERO(value) remains linked to its macro spelling and expanded comparison",
+      "reason": "The function-like macro wraps a comparison and must retain both spelling and expansion provenance."
+    },
+    {
+      "id": "bitmask-condition",
+      "source": "sample.c:9",
+      "expected": "value & STATUS_MASK uses mask 0x30",
+      "reason": "STATUS_MASK is a configuration macro used in a structured condition."
+    },
+    {
+      "id": "elseif-and-switch-default",
+      "source": "sample.c:11,16-24",
+      "expected": "else-if chain and switch default are distinct control facts",
+      "reason": "Control structure identity must come from AST relationships, not line-text matching."
+    },
+    {
+      "id": "pointer-function-pointer-volatile",
+      "source": "sample.c:7,19,22",
+      "expected": "out is written, g_callback is an indirect call, REG_STATUS is volatile read/write",
+      "reason": "These facts drive later test/stub decisions and require explicit source evidence."
+    },
+    {
+      "id": "mmio-address-volatile",
+      "source": "config.h:7,sample.c:31-34",
+      "expected": "MMIO_STATUS is a volatile 32-bit access at address 0x40000000 and is conditional",
+      "reason": "Only a constant address carried by a volatile pointer macro is promoted to a memory fact."
+    },
+    {
+      "id": "invalid-input",
+      "source": "invalid.c:3",
+      "expected": "parse failure is explicit and cannot produce OK JSON",
+      "reason": "An unproven semantic fact must be represented as an error or unsupported result."
+    }
+  ]
+}

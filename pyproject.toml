@@ -7,7 +7,7 @@ name = "ut-agent"
 version = "0.1.0"
 description = "嵌入式 C 单元测试用例生成流水线：确定性枚举为主体，LLM 仅兜底（规格见 docs/用例表与CSV格式规格.md）"
 requires-python = ">=3.10"
-dependencies = ["libclang>=16"]
+dependencies = ["jsonschema>=4.21,<5"]
 
 [project.optional-dependencies]
 dev = ["pytest>=7"]

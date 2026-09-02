@@ -1,9 +1,0 @@
-mod,"Dma_Error","Dma_Error 単体テスト",3,1,,,,CPP,,,"",0
-%,"AMSTB_p_u1l_iohwa_dio_active_in","iohwa_dio.c/p_u1l_iohwa_dio_active_in"
-#COMMENT,"AMSTB_SrcFile.c/AMSTB_p_u1l_iohwa_dio_active_in@CALLCNT_p_u1l_iohwa_dio_active_in","U4L_DMA_REG_PDMA0DMACER","Dma.c/ptl_dma_callback_func","AMSTB_SrcFile.c/AMSTB_p_u1l_iohwa_dio_active_in@CALLCNT_p_u1l_iohwa_dio_active_in"
-;$L$,if ( ((u4)0x00000000UL)!=(u4a_dmacer&((u4)0x00000030UL)) )
-;$L$,TRUE
-,0,0x30,p_u1l_iohwa_dio_active_in,1,"OK",0.03ms
-,0,0xffffffff,p_u1l_iohwa_dio_active_in,1,"OK",0.03ms
-;$L$,FALSE
-,0,0x0,p_u1l_iohwa_dio_active_in,0,"OK",0.01ms

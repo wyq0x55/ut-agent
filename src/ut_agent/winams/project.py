@@ -1,13 +1,16 @@
 """从 Soft 输入生成自包含的 WinAMS 单元测试工程。
 
-这个模块的输入只有：
+这个模块的源码生成输入是：
 
 * 用户交付的 ``Soft`` 源码树；
 * 仓库内的项目 manifest（函数清单和配置宏）；
 * 可选的编译器/WinAMS 执行工具。
 
 默认生成不搜索参考工程的 ``winAMS/src``，也不读取 golden TestCsv/DefineVar。
-golden 只可通过显式校验选项作为只读对照物。
+golden 只可通过显式校验选项作为只读对照物。完整项目的 ``Soft.map``、``Soft.mot``、
+``Soft.out`` 和 ``Soft.out.xlo`` 属于规则引擎允许引用的证据范围；独立的产物分析
+阶段再按显式配置读取它们，用于地址、链接、机器码和 WinAMS 兼容性证据，不替代
+源码 AST 的语义分析。
 """
 from __future__ import annotations
 
@@ -26,7 +29,13 @@ from ut_agent.host.arm_gcc import (
     convert_to_winams_omf,
     find_arm_gcc,
 )
-from ut_agent.parser import clang_parser
+from ut_agent.parser import (
+    ClangExtractor,
+    default_clang_extractor,
+    discover_compile_sources,
+    make_compile_context,
+)
+from ut_agent.rules import generate_intents, load_rule_pack
 from ut_agent.stub import generate as stub_generate
 from ut_agent.winams import csv_render
 from ut_agent.winams.define_var import (
@@ -68,6 +77,8 @@ class GeneratedUnit:
     amsy: Path
     output: Path
     define_var: Path | None = None
+    intent_manifest: Path | None = None
+    generation_status: str = "UNSUPPORTED"
 
 
 @dataclass(frozen=True)
@@ -238,11 +249,14 @@ def generate_project(
     reference_xlo: str | Path | None = None,
     reference_mpu: str | None = None,
     reference_define_var: str | Path | None = None,
+    clang_extractor: str | Path | None = None,
+    rules_path: str | Path | None = None,
 ) -> GeneratedProject:
     """从 Soft 生成全部 manifest 用例；可选编译或引用已有 ELF/xlo。"""
     soft_root = soft_root.resolve()
     output_root = output_root.resolve()
     spec = load_project_spec(manifest.resolve())
+    rule_pack = load_rule_pack(Path(rules_path).resolve() if rules_path else None)
     reference_mode = reference_out is not None or reference_xlo is not None
     if reference_mode and build:
         raise ValueError("reference 模式不能同时编译新 ELF/xlo")
@@ -269,7 +283,6 @@ def generate_project(
     source = _copy_source(soft_root, spec.source, source_root)
     _copy_source_tree(soft_root, spec.include_root, source_root)
     include_dirs = discover_include_dirs(soft_root, spec.include_root)
-    tu = clang_parser.parse_tu(source, include_dirs, spec.defines, strict=False)
 
     selected_cpu = cpu or spec.cpu
     if build and selected_cpu.lower().startswith("rh850"):
@@ -287,22 +300,23 @@ def generate_project(
     if reference_mode and not mpu_name:
         raise ValueError("reference_mpu 不能为空")
 
-    # 第一遍只收集目标函数引用的全局名；第二遍把这些全局的源码定义
-    # 作为 AST 上下文传入。这样 Dma.c 中的 extern 声明可以追到
-    # Spi_Lcfg.c 的 const 数组初始化器，但不会读取 .out/.map 或原 TestCsv。
-    preliminary_irs = [
-        clang_parser.extract_function(tu, source, item.name, spec.defines)
-        for item in spec.functions
-    ]
-    context_names = {
-        name for ir in preliminary_irs for name in ir.globals_used
-    }
-    context_sources = clang_parser.find_definition_sources(
-        soft_root, context_names,
+    primary_source = (soft_root / spec.source).resolve()
+    selected_extractor = (
+        Path(clang_extractor).resolve() if clang_extractor
+        else default_clang_extractor()
     )
-    context_tus = tuple(
-        clang_parser.parse_tu(path, include_dirs, spec.defines, strict=False)
-        for path in context_sources
+    extractor = ClangExtractor(selected_extractor)
+    # Context discovery is filesystem-only.  All semantic facts, including
+    # static/global initializers and function-pointer targets, come from the
+    # C++ LibTooling extractor over these translation units.
+    context_sources = discover_compile_sources(soft_root, primary_source)
+    extractor_context = make_compile_context(
+        context_sources, include_dirs, spec.defines,
+    )
+    extracted = extractor.extract_targets(
+        extractor_context,
+        tuple((primary_source, item.name) for item in spec.functions),
+        cwd=primary_source.parent,
     )
     # 兼容此前已经生成的扁平观察目录：旧目录把源文件名落成普通文件，
     # 新布局无法在同一路径创建同名工程目录。只更新旧函数输出，不删除
@@ -310,9 +324,7 @@ def generate_project(
     legacy_unit_layout = (output_root / spec.source).is_file()
     units: list[GeneratedUnit] = []
     for item in spec.functions:
-        ir = clang_parser.extract_function(
-            tu, source, item.name, spec.defines, context_tus=context_tus,
-        )
+        ir = extracted[(primary_source, item.name)]
         # 保持原 WinAMS 的工程布局：<out>/src/.../<源文件>/<函数>/。
         # out 本身可以是 work/winAMS，也可以是 .build/ast-only-winams。
         unit_root = output_root if legacy_unit_layout else output_root / spec.source
@@ -327,12 +339,18 @@ def generate_project(
                 ir, spec.call_max, extra_includes=_direct_includes(source)
             ), encoding="utf-8", newline="\n"
         )
-        csv_text = csv_render.render_csv(
-            ir,
-            source_label=item.name,
+        generation = generate_intents(ir, rule_pack)
+        csv_text = csv_render.render_intents_csv(
+            ir, generation,
             title=f"{item.name} 単体テスト",
         )
         _write_cp932(testcsv, csv_text)
+        intent_manifest = unit_dir / "test-intents.json"
+        intent_manifest.parent.mkdir(parents=True, exist_ok=True)
+        intent_manifest.write_text(
+            json.dumps(generation.to_dict(), ensure_ascii=False, indent=2) + "\n",
+            encoding="utf-8",
+        )
 
         elf = xlo = None
         if reference_mode:
@@ -443,6 +461,8 @@ def generate_project(
             name=item.name, source=source, stub=stub, testcsv=testcsv,
             expected=item.expected, elf=elf, xlo=xlo, amsy=amsy, output=output_dir,
             define_var=define_var,
+            intent_manifest=intent_manifest,
+            generation_status=generation.status,
         ))
     return GeneratedProject(output_root, source, tuple(units))
 
@@ -453,7 +473,9 @@ def compare_bytes(actual: Path, expected: Path) -> bool:
 
 
 def compare_testcsv(project: GeneratedProject) -> list[tuple[str, bool]]:
-    """验证生成的输入 CSV 与本地 TestCsv golden 完全一致。"""
+    """验证生成用例与 TestCsv golden 的分支、列和取值语义等价。"""
+    from ut_agent.rules import semantic_csv_signature
+
     result = []
     for unit in project.units:
         if unit.expected is None:
@@ -462,7 +484,12 @@ def compare_testcsv(project: GeneratedProject) -> list[tuple[str, bool]]:
         # expected CSV 的路径由 manifest 的 testcsv 保存在生成前无法从 unit 直接
         # 得到，因此对有 expected 的用例按相邻的 TestCsv 路径约定校验。
         golden = unit.expected.parent / "TestCsv.csv"
-        result.append((unit.name, compare_bytes(unit.testcsv, golden)))
+        try:
+            actual = semantic_csv_signature(unit.testcsv)
+            expected = semantic_csv_signature(golden)
+            result.append((unit.name, actual == expected))
+        except (OSError, UnicodeError, ValueError):
+            result.append((unit.name, False))
     return result
 
 

@@ -1,8 +1,0 @@
-mod,"Dma_Csih2Receive","Dma_Csih2Receive 単体テスト",5,2,,,,CPP,,,"",0
-#COMMENT,"@pta_srcadr","@u2a_length","@pta_callback","Dma.c/u1l_dma_init_state","Dma.c/ptl_dma_callback_func","Dma.c/ptl_dma_callback_func","Dma_Csih2Receive@@"
-;$L$,if ( ((u1)1U)!=u1l_dma_init_state )
-;$L$,TRUE
-,0x5400,65535,0x5500,0,0x5600,0x5600,1
-,0x5400,65535,0x5500,255,0x5600,0x5600,1
-;$L$,FALSE
-,0x5400,65535,0x5500,1,0x5600,0x5500,0

@@ -48,14 +48,16 @@ def compile_and_run(c_file: Path, out_dir: Path, include_dirs=(), defines=None,
     args += ["-o", _wsl_path(exe) if use_wsl else str(exe),
              _wsl_path(c_file) if use_wsl else str(c_file)]
     command = ["wsl.exe", "-e", *args] if use_wsl else args
-    r = subprocess.run(command, capture_output=True,
-                       text=True, timeout=timeout_compile)
+    r = subprocess.run(command, capture_output=True, text=True,
+                       encoding="utf-8", errors="replace",
+                       timeout=timeout_compile)
     if r.returncode != 0:
         raise RuntimeError(f"gcc 编译失败:\n{r.stderr[:2000]}")
     run_command = (["wsl.exe", "-e", _wsl_path(exe)] if use_wsl
                    else [str(exe)])
-    r = subprocess.run(run_command, capture_output=True,
-                       text=True, timeout=timeout_run)
+    r = subprocess.run(run_command, capture_output=True, text=True,
+                       encoding="utf-8", errors="replace",
+                       timeout=timeout_run)
     if r.returncode != 0:
         raise RuntimeError(f"harness 执行失败 rc={r.returncode}:\n{r.stderr[:2000]}")
     return [line for line in r.stdout.splitlines() if line.strip()]

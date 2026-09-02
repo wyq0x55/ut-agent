@@ -1,0 +1,313 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://ut-agent.local/schema/function-ir-v2.json",
+  "title": "ut-agent FunctionIR document",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_version",
+    "extractor",
+    "status",
+    "compile_context",
+    "diagnostics",
+    "functions"
+  ],
+  "properties": {
+    "schema_version": { "const": 2 },
+    "extractor": { "$ref": "#/$defs/extractor" },
+    "status": { "$ref": "#/$defs/status" },
+    "compile_context": { "$ref": "#/$defs/compile_context" },
+    "diagnostics": {
+      "type": "array",
+      "items": { "$ref": "#/$defs/issue" }
+    },
+    "functions": {
+      "type": "array",
+      "items": { "$ref": "#/$defs/function" }
+    }
+  },
+  "$defs": {
+    "status": {
+      "type": "string",
+      "enum": ["OK", "PARTIAL", "UNSUPPORTED", "ERROR"]
+    },
+    "extractor": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["name", "version", "clang_version"],
+      "properties": {
+        "name": { "type": "string", "minLength": 1 },
+        "version": { "type": "string", "minLength": 1 },
+        "clang_version": { "type": "string", "minLength": 1 }
+      }
+    },
+    "compile_context": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "schema_version", "language", "standard", "source_files",
+        "include_dirs", "defines", "force_includes", "target_triple",
+        "cpu", "abi", "sysroot", "resource_dir", "extra_args"
+      ],
+      "properties": {
+        "schema_version": { "const": 1 },
+        "language": { "const": "c" },
+        "standard": { "type": "string", "minLength": 1 },
+        "source_files": {
+          "type": "array",
+          "items": { "type": "string", "minLength": 1 }
+        },
+        "include_dirs": {
+          "type": "array",
+          "items": { "type": "string", "minLength": 1 }
+        },
+        "defines": {
+          "type": "object",
+          "additionalProperties": { "type": "string" }
+        },
+        "force_includes": {
+          "type": "array",
+          "items": { "type": "string", "minLength": 1 }
+        },
+        "target_triple": { "type": ["string", "null"] },
+        "cpu": { "type": ["string", "null"] },
+        "abi": { "type": ["string", "null"] },
+        "sysroot": { "type": ["string", "null"] },
+        "resource_dir": { "type": ["string", "null"] },
+        "extra_args": {
+          "type": "array",
+          "items": { "type": "string" }
+        }
+      }
+    },
+    "location": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["file", "line", "column", "offset", "end_offset"],
+      "properties": {
+        "file": { "type": "string", "minLength": 1 },
+        "line": { "type": "integer", "minimum": 1 },
+        "column": { "type": "integer", "minimum": 1 },
+        "offset": { "type": "integer", "minimum": 0 },
+        "end_offset": { "type": "integer", "minimum": 0 }
+      }
+    },
+    "provenance": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["spelling", "expansion", "macro_stack", "ast_kind"],
+      "properties": {
+        "spelling": { "$ref": "#/$defs/location" },
+        "expansion": { "$ref": "#/$defs/location" },
+        "macro_stack": {
+          "type": "array",
+          "items": { "type": "string" }
+        },
+        "ast_kind": { "type": "string", "minLength": 1 }
+      }
+    },
+    "issue": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["code", "severity", "message"],
+      "properties": {
+        "code": { "type": "string", "minLength": 1 },
+        "severity": { "type": "string", "enum": ["info", "warning", "error"] },
+        "message": { "type": "string", "minLength": 1 },
+        "provenance": { "$ref": "#/$defs/provenance" },
+        "related_ids": {
+          "type": "array",
+          "items": { "type": "string", "minLength": 1 }
+        }
+      }
+    },
+    "extensions": {
+      "type": "object",
+      "description": "Versioned extension data retained by adapters.",
+      "additionalProperties": true
+    },
+    "param": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["name", "type", "is_ptr", "is_const", "is_written", "extensions"],
+      "properties": {
+        "name": { "type": "string" },
+        "type": { "type": "string" },
+        "is_ptr": { "type": "boolean" },
+        "is_const": { "type": "boolean" },
+        "is_written": { "type": "boolean" },
+        "extensions": { "$ref": "#/$defs/extensions" }
+      }
+    },
+    "atom": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "var", "var_type", "op", "boundary", "boundary_name", "text", "mask",
+        "cond_text_spelling", "cond_text_expanded", "type_spelling", "canonical_type",
+        "qualifiers", "provenance", "extensions"
+      ],
+      "properties": {
+        "var": { "type": "string" },
+        "var_type": { "type": ["string", "null"] },
+        "op": { "type": "string", "enum": ["==", "!=", "<", "<=", ">", ">="] },
+        "boundary": { "type": ["integer", "number", "null"] },
+        "boundary_name": { "type": ["string", "null"] },
+        "text": { "type": "string" },
+        "mask": { "type": ["integer", "null"] },
+        "cond_text_spelling": { "type": "string" },
+        "cond_text_expanded": { "type": "string" },
+        "type_spelling": { "type": ["string", "null"] },
+        "canonical_type": { "type": ["string", "null"] },
+        "qualifiers": { "type": "array", "items": { "type": "string" } },
+        "provenance": { "$ref": "#/$defs/provenance" },
+        "extensions": { "$ref": "#/$defs/extensions" }
+      }
+    },
+    "case": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["label", "value", "is_default", "provenance", "extensions"],
+      "properties": {
+        "label": { "type": "string" },
+        "value": { "type": ["integer", "null"] },
+        "is_default": { "type": "boolean" },
+        "provenance": { "$ref": "#/$defs/provenance" },
+        "extensions": { "$ref": "#/$defs/extensions" }
+      }
+    },
+    "branch": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "bid", "kind", "line", "file", "cond_text", "cond_text_spelling",
+        "cond_text_expanded", "atoms", "cases", "from_macro", "chain_index",
+        "connective", "reach_min", "reach_max", "constant_value", "constant_reason",
+        "parent_bid", "provenance", "extensions"
+      ],
+      "properties": {
+        "bid": { "type": "string", "minLength": 1 },
+        "kind": { "type": "string", "enum": ["if", "elseif", "while", "dowhile", "for", "switch", "ternary"] },
+        "line": { "type": "integer", "minimum": 1 },
+        "file": { "type": ["string", "null"] },
+        "cond_text": { "type": "string" },
+        "cond_text_spelling": { "type": "string" },
+        "cond_text_expanded": { "type": "string" },
+        "atoms": { "type": "array", "items": { "$ref": "#/$defs/atom" } },
+        "cases": { "type": "array", "items": { "$ref": "#/$defs/case" } },
+        "from_macro": { "type": ["string", "null"] },
+        "chain_index": { "type": "integer", "minimum": 0 },
+        "connective": { "type": ["string", "null"], "enum": ["&&", "||", null] },
+        "reach_min": { "type": ["integer", "number", "null"] },
+        "reach_max": { "type": ["integer", "number", "null"] },
+        "constant_value": { "type": ["boolean", "null"] },
+        "constant_reason": { "type": ["string", "null"] },
+        "parent_bid": { "type": ["string", "null"] },
+        "provenance": { "$ref": "#/$defs/provenance" },
+        "extensions": { "$ref": "#/$defs/extensions" }
+      }
+    },
+    "call": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "order", "callee", "line", "via_macro", "ptr_call", "is_static", "table_base",
+        "table_member", "arg_types", "params", "ret_type", "provenance", "extensions"
+      ],
+      "properties": {
+        "order": { "type": "integer", "minimum": 0 },
+        "callee": { "type": "string", "minLength": 1 },
+        "line": { "type": "integer", "minimum": 1 },
+        "via_macro": { "type": ["string", "null"] },
+        "ptr_call": { "type": "boolean" },
+        "is_static": { "type": "boolean" },
+        "table_base": { "type": ["string", "null"] },
+        "table_member": { "type": ["string", "null"] },
+        "arg_types": { "type": "array", "items": { "type": "string" } },
+        "params": { "type": "array", "items": { "$ref": "#/$defs/param" } },
+        "ret_type": { "type": "string" },
+        "provenance": { "$ref": "#/$defs/provenance" },
+        "extensions": { "$ref": "#/$defs/extensions" }
+      }
+    },
+    "control_var": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "name", "var", "source", "set_via", "var_type", "constant_value",
+        "constant_reason", "branch_ids", "provenance", "extensions"
+      ],
+      "properties": {
+        "name": { "type": "string" },
+        "var": { "type": "string" },
+        "source": { "type": "string" },
+        "set_via": { "type": ["string", "null"] },
+        "var_type": { "type": ["string", "null"] },
+        "constant_value": { "type": ["integer", "null"] },
+        "constant_reason": { "type": ["string", "null"] },
+        "branch_ids": { "type": "array", "items": { "type": "string" } },
+        "provenance": { "$ref": "#/$defs/provenance" },
+        "extensions": { "$ref": "#/$defs/extensions" }
+      }
+    },
+    "memory_var": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "name", "address", "width", "read", "write", "conditional", "input_value",
+        "expected_value", "provenance", "extensions"
+      ],
+      "properties": {
+        "name": { "type": "string" },
+        "address": { "type": "integer" },
+        "width": { "type": "integer", "minimum": 1 },
+        "read": { "type": "boolean" },
+        "write": { "type": "boolean" },
+        "conditional": { "type": "boolean" },
+        "input_value": { "type": ["integer", "null"] },
+        "expected_value": { "type": ["integer", "null"] },
+        "provenance": { "$ref": "#/$defs/provenance" },
+        "extensions": { "$ref": "#/$defs/extensions" }
+      }
+    },
+    "function": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "name", "file", "line", "line_end", "ret_type", "params", "globals_used",
+        "locals", "calls", "branches", "config", "notes", "enums", "global_writes",
+        "control_vars", "config_ptrs", "memory_vars", "status", "provenance",
+        "diagnostics", "extensions"
+      ],
+      "properties": {
+        "name": { "type": "string", "minLength": 1 },
+        "file": { "type": "string", "minLength": 1 },
+        "line": { "type": "integer", "minimum": 1 },
+        "line_end": { "type": "integer", "minimum": 1 },
+        "ret_type": { "type": "string" },
+        "params": { "type": "array", "items": { "$ref": "#/$defs/param" } },
+        "globals_used": { "type": "array", "items": { "type": "string" } },
+        "locals": { "type": "array", "items": { "type": "string" } },
+        "calls": { "type": "array", "items": { "$ref": "#/$defs/call" } },
+        "branches": { "type": "array", "items": { "$ref": "#/$defs/branch" } },
+        "config": { "type": "object", "additionalProperties": { "type": "string" } },
+        "notes": { "type": "array", "items": { "type": "string" } },
+        "enums": {
+          "type": "object",
+          "additionalProperties": {
+            "type": "object",
+            "additionalProperties": { "type": "integer" }
+          }
+        },
+        "global_writes": { "type": "array", "items": { "type": "string" } },
+        "control_vars": { "type": "array", "items": { "$ref": "#/$defs/control_var" } },
+        "config_ptrs": { "type": "array", "items": { "type": "string" } },
+        "memory_vars": { "type": "array", "items": { "$ref": "#/$defs/memory_var" } },
+        "status": { "$ref": "#/$defs/status" },
+        "provenance": { "$ref": "#/$defs/provenance" },
+        "diagnostics": { "type": "array", "items": { "$ref": "#/$defs/issue" } },
+        "extensions": { "$ref": "#/$defs/extensions" }
+      }
+    }
+  }
+}

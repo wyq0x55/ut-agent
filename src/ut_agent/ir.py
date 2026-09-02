@@ -6,7 +6,24 @@
 from __future__ import annotations
 
 from dataclasses import asdict, dataclass, field
-from typing import Optional, Union
+from typing import Any, Optional, Union
+
+
+@dataclass
+class SourceLocation:
+    file: str
+    line: int
+    column: int
+    offset: int
+    end_offset: int
+
+
+@dataclass
+class Provenance:
+    spelling: SourceLocation
+    expansion: SourceLocation
+    macro_stack: list[str] = field(default_factory=list)
+    ast_kind: str = "Unknown"
 
 
 @dataclass
@@ -19,6 +36,14 @@ class Atom:
     boundary: Optional[Union[int, float]]  # 比较边界字面值（宏/枚举展开后的真实值）
     boundary_name: Optional[str]   # 枚举名（CANIF_GET_ONLINE）；纯字面值/宏为 None
     text: str                      # 展开后的原子条件文本
+    mask: Optional[int] = None     # 位掩码条件的已解析掩码（例如 x & 0x30）
+    cond_text_spelling: str = ""
+    cond_text_expanded: str = ""
+    type_spelling: Optional[str] = None
+    canonical_type: Optional[str] = None
+    qualifiers: list[str] = field(default_factory=list)
+    provenance: Optional[Provenance] = None
+    extensions: dict[str, Any] = field(default_factory=dict)
 
 
 @dataclass
@@ -28,6 +53,8 @@ class Case:
     label: str
     value: Optional[int]
     is_default: bool
+    provenance: Optional[Provenance] = None
+    extensions: dict[str, Any] = field(default_factory=dict)
 
 
 @dataclass
@@ -50,6 +77,11 @@ class Branch:
     # 配置/常量传播结果。None 表示源码上下文不足，不能判定恒真/恒假。
     constant_value: Optional[bool] = None
     constant_reason: Optional[str] = None
+    cond_text_spelling: str = ""
+    cond_text_expanded: str = ""
+    parent_bid: Optional[str] = None
+    provenance: Optional[Provenance] = None
+    extensions: dict[str, Any] = field(default_factory=dict)
 
 
 @dataclass
@@ -67,6 +99,8 @@ class CallSite:
     arg_types: list[str] = field(default_factory=list)  # 调用点实参类型（表 stub 签名）
     params: list[Param] = field(default_factory=list)  # 被调函数签名（stub 生成用）
     ret_type: str = "void"
+    provenance: Optional[Provenance] = None
+    extensions: dict[str, Any] = field(default_factory=dict)
 
 
 def is_scalar_type(t: str, enums: dict) -> bool:
@@ -86,12 +120,15 @@ class ControlVar:
 
     name: str                       # 列名（短名，取路径末段，如 initRun / currMode）
     var: str                        # 原子条件里的原始文本
-    source: str                     # param | global | local_from_global | local | stub
+    source: str                     # param | global | local_from_global | local | derived | stub
     set_via: Optional[str] = None   # local_from_global 时：赋值来源表达式（设定该全局）
     var_type: Optional[str] = None
     # 配置表成员等只读常量的确定值；这类变量不生成输入/IO 登录列。
     constant_value: Optional[int] = None
     constant_reason: Optional[str] = None
+    branch_ids: list[str] = field(default_factory=list)
+    provenance: Optional[Provenance] = None
+    extensions: dict[str, Any] = field(default_factory=dict)
 
 
 @dataclass
@@ -113,6 +150,8 @@ class MemoryVar:
     # 对源码中可求值的寄存器写序列生成的初始/期待值；未知时为 None。
     input_value: Optional[int] = None
     expected_value: Optional[int] = None
+    provenance: Optional[Provenance] = None
+    extensions: dict[str, Any] = field(default_factory=dict)
 
 
 @dataclass
@@ -121,6 +160,8 @@ class Param:
     type: str
     is_ptr: bool = False
     is_const: bool = False   # const 修饰（含指向物 const → 传入指针 PTIN）
+    is_written: bool = False # 函数体是否直接写入指针指向物
+    extensions: dict[str, Any] = field(default_factory=dict)
 
 
 @dataclass
@@ -142,9 +183,19 @@ class FunctionIR:
     control_vars: list[ControlVar] = field(default_factory=list)     # 控制变量来源登记
     config_ptrs: list[str] = field(default_factory=list)   # 引用到的配置表指针全局（介入点）
     memory_vars: list[MemoryVar] = field(default_factory=list)  # memory-mapped IO 宏
+    status: str = "OK"
+    provenance: Optional[Provenance] = None
+    diagnostics: list[dict[str, Any]] = field(default_factory=list)
+    compile_context: dict[str, Any] = field(default_factory=dict)
+    extractor: dict[str, str] = field(default_factory=lambda: {
+        "name": "ut-agent-legacy-parser", "version": "0.1.0", "clang_version": "unknown"
+    })
+    extensions: dict[str, Any] = field(default_factory=dict)
 
     def to_dict(self) -> dict:
-        return asdict(self)
+        from ut_agent.parser.ir_json import function_ir_to_document
+
+        return function_ir_to_document(self)
 
 
 def selected_global_writes(ir: FunctionIR) -> list[str]:
@@ -157,3 +208,48 @@ def selected_global_writes(ir: FunctionIR) -> list[str]:
     if ir.branches and all(branch.constant_value is not None for branch in ir.branches):
         return []
     return list(ir.global_writes)
+
+
+def infer_branch_nesting(branches: list[Branch]) -> None:
+    """Fill missing branch parents from deterministic source ranges.
+
+    The standalone extractor preserves source spelling ranges, but an AST
+    visitor can still report an ``if`` nested in a ``switch`` as a flat list.
+    Choose the smallest earlier branch whose source range strictly contains
+    the child. Existing explicit ``parent_bid`` values remain authoritative.
+    """
+    by_bid = {branch.bid: branch for branch in branches}
+
+    def span(branch: Branch) -> tuple[int, int] | None:
+        provenance = branch.provenance
+        if provenance is None or provenance.spelling is None:
+            return None
+        start = int(provenance.spelling.offset or 0)
+        end = int(provenance.spelling.end_offset or 0)
+        if start <= 0 or end <= start:
+            return None
+        return start, end
+
+    for child_index, child in enumerate(branches):
+        if child.parent_bid is not None:
+            continue
+        child_span = span(child)
+        if child_span is None:
+            continue
+        candidates: list[tuple[int, int, Branch]] = []
+        for parent_index, parent in enumerate(branches[:child_index]):
+            if parent.file and child.file and parent.file != child.file:
+                continue
+            parent_span = span(parent)
+            if parent_span is None:
+                continue
+            if (parent_span[0] <= child_span[0]
+                    and child_span[1] <= parent_span[1]
+                    and parent_span != child_span):
+                candidates.append((
+                    parent_span[1] - parent_span[0], parent_index, parent,
+                ))
+        if candidates:
+            _, _, parent = min(candidates, key=lambda item: (item[0], item[1]))
+            if parent.bid in by_bid:
+                child.parent_bid = parent.bid

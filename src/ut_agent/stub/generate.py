@@ -46,7 +46,7 @@ def render_spec_stub_c(ir: FunctionIR, call_max: int = CALL_MAX_DEFAULT,
             " *",
             " * 规则: 被测函数内所有调用函数 stub 化; 只留 callcnt 与引数入出力; 无逻辑",
             " * 命名: stub 编号 k 按调用顺序从 00 起; ARG<k>_<形参名>=入力记录;",
-            " *       PTIN<k>_<形参名>=传入指针记录; PTOUT<k>_<形参名>[CALL_MAX]=传出设定;",
+            " *       PTIN<k>_<形参名>=只读/输入指针记录; PTOUT<k>_<形参名>[CALL_MAX]=传出设定;",
             " *       CALLRET<k>[CALL_MAX]=返回值(仅参与分支判定时生成)",
             " */",
             '#include "Std_Types.h"',
@@ -88,7 +88,7 @@ def render_spec_stub_c(ir: FunctionIR, call_max: int = CALL_MAX_DEFAULT,
                 if not is_scalar_type(elem, ir.enums):
                     out.append(f"/* {p.name}: 指向物为结构体（含 const 成员），v0 不记录/不设定 */")
                     continue
-                if p.is_const:
+                if p.is_const or not _call_param_is_written(p):
                     ptin_scalar[p.name] = elem
                     out.append(f"{elem} PTIN{k}_{p.name}[CALL_MAX];  /* 传入指针: 记录指向物值 */")
                 else:
@@ -114,12 +114,12 @@ def render_spec_stub_c(ir: FunctionIR, call_max: int = CALL_MAX_DEFAULT,
         for p in call.params:
             if not p.is_ptr:
                 out.append(f"    ARG{k}_{p.name}[callcnt{k}] = {p.name};")
-            elif p.is_const and p.name in ptin_scalar:
+            elif (p.is_const or not _call_param_is_written(p)) and p.name in ptin_scalar:
                 out.append(f"    PTIN{k}_{p.name}[callcnt{k}] = *{p.name};")
         if ptout_scalar:
             out.append(f"    if (callcnt{k} < CALL_MAX) {{")
             for p in call.params:
-                if not p.is_const and p.name in ptout_scalar:
+                if _call_param_is_written(p) and p.name in ptout_scalar:
                     out.append(f"        *{p.name} = PTOUT{k}_{p.name}[callcnt{k}];")
             out.append("    }")
         out.append(f"    callcnt{k}++;   /* 先记录后递增, 索引从 0 起 */")
@@ -147,6 +147,19 @@ def _winams_ident(name: str) -> str:
     return ident or "anonymous"
 
 
+def _ordered_stub_calls(ir: FunctionIR) -> list:
+    """Return one native stub definition per callee, in first-call order."""
+    calls = []
+    seen: set[str] = set()
+    for call in sorted(ir.calls, key=lambda item: item.order):
+        callee = (call.callee or "").strip()
+        if not callee or callee in seen:
+            continue
+        seen.add(callee)
+        calls.append(call)
+    return calls
+
+
 def _winams_pointer_base(ptr_type: str) -> str:
     """WinAMS の PTROUT 配列に使う指向物型を取り出す。"""
     return _base_type(ptr_type)
@@ -157,6 +170,19 @@ def _winams_is_scalar(type_name: str, ir: FunctionIR) -> bool:
     return is_scalar_type(type_name, ir.enums) or type_name.strip() in {
         "u1", "u2", "u4", "s1", "s2", "s4", "f4", "f8",
     }
+
+
+def _call_param_is_written(param) -> bool:
+    """Return whether a call parameter is proven to be written by its callee.
+
+    Declarations without a visible definition remain conservative for backward
+    compatibility: a non-const pointer may still be an output.  Once the
+    parser has a definition, ``write_status=known`` makes a read-only pointer
+    input-only and prevents the stub from fabricating a write-back.
+    """
+    if param.extensions.get("write_status") == "known":
+        return param.is_written
+    return param.is_written or (param.is_ptr and not param.is_const)
 
 
 def render_stub_c(ir: FunctionIR, call_max: int = WINAMS_CALL_MAX_DEFAULT,
@@ -203,7 +229,7 @@ def render_stub_c(ir: FunctionIR, call_max: int = WINAMS_CALL_MAX_DEFAULT,
 
     declarations: list[str] = []
     bodies: list[str] = []
-    for call in ir.calls:
+    for call in _ordered_stub_calls(ir):
         callee = _winams_ident(call.callee)
         stub_name = f"AMSTB_{callee}"
         params_sig = ", ".join(f"{p.type} {p.name}" for p in call.params)
@@ -230,7 +256,7 @@ def render_stub_c(ir: FunctionIR, call_max: int = WINAMS_CALL_MAX_DEFAULT,
                 )
                 continue
             base = _winams_pointer_base(param.type)
-            if not param.is_const and _winams_is_scalar(base, ir):
+            if _call_param_is_written(param) and _winams_is_scalar(base, ir):
                 body.append(
                     f"    static volatile {base} PTROUT{slot}_{callee}[ CALL_MAX ];"
                 )
@@ -252,7 +278,7 @@ def render_stub_c(ir: FunctionIR, call_max: int = WINAMS_CALL_MAX_DEFAULT,
                 body.append(
                     f"    ARG{slot}_{callee}[{index}] = {param.name};"
                 )
-            elif not param.is_const and _winams_is_scalar(
+            elif _call_param_is_written(param) and _winams_is_scalar(
                     _winams_pointer_base(param.type), ir):
                 body += [
                     "",
@@ -278,7 +304,7 @@ def render_stub_c(ir: FunctionIR, call_max: int = WINAMS_CALL_MAX_DEFAULT,
     # 通过 STB_PREFIX 使用 AMSTB_*，而 GNU ld 不会自动建立这个映射；同一
     # TU 中的别名只补齐 ELF 符号，不改变 TestCsv 的 AMSTB 契约。
     aliases: list[str] = []
-    for call in ir.calls:
+    for call in _ordered_stub_calls(ir):
         if call.ptr_call:
             continue
         ident = _winams_ident(call.callee)

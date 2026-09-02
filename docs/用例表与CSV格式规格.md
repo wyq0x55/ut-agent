@@ -6,9 +6,17 @@
 
 ## 1. 输入与确定性
 
-解析输入固定为三件套：C 源码、include 路径、配置宏/配置头。相同输入必须
+源码解析输入固定为三件套：C 源码、include 路径、配置宏/配置头。相同输入必须
 产生相同的 FunctionIR、stub 和 CSV；核心路径不访问网络、不调用 LLM、不使用
 随机数或当前时间。
+
+规则引擎的证据输入范围允许包含完整项目的构建产物，但必须只读使用，不能将其与
+源码语义混为一谈：
+源码/AST 是条件、数据流和配置初始化值的主依据；`Soft.map` 用于符号、函数表和
+地址解析；`Soft.mot` 用于机器码、代码布局和分支实现的交叉确认；`Soft.out` 用于
+链接结果、符号/DWARF 和目标数据布局；`Soft.out.xlo` 用于 WinAMS 对象加载及运行
+兼容性确认。原版 `TestCsv`、`DefineVar.dat`、`Output` 仍是规则验证的对照样本，
+不得直接复制为新生成结果。
 
 配置宏通过 `-D NAME=VALUE` 或 `--include-config` 传入。WinAMS 的 `mod` 行
 不承载自定义 CFG 注释，实际编译时必须把同一组配置传给目标编译器和 WinAMS
@@ -78,6 +86,12 @@ mod,"Dma.c/p_vog_dma_init","p_vog_dma_init 単体テスト",2,2,,,,CPP,,,"",0
 `mod` 第 4 个字段是输入列数，第 5 个字段是输出列数。`#COMMENT` 的前半部
 必须与输入列数相同，后半部与输出列数相同。列名使用 WinAMS 约定：
 
+输入、输出两侧的列顺序也是契约，不能按变量名重新排序：先按首次出现的
+调用顺序添加各 stub 的 `CALLCNT`，再添加被测函数引数；其后按源码分支
+所需的外部状态和可观察值添加全局、memory、stub 参数/返回值等 I/O；被测
+函数的返回值如果存在，必须作为输出侧最后一列。函数体自动局部变量（包括
+函数作用域 `static`）不是外部测试 I/O，不得进入 `#COMMENT`。
+
 - 被测函数标量参数：`param`；指针地址：`@param`。
 - stub 参数：`AMSTB_SrcFile.c/AMSTB_<callee>@ARG00` 等。
 - stub 返回值：`AMSTB_SrcFile.c/AMSTB_<callee>@AMIN_return[0]`。
@@ -101,8 +115,10 @@ WinAMS 初始数据，不宣称是业务正确期望值。业务期望值必须�
 
 默认 `ut-agent project` 不读取已有 WinAMS TestCsv。生成器从 Soft 的
 AST/预处理记录生成 `mod`、`#COMMENT`、分支条件和输入数据；输入默认值为
-`0x0`，需要在 WinAMS 或人工审查阶段补齐业务数据。`--reference-csv` 仅供
-显式的兼容性回放使用，不能作为默认 project 生成输入。
+`0x0`，需要在 WinAMS 或人工审查阶段补齐业务数据。原版 TestCsv 仅供
+显式的只读对照和规则归纳使用，不能作为 gen/project 的生成输入。后续规则引擎的产物分析阶段
+可显式读取 `Soft.map`、`Soft.mot`、`Soft.out` 和 `Soft.out.xlo`，用于规则推导和
+结果交叉验证。
 
 ## 4. RH850 编译产物（待决策）
 
@@ -177,7 +193,8 @@ TestCsv 的输入/输出列中。寄存器名称的 `U1/U2/U4/U8` 前缀与实�
 - `TestCsv/p_vog_dma_init.csv` 由 AST-only 路径独立生成，golden 只作为显式
   只读对比物；
 - RH850 新编译器方案仍待决策，AST-only 结果不包含新的 `.out/.xlo`；
-- 原始 GHS `Soft.out` 不作为源码/TestCsv/DefineVar 生成输入。
+- `Soft.map`、`Soft.mot`、`Soft.out`、`Soft.out.xlo` 均可作为规则引擎的只读证据
+  输入；它们不应被改写，也不替代源码 AST 对程序语义的判断。
 
 ## 7. 规格变更记录
 
@@ -185,3 +202,8 @@ TestCsv 的输入/输出列中。寄存器名称的 `U1/U2/U4/U8` 前缀与实�
 自定义 `case_id/%/# CFG` 和 `callcnt00/CALLRET00` 契约替换为参考工程实际使用的
 `mod/#COMMENT/;$L$`、`AMSTB_`、`CALLCNT_`、`ARG`、`PTROUT`、`AMIN_return`。
 旧格式仅保留在 host 回放器内部，不能作为 WinAMS 交付文件。
+
+2026-08-26：调整完整项目产物策略。`Soft.map`、`Soft.mot`、`Soft.out`、
+`Soft.out.xlo` 均不再排除，可由规则引擎只读引用；分别用于地址/符号、机器码/布局、
+链接与调试信息、WinAMS 加载兼容性分析。源码 AST 仍是规则语义主依据，原版
+TestCsv/DefineVar/Output 仅作为对照样本，不能直接抄用。

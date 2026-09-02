@@ -4,7 +4,7 @@
 - 设定：值引数 → 局部变量；const 指针引数 → 指向物局部变量取址传入（@地址 约定，
   host 实现为栈地址）；global 控制变量 → 直接赋值；local_from_global → 赋值其来源全局
   （含数组下标越界保护）
-- 出力：非 const 指针引数 → <名>_out 回读；全局写回 → *_after；返回值 → ret
+- 出力：实际写回指针引数（Param.is_written）→ <名>_out 回读；全局写回 → *_after；返回值 → ret
 - 打印列序与 CSV 列模型的 期待/记录 列完全一致
 """
 from __future__ import annotations
@@ -77,7 +77,7 @@ def render_driver(ir: FunctionIR, columns, cols, rows,
             raise UnsupportedGen(f"双重指针形参 {p.name}: {p.type}")
         base = _base_type(p.type)
         if _numeric_base(base, ir):
-            init = f"({base})c->{p.name}" if p.is_const else "0"
+            init = f"({base})c->{p.name}" if not p.is_written else "0"
             setup.append(f"        {base} v_{p.name} = {init};")
         else:
             setup.append(f"        {base} v_{p.name} = {{0}};   /* 结构体指向物: 零初始化 */")

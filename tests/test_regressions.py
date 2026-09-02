@@ -6,6 +6,7 @@ from ut_agent.cases.boundary import control_candidates
 from ut_agent.host.run import _wsl_path
 from ut_agent.ir import Atom, Branch, CallSite, ControlVar, FunctionIR, Param
 from ut_agent.stub.generate import render_stub_c
+from ut_agent.parser import ClangExtractor, default_clang_extractor, make_compile_context
 
 
 def test_enum_typedef_domain_wins_over_underlying_type():
@@ -61,3 +62,29 @@ def test_generated_stub_uses_winams_call_contract():
     assert "AMSTB_callee" in source
     assert "CALLCNT_callee" in source
     assert "ARG00_callee[ CALL_MAX ]" in source
+
+
+def test_clang_recovers_multiline_macro_condition_without_comments(tmp_path):
+    """多行宏条件的两个原子都应保留，行尾注释不能污染变量名。"""
+    source = tmp_path / "multiline.c"
+    source.write_text(
+        "#define LIMIT 2\n"
+        "int sample(int left, int right)\n"
+        "{\n"
+        "    if ((LIMIT == left)\n"
+        "      || (LIMIT == right)) /* branch */\n"
+        "    { return 1; }\n"
+        "    return 0;\n"
+        "}\n",
+        encoding="ascii",
+    )
+    context = make_compile_context([source])
+    ir = ClangExtractor(default_clang_extractor()).extract(
+        context, "sample", cwd=tmp_path
+    )
+    assert len(ir.branches) == 1
+    branch = ir.branches[0]
+    assert branch.connective == "||"
+    assert [(atom.var, atom.boundary) for atom in branch.atoms] == [
+        ("left", 2), ("right", 2),
+    ]

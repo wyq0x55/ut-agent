@@ -6,6 +6,7 @@ switch 变量加 case 值全体 + default 触发值（max+1）。
 from __future__ import annotations
 
 from itertools import product
+import re
 from typing import Optional
 
 from ut_agent.ir import FunctionIR
@@ -18,17 +19,19 @@ def domain_of(var_type: Optional[str], enums: dict):
     if not var_type:
         return None
     t = var_type.strip()
+    if "*" in t:
+        return None
     if t == "boolean":
         return ("set", {0, 1})
     if t in enums:
         return ("set", set(enums[t].values()))
-    if "uint8" in t:
+    if t in {"u1", "uint8_t"} or "uint8" in t:
         return ("set", set(range(256)))
-    if "sint8" in t:
+    if t in {"s1", "int8_t"} or "sint8" in t:
         return ("set", set(range(-128, 128)))
-    if "uint16" in t:
+    if t in {"u2", "uint16_t"} or "uint16" in t:
         return ("range", 0, 65535)
-    if "uint32" in t or "unsigned" in t:
+    if t in {"u4", "uint32_t"} or "uint32" in t or "unsigned" in t:
         return ("range", 0, 4294967295)
     return None
 
@@ -80,6 +83,22 @@ def _const_domain(boundary_name) -> tuple | None:
     return None
 
 
+def _switch_control_var(condition: str, var_to_cv: dict):
+    """Resolve a switch selector without depending on pretty-print spacing."""
+    normalized = condition.replace(" ", "")
+    direct = var_to_cv.get(normalized)
+    if direct is not None:
+        return direct
+    if normalized.startswith("switch(") and normalized.endswith(")"):
+        return var_to_cv.get(normalized[len("switch("):-1])
+    # Keep this conservative: only an identifier/member-path token match is
+    # accepted, and prefer the longest candidate when selectors are nested.
+    for key in sorted(var_to_cv, key=len, reverse=True):
+        if re.search(rf"(?<![A-Za-z0-9_]){re.escape(key)}(?![A-Za-z0-9_])", normalized):
+            return var_to_cv[key]
+    return None
+
+
 def control_candidates(ir: FunctionIR) -> dict:
     """{控制变量短名: {"cv": ControlVar, "values": set, "enum": 反查表}}。"""
     var_to_cv = {cv.var.replace(" ", ""): cv for cv in ir.control_vars}
@@ -97,7 +116,7 @@ def control_candidates(ir: FunctionIR) -> dict:
             if cv is None or cv.constant_value is not None:
                 continue
             # Prefer the enum domain inferred from the actual boundary name.
-            # libclang often exposes an enum typedef as its underlying type
+            # Clang may expose an enum typedef as its underlying type
             # (for example ``unsigned int``); using that type first would
             # incorrectly widen a six-value enum to 0..UINT_MAX.
             dom = (_resolve_enum_domain(ir, a.boundary_name)
@@ -108,7 +127,7 @@ def control_candidates(ir: FunctionIR) -> dict:
                 acc[cv.name] = (cv, [])
             acc[cv.name][1].append((a.boundary, dom))
         if b.kind == "switch":
-            cv = var_to_cv.get(b.cond_text.replace(" ", ""))
+            cv = _switch_control_var(b.cond_text, var_to_cv)
             if cv is None or cv.constant_value is not None:
                 continue
             vals = {c.value for c in b.cases if not c.is_default and c.value is not None}

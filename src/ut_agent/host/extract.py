@@ -11,19 +11,13 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from clang import cindex
-
 from ut_agent.ir import FunctionIR
 from ut_agent.stub.generate import render_spec_stub_c
 
 
-def _first_function_line(tu) -> int:
-    first = None
-    for cur in tu.cursor.walk_preorder():
-        if cur.kind == cindex.CursorKind.FUNCTION_DECL and cur.is_definition():
-            if first is None or cur.location.line < first:
-                first = cur.location.line
-    return first or 1
+def _first_function_line(ir: FunctionIR) -> int:
+    """Use source facts emitted by the C++ extractor when available."""
+    return int(ir.extensions.get("first_function_line", ir.line) or ir.line or 1)
 
 
 def _sanitize_pp(lines: list) -> list:
@@ -61,23 +55,19 @@ def _prototypes(ir) -> list:
     return out
 
 
-def _global_var_types(tu) -> dict:
-    """文件作用域变量名 → 类型拼写（fixture 构造用）。"""
-    out = {}
-    for cur in tu.cursor.walk_preorder():
-        if cur.kind == cindex.CursorKind.VAR_DECL and cur.semantic_parent is not None \
-                and cur.semantic_parent.kind == cindex.CursorKind.TRANSLATION_UNIT:
-            try:
-                out[cur.spelling] = cur.type.spelling
-            except Exception:
-                pass
-    return out
+def _global_var_types(ir: FunctionIR) -> dict:
+    """文件作用域变量名 → 类型拼写（由 C++ AST facts 提供）。"""
+    return {
+        str(item["name"]): str(item["type"])
+        for item in ir.extensions.get("global_declarations", [])
+        if item.get("name") and item.get("type")
+    }
 
 
-def _find_struct(tu, name):
-    for cur in tu.cursor.walk_preorder():
-        if cur.kind == cindex.CursorKind.STRUCT_DECL and cur.spelling == name:
-            return cur
+def _find_struct(ir: FunctionIR, name: str) -> list[dict] | None:
+    for item in ir.extensions.get("record_types", []):
+        if item.get("name") == name:
+            return list(item.get("fields", []))
     return None
 
 
@@ -113,31 +103,32 @@ def _ptr_depth(t: str) -> int:
     return t.replace(" ", "").count("*")
 
 
-def _field_wiring(struct_decl, prefix: str):
+def _field_wiring(struct_decl: list[dict], prefix: str):
     """结构体指针字段接线：T* 字段 → 元素数组；T** 字段 → 两层（指针数组指向值数组）。
     返回 (声明行, designated 赋值列表)。"""
     decls, assigns = [], []
-    for fld in struct_decl.get_children():
-        if fld.kind != cindex.CursorKind.FIELD_DECL:
-            continue
-        ft = fld.type.spelling
+    for fld in struct_decl:
+        ft = str(fld.get("type", ""))
         if "*" not in ft.replace(" ", ""):
+            continue
+        name = str(fld.get("name", ""))
+        if not name:
             continue
         depth = _ptr_depth(ft)
         base = _strip_ptr(ft)
         if depth >= 2:
-            decls.append(f"static {base} {prefix}_{fld.spelling}_v[4] = {{0}};")
-            decls.append(f"static {base} *{prefix}_{fld.spelling}[4] = "
-                         f"{{&{prefix}_{fld.spelling}_v[0], &{prefix}_{fld.spelling}_v[1], "
-                         f"&{prefix}_{fld.spelling}_v[2], &{prefix}_{fld.spelling}_v[3]}};")
-            assigns.append(f".{fld.spelling} = {prefix}_{fld.spelling}")
+            decls.append(f"static {base} {prefix}_{name}_v[4] = {{0}};")
+            decls.append(f"static {base} *{prefix}_{name}[4] = "
+                         f"{{&{prefix}_{name}_v[0], &{prefix}_{name}_v[1], "
+                         f"&{prefix}_{name}_v[2], &{prefix}_{name}_v[3]}};")
+            assigns.append(f".{name} = {prefix}_{name}")
         else:
-            decls.append(f"static {base} {prefix}_{fld.spelling}[4] = {{0}};")
-            assigns.append(f".{fld.spelling} = {prefix}_{fld.spelling}")
+            decls.append(f"static {base} {prefix}_{name}[4] = {{0}};")
+            assigns.append(f".{name} = {prefix}_{name}")
     return decls, assigns
 
 
-def _config_fixture(ir, tu, var_types) -> list:
+def _config_fixture(ir, var_types, record_types) -> list:
     """配置表指针 fixture：宏重定向 + 结构体字段接线（含双重指针两层）。
     深层（字段结构的指针字段）不再展开，触及者执行期如实崩溃。"""
     if not ir.config_ptrs:
@@ -149,7 +140,7 @@ def _config_fixture(ir, tu, var_types) -> list:
         if not t:
             lines.append(f"/* {ptr}: 类型未知，跳过 */")
             continue
-        struct = _find_struct(tu, t)
+        struct = record_types.get(t)
         decls, assigns = [], []
         if struct is not None:
             decls, assigns = _field_wiring(struct, f"ut_cfg_{ptr}")
@@ -167,22 +158,29 @@ def _config_fixture(ir, tu, var_types) -> list:
     return lines
 
 
-def _extern_fixtures(tu, ir, src_path) -> list:
+def _extern_fixtures(ir, src_path) -> list:
     """被测函数引用、但未在主文件定义的全局（extern 路由表等，定义在生成配置的 .c 里）
     → 宏重定向到零初始化 fixture（与指针表 fixture 同一手法）。"""
     src_name = Path(src_path).name
-    defined, externs = set(), {}
-    for cur in tu.cursor.walk_preorder():
-        if cur.kind != cindex.CursorKind.VAR_DECL:
-            continue
-        try:
-            in_main = Path(cur.location.file.name).name == src_name
-        except Exception:
-            in_main = False
-        if in_main and cur.storage_class != cindex.StorageClass.EXTERN:
-            defined.add(cur.spelling)
-        else:
-            externs.setdefault(cur.spelling, cur)
+    declarations = {
+        str(item["name"]): item
+        for item in ir.extensions.get("global_declarations", [])
+        if item.get("name")
+    }
+    defined = {
+        name for name, item in declarations.items()
+        if Path(str(item.get("file", src_name))).name == src_name
+        and not item.get("is_extern", False)
+    }
+    externs = {
+        name: item for name, item in declarations.items()
+        if name not in defined
+    }
+    record_types = {
+        str(item["name"]): list(item.get("fields", []))
+        for item in ir.extensions.get("record_types", [])
+        if item.get("name")
+    }
     handled = {c.table_base for c in ir.calls if c.table_base} | set(ir.config_ptrs)
     lines = []
     for name in ir.globals_used:
@@ -191,10 +189,10 @@ def _extern_fixtures(tu, ir, src_path) -> list:
         decl = externs.get(name)
         if decl is None:
             continue
-        t = decl.type.spelling
+        t = str(decl.get("type", ""))
         if "[" in t:   # extern 数组（路由表）
             elem = _strip_ptr(t.split("[")[0])
-            struct = _find_struct(tu, elem)
+            struct = record_types.get(elem)
             decls, assigns = [], []
             if struct is not None:
                 decls, assigns = _field_wiring(struct, f"ut_ext_{name}_f")
@@ -216,19 +214,37 @@ def _extern_fixtures(tu, ir, src_path) -> list:
     return lines
 
 
-def build_harness_source(tu, ir: FunctionIR, driver_code: str,
-                         call_max: int = 16) -> str:
+def build_harness_source(*args, call_max: int = 16) -> str:
+    """Build a host harness from FunctionIR and C++-extracted source facts.
+
+    The historical ``(tu, ir, driver_code)`` call shape is accepted for
+    callers that have not migrated yet; ``tu`` is intentionally ignored and
+    is no longer a Python translation-unit object.
+    """
+    if len(args) == 2:
+        ir, driver_code = args
+    elif len(args) == 3:
+        _, ir, driver_code = args
+    else:
+        raise TypeError("build_harness_source expects (ir, driver_code)")
+    if not isinstance(ir, FunctionIR):
+        raise TypeError("build_harness_source requires a FunctionIR")
     src = Path(ir.file).read_text(encoding="utf-8", errors="replace").splitlines()
-    first_def = _first_function_line(tu)
+    first_def = _first_function_line(ir)
     # 头部窗口：保内容、补闭合（未闭合的 #if 追加 #endif，保住其中的宏定义；
     # 截断法会丢掉 PduRTpBuffer 这类跨函数的配置宏）
     window_head = _sanitize_pp(src[: first_def - 1])
     window_fn = _sanitize_pp(src[ir.line - 1: ir.line_end])  # 目标函数（孤儿指令清理）
 
-    var_types = _global_var_types(tu)
+    var_types = _global_var_types(ir)
     table_fix = _table_fixtures(ir, var_types)
-    config_fix = _config_fixture(ir, tu, var_types)
-    extern_fix = _extern_fixtures(tu, ir, ir.file)
+    record_types = {
+        str(item["name"]): list(item.get("fields", []))
+        for item in ir.extensions.get("record_types", [])
+        if item.get("name")
+    }
+    config_fix = _config_fixture(ir, var_types, record_types)
+    extern_fix = _extern_fixtures(ir, ir.file)
     if config_fix:
         # 配置接线在 driver 主循环前执行一次
         driver_code = driver_code.replace(
