@@ -28,6 +28,7 @@ from ut_agent.ir import (
     Effect,
     FieldAccess,
     GlobalObject,
+    RecordLayoutField,
 )
 
 
@@ -430,6 +431,7 @@ def _read_global_object(value: Mapping[str, Any]) -> GlobalObject:
         is_union=value["is_union"], source_file=value["source_file"],
         array_sizes=list(value["array_sizes"]), field_paths=list(value["field_paths"]),
         field_accesses=[_read_field_access(item) for item in value["field_accesses"]],
+        record_layout=[RecordLayoutField(**item) for item in value.get("record_layout", [])],
         read_line=value["read_line"], read_offset=value["read_offset"],
         write_line=value["write_line"], write_offset=value["write_offset"],
         provenance=_read_provenance(value["provenance"]),

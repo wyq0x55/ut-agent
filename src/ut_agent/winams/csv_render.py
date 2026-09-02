@@ -15,8 +15,19 @@ from pathlib import Path
 from ut_agent.cases import boundary
 from ut_agent.ir import FunctionIR
 from ut_agent.rules.model import GenerationResult, TestIntent
+from ut_agent.rules.semantic import (
+    call_count_key,
+    call_param_key,
+    call_return_key,
+    global_object_columns as semantic_global_object_columns,
+    output_columns as semantic_call_output_columns,
+    param_columns as semantic_call_param_columns,
+    return_columns as semantic_call_return_columns,
+    pointer_address_key,
+    pointer_value_key,
+)
 from ut_agent.rules.engine import evaluate_branch
-from ut_agent.winams.projection import WinAMSProjection
+from ut_agent.winams.projection import WinAMSProjection, pointer_address
 
 
 _WINAMS_RTE_PORT_ORDER = (
@@ -572,10 +583,7 @@ def _winams_pointer_argument_info(call, index: int) -> dict:
 def _winams_stub_pointee_columns(
     ir: FunctionIR, call, *, index: int | None = None
 ) -> list[str]:
-    """Expand address-passed PAL setter data as a stub array element."""
-    callee = str(call.callee or "")
-    if not (callee.startswith("pal_") and "_set_" in callee):
-        return []
+    """Expand proven address-passed pointee data as a stub array element."""
     capacity = _winams_stub_capacity(ir, call)
     columns: list[str] = []
     for param_index, param in enumerate(call.params):
@@ -584,7 +592,9 @@ def _winams_stub_pointee_columns(
         if not param.is_ptr:
             continue
         info = _winams_pointer_argument_info(call, param_index)
-        if not info.get("is_address") or info.get("is_null"):
+        if (not info.get("address_used", info.get("is_address"))
+                or info.get("nullable", info.get("is_null"))
+                or not info.get("pointee_write")):
             continue
         slot_name = f"PTROUT{param_index:02d}_{call.callee}"
         columns.extend(
@@ -594,9 +604,14 @@ def _winams_stub_pointee_columns(
 
 
 def _winams_stub_return_first(call) -> bool:
-    """Return whether this API's WinAMS slot precedes its pointer input."""
-    callee = str(call.callee or "")
-    return callee.startswith("pal_") and "_get_" in callee
+    """Return whether a return slot precedes an unobservable pointer input."""
+    pointer_params = [param for param in call.params if param.is_ptr]
+    if not call.return_used or not pointer_params:
+        return False
+    return not any(
+        bool(call.caller_param_output.get(str(index), False))
+        for index, param in enumerate(call.params) if param.is_ptr
+    )
 
 
 def _winams_return_fields(call) -> list[str]:
@@ -632,16 +647,8 @@ def _winams_stub_param_columns(ir: FunctionIR, call) -> list[str]:
 
 def _winams_stub_param_output_columns(ir: FunctionIR, call) -> list[str]:
     """Expand only caller-observable stub argument write-back fields."""
-    callee = call.callee or ""
     raw_observable = call.caller_param_output
     if not isinstance(raw_observable, dict):
-        if not callee.startswith("Rte_Read_") and not (
-            callee.startswith("pal_") and "_get_" in callee
-        ):
-            pointee_columns = _winams_stub_pointee_columns(ir, call)
-            if pointee_columns:
-                return pointee_columns
-            return _winams_stub_param_columns(ir, call)
         raw_observable = {}
 
     capacity = _winams_stub_capacity(ir, call)
@@ -649,18 +656,8 @@ def _winams_stub_param_output_columns(ir: FunctionIR, call) -> list[str]:
     for index, param in enumerate(call.params):
         slot_name = f"PTROUT{index:02d}_{call.callee}" if param.is_ptr \
             else f"ARG{index:02d}_{call.callee}"
-        # Rte_Read APIs fill a temporary/local receive object.  WinAMS still
-        # exposes the PTROUT slot as a stub input, but the local receive value
-        # is not an output of the tested function.  Keep this semantic rule
-        # independent of whether the extractor had enough AST information to
-        # attach caller_param_output metadata.
-        if param.is_ptr and (
-            callee.startswith("Rte_Read_")
-            or (callee.startswith("pal_") and "_get_" in callee)
-        ):
-            continue
         raw_value = raw_observable.get(
-            str(index), raw_observable.get(index, True)
+            str(index), raw_observable.get(index, False)
         )
         if param.is_ptr and not bool(raw_value):
             continue
@@ -876,6 +873,39 @@ def _winams_global_columns(
                     )
 
                 field_paths.sort(key=first_field_access)
+    if direction == "output" and field_paths:
+        layout = obj.get("record_layout", [])
+        if isinstance(layout, (list, tuple)):
+            def accessed(path: str) -> bool:
+                return any(
+                    access == path or access.startswith(path + ".")
+                    or path.startswith(access + ".")
+                    for access in field_accesses
+                )
+
+            selected_bitfields = [
+                item for item in layout
+                if isinstance(item, dict) and item.get("is_bitfield")
+                and accessed(str(item.get("path", "")).lstrip("."))
+            ]
+            if selected_bitfields:
+                for item in layout:
+                    if not isinstance(item, dict) or item.get("is_bitfield"):
+                        continue
+                    storage = str(item.get("path", "")).lstrip(".")
+                    if storage and storage not in field_paths:
+                        try:
+                            start = int(item["bit_offset"])
+                            width = int(item["bit_width"])
+                        except (KeyError, TypeError, ValueError):
+                            continue
+                        if any(
+                            int(bit.get("bit_offset", -1)) >= start
+                            and int(bit.get("bit_offset", -1))
+                            + int(bit.get("bit_width", 0)) <= start + width
+                            for bit in selected_bitfields
+                        ):
+                            field_paths.append(storage)
     index_tuples = list(product(*(range(size) for size in sizes))) if sizes else [()]
     if not index_tuples or any(size == 0 for size in sizes):
         return []
@@ -1001,14 +1031,20 @@ def _winams_columns(ir: FunctionIR) -> WinAMSProjection:
     # sides and follows the first-call order, not lexical/name order.
     input_seen: set[str] = set()
     for call in calls:
-        _append_column(inputs, input_seen, (_winams_comment_source(call), None))
+        _append_column(
+            inputs, input_seen,
+            (_winams_comment_source(call), call_count_key(call.callee)),
+        )
 
     # The tested function's own parameters are the next category.  A pointer
     # is represented by its WinAMS address alias; the pointed-to write-back is
     # an output category below.
     for param in ir.params:
         if param.is_ptr:
-            _append_column(inputs, input_seen, (f"@{param.name}", param.name))
+            _append_column(
+                inputs, input_seen,
+                (f"@{param.name}", pointer_address_key(param.name)),
+            )
         else:
             name = f"@{param.name}" if _winams_static_function(ir) else param.name
             _append_column(inputs, input_seen, (name, param.name))
@@ -1024,7 +1060,10 @@ def _winams_columns(ir: FunctionIR) -> WinAMSProjection:
         for column in _winams_param_read_columns(
             param, static_function=static_function
         ):
-            _append_column(inputs, input_seen, (column, param.name))
+            _append_column(
+                inputs, input_seen,
+                (column, pointer_value_key(param.name, column)),
+            )
 
     # The remaining inputs are branch/observable state.  Source line ordering
     # reproduces the stable order used by the reference WinAMS projects: a
@@ -1142,7 +1181,10 @@ def _winams_columns(ir: FunctionIR) -> WinAMSProjection:
                     if name in grouped_global_names
                     else _winams_global_input_anchor(obj, line)
                 )
-                for column in columns:
+                semantic_columns = semantic_global_object_columns(
+                    ir, obj, writable=False,
+                )
+                for column, key in zip(columns, semantic_columns):
                     # WinAMS registers a structure/array as one controllable
                     # object at its first AST access, then expands fields in
                     # declaration order.  A write-only non-union object is
@@ -1156,7 +1198,7 @@ def _winams_columns(ir: FunctionIR) -> WinAMSProjection:
                         else object_line
                     )
                     add_branch_input(
-                        column, None,
+                        column, key,
                         column_line,
                         # A read-only condition value is registered at the
                         # source expression before a same-line stub ARG.  A
@@ -1198,10 +1240,20 @@ def _winams_columns(ir: FunctionIR) -> WinAMSProjection:
             if _winams_stub_return_first(call)
             else [*stub_param_columns, *stub_return_columns]
         )
-        for name in ordered_stub_columns:
+        semantic_param_columns = [
+            key for index in range(len(call.params))
+            for key in semantic_call_param_columns(ir, call, index)
+        ]
+        semantic_return_columns = semantic_call_return_columns(ir, call)
+        ordered_semantic_columns = (
+            [*semantic_return_columns, *semantic_param_columns]
+            if _winams_stub_return_first(call)
+            else [*semantic_param_columns, *semantic_return_columns]
+        )
+        for name, key in zip(ordered_stub_columns, ordered_semantic_columns):
             add_branch_input(
                 f"AMSTB_SrcFile.c/AMSTB_{call.callee}@{name}",
-                None, branch_call_lines.get(call.order, call.line), priority=0,
+                key, branch_call_lines.get(call.order, call.line), priority=0,
             )
 
     for _, _, _, name, key in sorted(branch_inputs):
@@ -1212,33 +1264,44 @@ def _winams_columns(ir: FunctionIR) -> WinAMSProjection:
     # only then the tested function return value.
     output_seen: set[str] = set()
     for call in calls:
-        _append_column(outputs, output_seen, (_winams_comment_source(call), None))
+        _append_column(
+            outputs, output_seen,
+            (_winams_comment_source(call), call_count_key(call.callee)),
+        )
     for param in ir.params:
         if param.is_ptr:
             for column in _winams_param_write_columns(
                 param, static_function=_winams_static_function(ir)
             ):
-                _append_column(outputs, output_seen, (column, None))
+                _append_column(
+                    outputs, output_seen,
+                    (column, pointer_value_key(param.name, column)),
+                )
 
     # Stub ARG/PTROUT columns and global write-backs share one source-ordered
     # branch/observable category.  This matters when a later member of a
     # structure array is written after a stub call: WinAMS keeps that source
     # event order in the output half of #COMMENT.
-    branch_outputs: list[tuple[int, int, int, str]] = []
+    branch_outputs: list[tuple[int, int, int, str, str | None]] = []
     output_event_index = 0
 
-    def add_branch_output(name: str, line: int, priority: int = 0) -> None:
+    def add_branch_output(
+        name: str, line: int, priority: int = 0, key: str | None = None,
+    ) -> None:
         nonlocal output_event_index
         if not name:
             return
-        branch_outputs.append((line, priority, output_event_index, name))
+        branch_outputs.append((line, priority, output_event_index, name, key))
         output_event_index += 1
 
     for call in branch_calls:
-        for name in _winams_stub_param_output_columns(ir, call):
+        output_names = _winams_stub_param_output_columns(ir, call)
+        semantic_output_columns = semantic_call_output_columns(ir, call)
+        for name, key in zip(output_names, semantic_output_columns):
             add_branch_output(
                 f"AMSTB_SrcFile.c/AMSTB_{call.callee}@{name}",
                 branch_call_lines.get(call.order, call.line),
+                key=key,
             )
 
     for memory in ir.memory_vars:
@@ -1270,7 +1333,11 @@ def _winams_columns(ir: FunctionIR) -> WinAMSProjection:
                 if obj.get("provenance")
                 else ir.line + 1_000_000
             )
-            for column in _winams_global_columns(ir, obj, direction="output"):
+            target_columns = _winams_global_columns(ir, obj, direction="output")
+            semantic_columns = semantic_global_object_columns(
+                ir, obj, writable=True,
+            )
+            for column, key in zip(target_columns, semantic_columns):
                 add_branch_output(
                     column,
                     # Write-only non-union fields retain their individual
@@ -1282,19 +1349,20 @@ def _winams_columns(ir: FunctionIR) -> WinAMSProjection:
                     if obj.get("write") and not obj.get("read")
                     else object_line,
                     priority=1,
+                    key=key,
                 )
     for name in _global_write_names(ir):
         if name not in expanded_global_names and not _is_local_fact(name, ir):
             add_branch_output(name, ir.line + 1_000_000, priority=1)
 
-    for _, _, _, name in sorted(branch_outputs):
-        _append_column(outputs, output_seen, (name, None))
+    for _, _, _, name, key in sorted(branch_outputs):
+        _append_column(outputs, output_seen, (name, key))
 
     # The tested function return is unconditionally the last output category.
     if ir.ret_type not in ("", "void"):
         _append_column(
             outputs, output_seen,
-            (_winams_function_return_comment(ir), None),
+            (_winams_function_return_comment(ir), "return"),
         )
     return WinAMSProjection.from_pairs(inputs, outputs)
 
@@ -1436,7 +1504,26 @@ def read_reference_csv(path: Path) -> dict:
     }
 
 
-def _winams_value(comment: str, key: str | None, row: dict) -> str:
+def _pointer_address_value(key: str | None, ir: FunctionIR) -> int | None:
+    if not key or not key.startswith("param:") or not key.endswith(":address"):
+        return None
+    name = key[len("param:"):-len(":address")]
+    pointer_index = 0
+    for param in ir.params:
+        if not param.is_ptr:
+            continue
+        if param.name == name:
+            return pointer_address(pointer_index)
+        pointer_index += 1
+    return None
+
+
+def _winams_value(
+    comment: str, key: str | None, row: dict, ir: FunctionIR | None = None,
+) -> str:
+    address = _pointer_address_value(key, ir) if ir is not None else None
+    if address is not None:
+        return f"0x{address:x}"
     if key and key in row:
         value = row[key]
         return f"0x{value:x}" if isinstance(value, int) and value >= 0 else str(value)
@@ -1470,7 +1557,13 @@ def _intent_value(values: dict, comment: str, key: str | None) -> object:
     raise ValueError(f"已验证用例缺少 WinAMS 列值: {comment}")
 
 
-def _render_intent_value(value: object) -> str:
+def _render_intent_value(
+    value: object, *, comment: str = "", key: str | None = None,
+    ir: FunctionIR | None = None,
+) -> str:
+    address = _pointer_address_value(key, ir) if ir is not None else None
+    if address is not None:
+        return f"0x{address:x}"
     if isinstance(value, bool):
         return "0x1" if value else "0x0"
     if isinstance(value, int):
@@ -1615,11 +1708,13 @@ def render_intents_csv(ir: FunctionIR, result: GenerationResult, *,
         for comment, key in input_columns:
             raw = intent.raw_inputs.get(comment)
             values.append(raw if raw is not None else _render_intent_value(
-                _intent_value(intent.inputs, comment, key)))
+                _intent_value(intent.inputs, comment, key),
+                comment=comment, key=key, ir=ir))
         for comment, key in output_columns:
             raw = intent.raw_expected.get(comment)
             values.append(raw if raw is not None else _render_intent_value(
-                _intent_value(intent.expected, comment, key)))
+                _intent_value(intent.expected, comment, key),
+                comment=comment, key=key, ir=ir))
         return ",".join([""] + values)
 
     if ir.branches:
@@ -1808,7 +1903,7 @@ def render_csv(ir: FunctionIR, cfg_display: str = "", *,
                 if comment in memory_inputs:
                     values.append(f"0x{memory_inputs[comment]:x}")
                 else:
-                    values.append(_winams_value(comment, key, row))
+                    values.append(_winams_value(comment, key, row, ir))
             else:
                 if comment in memory_outputs:
                     values.append(f"0x{memory_outputs[comment]:x}")

@@ -17,6 +17,10 @@ find_package(LLVM CONFIG REQUIRED)
 # copy so this project remains relocatable across supported Windows hosts.
 find_file(UT_AGENT_DIA_GUIDS diaguids.lib
   PATHS
+    "C:/Program Files/Microsoft Visual Studio/2022/Enterprise/DIA SDK/lib/amd64"
+    "C:/Program Files/Microsoft Visual Studio/2022/Professional/DIA SDK/lib/amd64"
+    "C:/Program Files/Microsoft Visual Studio/2022/Community/DIA SDK/lib/amd64"
+    "C:/Program Files/Microsoft Visual Studio/2022/BuildTools/DIA SDK/lib/amd64"
     "C:/Program Files (x86)/Microsoft Visual Studio/18/BuildTools/DIA SDK/lib/amd64"
     "C:/Program Files (x86)/Microsoft Visual Studio/18/BuildTools/VC/Tools/MSVC/14.51.36231/lib/onecore/x64"
   NO_DEFAULT_PATH

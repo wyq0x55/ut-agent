@@ -102,8 +102,30 @@ def control_candidates(ir: FunctionIR) -> dict:
                   if not case.is_default and case.value is not None}
         if values:
             add(control, values)
-            add(control, {max(values) + 1})
             typed_domain = _domain(control.type_info)
+            # A default candidate is only valid when it belongs to the
+            # extractor-proven selector domain.  Never manufacture a value
+            # just past the largest case: that can escape an unsigned or
+            # enum contract (for example case 255 -> candidate 256).
+            if typed_domain is None:
+                add(control, {max(values) + 1})
+            else:
+                # Search a bounded deterministic set.  Enumerating a proven
+                # 32-bit range just to find a default witness is both
+                # unnecessary and potentially unbounded in practice.
+                lower = int(_minimum(typed_domain))
+                upper = int(_maximum(typed_domain))
+                probes = [lower, upper, lower + 1, upper - 1]
+                probes.extend(
+                    lower + offset for offset in range(len(values) + 2)
+                )
+                default_values = {
+                    candidate for candidate in probes
+                    if lower <= candidate <= upper
+                    and _in(candidate, typed_domain)
+                    and candidate not in values
+                }
+                add(control, default_values)
             if typed_domain is not None:
                 add(control, {_minimum(typed_domain), _maximum(typed_domain)})
 

@@ -3,7 +3,6 @@ from __future__ import annotations
 
 from dataclasses import asdict
 from itertools import product
-from pathlib import Path
 from typing import Any
 
 from ut_agent.cases.boundary import control_candidates
@@ -13,21 +12,20 @@ from ut_agent.rules.model import (
     TestObligation, UNSUPPORTED, VALIDATED, ValidationResult,
 )
 from ut_agent.rules.pack import BUILTIN_PACK, Rule, RulePack
-from ut_agent.winams.projection import (
+from ut_agent.rules.semantic import (
+    call_columns as _semantic_call_columns,
     call_count_key,
-    qualified_stub_key,
+    call_param_keys,
+    call_return_keys,
+    call_capacity as _stub_capacity,
+    global_base_key,
     global_input_columns as _global_input_columns,
-    global_object_base as _global_object_base,
+    global_key,
     global_output_columns as _global_output_columns,
-    stub_param_keys,
-    stub_return_keys,
-    stub_param_fields as _stub_param_fields,
-    stub_return_fields as _stub_return_fields,
-    is_stub_return_key,
-    stub_capacity as _stub_capacity,
-    visible_stub_calls as _stub_calls,
-    stub_columns as _stub_input_columns,
-    pointer_address,
+    pointer_address_key,
+    pointer_value_key,
+    visible_calls as _stub_calls,
+    return_fields as _stub_return_fields,
 )
 
 
@@ -113,9 +111,7 @@ def _global_effect_column(ir: FunctionIR, effect: dict[str, Any],
         if not isinstance(value, int):
             return None
         indexes.append(value)
-    column = _global_object_base(ir, obj)
-    column += "".join(f"[{index}]" for index in indexes)
-    return f"{column}.{field}" if field else column
+    return global_key(name, tuple(indexes), field)
 
 
 def _global_effect_value(ir: FunctionIR, effect: dict[str, Any],
@@ -145,20 +141,117 @@ def _global_effect_value(ir: FunctionIR, effect: dict[str, Any],
     return None
 
 
+def _resolve_record_storage_values(
+    ir: FunctionIR,
+    expected: dict[str, Any],
+    unresolved: set[str],
+    columns: list[str],
+) -> None:
+    """Resolve scalar storage from extractor-proven bit-field layout facts."""
+    for obj in _global_records(ir):
+        if not isinstance(obj, dict) or not obj.get("name"):
+            continue
+        layout = obj.get("record_layout")
+        if not isinstance(layout, list) or not layout:
+            continue
+        sizes: list[int] = []
+        for raw_size in obj.get("array_sizes", ()):
+            try:
+                sizes.append(max(0, int(raw_size)))
+            except (TypeError, ValueError):
+                sizes = []
+                break
+        indexes = list(product(*(range(size) for size in sizes))) if sizes else [()]
+        if any(size == 0 for size in sizes):
+            continue
+        for index in indexes:
+            base = global_key(str(obj["name"]), tuple(index))
+            fields = [item for item in layout if isinstance(item, dict)]
+            for storage in fields:
+                if storage.get("is_bitfield"):
+                    continue
+                storage_path = str(storage.get("path", ""))
+                try:
+                    storage_offset = int(storage["bit_offset"])
+                    storage_width = int(storage["bit_width"])
+                except (KeyError, TypeError, ValueError):
+                    continue
+                if storage_width <= 0:
+                    continue
+                storage_column = f"{base}.{storage_path}"
+                if storage_column not in columns:
+                    continue
+                bitfields = []
+                visible_bitfields = []
+                for field in fields:
+                    if not field.get("is_bitfield"):
+                        continue
+                    try:
+                        bit_offset = int(field["bit_offset"])
+                        bit_width = int(field["bit_width"])
+                    except (KeyError, TypeError, ValueError):
+                        continue
+                    if (bit_width <= 0 or bit_offset < storage_offset
+                            or bit_offset + bit_width > storage_offset + storage_width):
+                        continue
+                    field_column = f"{base}.{field.get('path', '')}"
+                    if field_column not in columns:
+                        continue
+                    visible_bitfields.append((bit_offset, bit_width, field_column))
+                    if field_column in unresolved:
+                        bitfields = None
+                        break
+                    value = expected.get(field_column)
+                    if not isinstance(value, int):
+                        bitfields = None
+                        break
+                    bitfields.append((bit_offset - storage_offset, bit_width, value))
+                if bitfields is None or not visible_bitfields:
+                    continue
+
+                initial = expected.get(storage_column)
+                storage_known = storage_column not in unresolved and isinstance(initial, int)
+                if not storage_known:
+                    # A partial bit-field write cannot establish the untouched
+                    # storage bits.  Only synthesize from zero when the
+                    # extractor facts prove that the visible fields cover the
+                    # complete storage unit.
+                    covered = sorted(
+                        (offset, offset + width)
+                        for offset, width, _ in visible_bitfields
+                    )
+                    cursor = storage_offset
+                    for start, end in covered:
+                        if start != cursor:
+                            break
+                        cursor = end
+                    if cursor != storage_offset + storage_width:
+                        continue
+                    initial = 0
+
+                value = int(initial)
+                for offset, width, raw_value in bitfields:
+                    mask = ((1 << width) - 1) << offset
+                    value = (value & ~mask) | (
+                        (int(raw_value) & ((1 << width) - 1)) << offset
+                    )
+                expected[storage_column] = value
+                unresolved.discard(storage_column)
+
+
 def _global_output_values(ir: FunctionIR, selected: dict[str, Any]) -> dict[str, Any] | None:
     columns = _global_output_columns(ir)
     if not columns:
         return {}
     env = _control_env(selected, ir)
     expected: dict[str, Any] = {}
+    unresolved_columns: set[str] = set()
     for column in columns:
         try:
             expected[column] = _lookup(selected, column)
         except KeyError:
-            expected[column] = 0
+            unresolved_columns.add(column)
     raw_effects = _effect_records(ir.global_write_effects)
-    touched: set[str] = set()
-    unknown: set[str] = set()
     for effect in raw_effects:
         if not isinstance(effect, dict):
             continue
@@ -172,7 +265,7 @@ def _global_output_values(ir: FunctionIR, selected: dict[str, Any]) -> dict[str,
         # emits leaf effects for the local record; those leaves are the only
         # precise values for the expanded target columns.
         has_leaf_columns = bool(
-            column and any(key.startswith(column + ".") for key in expected)
+            column and any(key.startswith(column + ".") for key in columns)
         )
         value = (
             None
@@ -194,28 +287,11 @@ def _global_output_values(ir: FunctionIR, selected: dict[str, Any]) -> dict[str,
             mapped = False
             for field, field_value in field_values.items():
                 leaf = f"{column}.{field}"
-                if leaf in expected:
+                if leaf in columns:
                     expected[leaf] = field_value
+                    unresolved_columns.discard(leaf)
                     mapped = True
             if mapped:
-                # The two SW records in this project are eight one-bit
-                # fields overlaid with ``byte``.  When all eight return
-                # leaves are available, the byte output is a deterministic
-                # AST type-layout consequence rather than a default value.
-                if (column.endswith(".xng_sw_info")
-                        or column.endswith(".xng_swic_pi_info")):
-                    base = column.rsplit(".", 1)[0]
-                    byte_column = f"{base}.byte"
-                    ordered_fields = list(field_values)
-                    if (byte_column in expected
-                            and len(ordered_fields) == 8
-                            and all(isinstance(field_values[item], int)
-                                    for item in ordered_fields)):
-                        expected[byte_column] = sum(
-                            (int(field_values[item]) & 1) << index
-                            for index, item in enumerate(ordered_fields)
-                        )
-                touched.add(root)
                 continue
         if value is None and column and isinstance(origin, dict) \
                 and origin.get("kind") == "local":
@@ -265,7 +341,7 @@ def _global_output_values(ir: FunctionIR, selected: dict[str, Any]) -> dict[str,
                 source_offset = -1
             for target, target_env in targets:
                 prefix = target + "."
-                for leaf in expected:
+                for leaf in columns:
                     if not leaf.startswith(prefix):
                         continue
                     field = leaf[len(prefix):]
@@ -276,39 +352,26 @@ def _global_output_values(ir: FunctionIR, selected: dict[str, Any]) -> dict[str,
                     if field_value is None:
                         continue
                     expected[leaf] = field_value
+                    unresolved_columns.discard(leaf)
                     mapped = True
             if mapped:
-                touched.add(root)
                 continue
-        if column is None or value is None or column not in expected:
+        if column is None or value is None or column not in columns:
             if root:
-                unknown.add(root)
+                unresolved_columns.update(
+                    item for item in columns
+                    if item == global_base_key(root)
+                    or item.startswith(global_base_key(root) + "[")
+                    or item.startswith(global_base_key(root) + ".")
+                )
             continue
         expected[column] = value
-        touched.add(root)
-    if not raw_effects and any(
-        isinstance(obj, dict) and obj.get("write")
-        for obj in _global_records(ir)
-    ):
+        unresolved_columns.discard(column)
+    if not raw_effects:
         return None
-    for name in touched:
-        expected[name] = next(
-            (value for column, value in expected.items()
-             if column.split("/")[-1].split("[", 1)[0] == name),
-            0,
-        )
-    for name in unknown:
-        for column in list(expected):
-            tail = column.split("/")[-1]
-            if tail == name or tail.startswith(name + "[") or tail.startswith(name + "."):
-                expected.pop(column, None)
-        expected.pop(name, None)
-    objects = _global_records(ir)
-    for obj in objects:
-        if obj.get("write") and obj.get("name"):
-            # Validation uses the semantic object name for completeness;
-            # rendering consumes the fully expanded field columns above.
-            expected.setdefault(str(obj["name"]), 0)
+    _resolve_record_storage_values(ir, expected, unresolved_columns, columns)
+    if unresolved_columns:
+        return None
     return expected
 
 
@@ -375,7 +438,7 @@ def _control_env(values: dict[str, Any], ir: FunctionIR) -> dict[str, Any]:
                             ir, callee, order,
                             origin.get("call_offset"),
                         )
-                        aliases.extend(stub_return_keys(callee, slot))
+                    aliases.extend(call_return_keys(callee, slot))
                     for alias in aliases:
                         try:
                             value = _lookup(env, alias)
@@ -433,7 +496,7 @@ def _control_env(values: dict[str, Any], ir: FunctionIR) -> dict[str, Any]:
                     ir, callee, origin.get("call_order"),
                     origin.get("call_offset"),
                 )
-                for concrete in stub_return_keys(callee, slot):
+                for concrete in call_return_keys(callee, slot):
                     env[concrete] = value
     return env
 
@@ -542,12 +605,13 @@ def evaluate_branch(branch: Branch, env: dict[str, Any],
 def _required_outputs(ir: FunctionIR) -> list[str]:
     required = []
     if ir.ret_type not in ("", "void"):
-        required.append("ret")
-    required.extend(param.name for param in ir.params if param.is_ptr and param.is_written)
-    required.extend(memory.name for memory in ir.memory_vars if memory.write)
+        required.append("return")
     required.extend(
-        obj.name for obj in ir.global_objects if obj.name and obj.write
+        pointer_value_key(param.name)
+        for param in ir.params if param.is_ptr and param.is_written
     )
+    required.extend(memory.name for memory in ir.memory_vars if memory.write)
+    required.extend(_global_output_columns(ir))
     return list(dict.fromkeys(required))
 
 
@@ -649,7 +713,12 @@ def _remap_derived_candidates(ir: FunctionIR, candidates: dict) -> None:
 def _pointer_initial_value(selected: dict[str, Any], param) -> Any | None:
     """Read the caller-owned pointee value when the AST exposed a read path."""
     name = str(param.name)
-    for key in (f"*{name}", f"@{name}[0]", f"{name}[0]", name):
+    for key in (
+        pointer_value_key(name),
+        pointer_value_key(name, f"{name}[0]"),
+        pointer_value_key(name, f"*{name}"),
+        name,
+    ):
         try:
             return _lookup(selected, key)
         except KeyError:
@@ -746,7 +815,7 @@ def _stub_return_value(ir: FunctionIR, origin: dict[str, Any],
     slot = _stub_return_slot(
         ir, callee, origin.get("call_order"), origin.get("call_offset")
     )
-    candidates = stub_return_keys(callee, slot)
+    candidates = call_return_keys(callee, slot)
     for candidate in candidates:
         try:
             return _lookup(env, candidate)
@@ -803,7 +872,7 @@ def _stub_param_value(ir: FunctionIR, origin: dict[str, Any],
             break
         if (item.callee or "") == callee:
             slot += _stub_capacity(ir, item)
-    candidates = stub_param_keys(callee, index, slot)
+    candidates = call_param_keys(callee, index, slot)
     for candidate in candidates:
         try:
             return _lookup(env, candidate)
@@ -842,7 +911,7 @@ def _stub_return_field_values(ir: FunctionIR, origin: dict[str, Any],
     slot = _stub_return_slot(ir, callee, call.order)
     values: dict[str, Any] = {}
     for field in fields:
-        candidates = stub_return_keys(callee, slot, field)
+        candidates = call_return_keys(callee, slot, field)
         for candidate in candidates:
             try:
                 values[field] = _lookup(env, candidate)
@@ -1039,19 +1108,12 @@ def _return_value(ir: FunctionIR, selected: dict[str, Any]) -> Any | None:
 
 def _pointer_output_columns(param, effects: list[dict[str, Any]]) -> list[str]:
     name = str(param.name)
-    static_function = False
     columns: list[str] = []
     for effect in effects:
         path = str(effect.get("path", "")).strip()
         if not path or path == name:
             continue
-        if path.startswith("*"):
-            column = f"@{name}[0]" if static_function \
-                and path == f"*{name}" else path
-        elif path.startswith(name):
-            column = f"@{path}"
-        else:
-            column = f"*{name}"
+        column = pointer_value_key(name, path)
         if column not in columns:
             columns.append(column)
     return columns
@@ -1067,7 +1129,9 @@ def _pointer_output_values(ir: FunctionIR, param,
     output_effects = [effect for effect in effects if isinstance(effect, dict)
                       and effect.get("path")]
     columns = _pointer_output_columns(param, output_effects)
-    values: dict[str, Any] = {column: 0 for column in columns}
+    if not columns:
+        return None
+    values: dict[str, Any] = {}
     for effect in effects:
         if not isinstance(effect, dict):
             continue
@@ -1101,12 +1165,7 @@ def _pointer_output_values(ir: FunctionIR, param,
             name = str(param.name)
             if path == name:
                 continue
-            if path.startswith("*"):
-                column = path
-            elif path.startswith(name):
-                column = f"@{path}"
-            else:
-                column = f"*{name}"
+            column = pointer_value_key(name, path)
             values[column] = value
     return values
 
@@ -1130,18 +1189,12 @@ def _generic_expected(ir: FunctionIR, selected: dict[str, Any]) -> dict[str, Any
     if ir.ret_type not in ("", "void"):
         value = _return_value(ir, selected)
         if value is not None:
-            expected["ret"] = value
-            static_function = ir.is_static
-            return_comment = (
-                f"{Path(ir.file).name}/{ir.name}@@"
-                if static_function else f"{ir.name}@@"
-            )
-            expected[return_comment] = value
+            expected["return"] = value
     global_values = _global_output_values(ir, selected)
     if global_values is not None:
         expected.update(global_values)
-    # Call-count comparison fields are emitted on both sides by the target
-    # adapter.  Materialize their exact adapter spelling as well.
+    # Call-count comparison fields are semantic observations.  The target
+    # adapter owns their concrete comparison-column spelling.
     for call in _stub_calls(ir):
         name = call_count_key(call.callee)
         try:
@@ -1149,7 +1202,6 @@ def _generic_expected(ir: FunctionIR, selected: dict[str, Any]) -> dict[str, Any
         except KeyError:
             continue
         expected[name] = value
-        expected[qualified_stub_key(call.callee, name)] = value
     for param in ir.params:
         if not param.is_ptr or not param.is_written:
             continue
@@ -1158,23 +1210,14 @@ def _generic_expected(ir: FunctionIR, selected: dict[str, Any]) -> dict[str, Any
             expected.update(pointer_values)
         value = _pointer_output_value(ir, param, selected)
         if value is not None:
-            expected[param.name] = value
-            # The renderer uses the exact pointee spelling while
-            # the solver traditionally stores the semantic parameter name.
-            # Keep both forms so a proven pointer write is renderable for
-            # static (``@p[0]``) and external (``*p``) targets.
-            expected[f"@{param.name}[0]"] = value
-            expected[f"{param.name}[0]"] = value
-            expected[f"*{param.name}"] = value
+            expected[pointer_value_key(param.name)] = value
 
     # Stub argument write-back columns are observable target outputs for the
     # ordinary non-Rte helpers.  Their deterministic generic oracle is the
     # selected input slot; callee side effects remain represented separately
     # by AST-proven tested-function pointer/global write effects.
-    _, stub_output_columns = _stub_input_columns(ir)
+    _, stub_output_columns = _semantic_call_columns(ir)
     for column in stub_output_columns:
-        if is_stub_return_key(column):
-            continue
         try:
             expected[column] = _lookup(selected, column)
         except KeyError:
@@ -1417,7 +1460,6 @@ def _generic_inputs(ir: FunctionIR) -> tuple[dict[str, list[Any]], dict[str, Any
     for cv in ir.control_vars:
         if cv.constant_value is not None:
             fixed[cv.name] = cv.constant_value
-    pointer_index = 0
     for param in ir.params:
         if not param.is_ptr:
             # A scalar formal is controllable even when it only drives an
@@ -1426,14 +1468,16 @@ def _generic_inputs(ir: FunctionIR) -> tuple[dict[str, list[Any]], dict[str, Any
             # mistake an omitted parameter for an unresolved local.
             fixed.setdefault(param.name, 0)
             continue
-        fixed[param.name] = pointer_address(pointer_index)
-        pointer_index += 1
+        # The valid-pointer proof value is semantic.  The WinAMS adapter
+        # converts the corresponding address key to its target address.
+        fixed[param.name] = 1
+        fixed[pointer_address_key(param.name)] = 1
         # Address columns and dereferenced value columns are distinct
         # target variables.  A generic row starts with a deterministic zero
         # pointee; AST write effects may replace it in the expected half.
-        fixed[f"@{param.name}[0]"] = 0
-        fixed[f"{param.name}[0]"] = 0
-        fixed[f"*{param.name}"] = 0
+        fixed[pointer_value_key(param.name)] = 0
+        fixed[pointer_value_key(param.name, f"{param.name}[0]")] = 0
+        fixed[pointer_value_key(param.name, f"*{param.name}")] = 0
     for memory in ir.memory_vars:
         if memory.input_value is not None:
             fixed[memory.name] = memory.input_value
@@ -1455,7 +1499,7 @@ def _generic_inputs(ir: FunctionIR) -> tuple[dict[str, list[Any]], dict[str, Any
             )
     for callee, count in known_call_counts.items():
         fixed[call_count_key(callee)] = count
-    stub_input_columns, stub_return_columns = _stub_input_columns(ir)
+    stub_input_columns, stub_return_columns = _semantic_call_columns(ir)
     for column in (*stub_input_columns, *stub_return_columns):
         fixed[column] = 0
     return domains, fixed

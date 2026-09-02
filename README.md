@@ -9,21 +9,27 @@ C 源码 + 配置头
   │
   ▼
 ┌─────────────────────────────────────┐
-│  parser/  C++ Clang LibTooling 提取 → FunctionIR │
+│  parser/  进程边界/schema → FunctionIR │
 ├─────────────────────────────────────┤
-│  flow/     控制流 → 原子条件 + 控制变量 │
+│  tooling/  C++ Clang LibTooling 语义提取 │
 ├─────────────────────────────────────┤
 │  cases/    边界值枚举 + 组合去冗余     │
+├─────────────────────────────────────┤
+│  rules/    语义义务、约束、oracle 与证据链 │
+├─────────────────────────────────────┤
+│  winams/   WinAMS projection/CSV adapter │
 ├─────────────────────────────────────┤
 │  stub/     WinAMS AMSTB stub（CALLCNT/ARG/PTROUT）│
 ├─────────────────────────────────────┤
 │  host/     harness + ARM GCC 编译执行       │
 ├─────────────────────────────────────┤
-│  winams/   WinAMS TestCsv（mod/#COMMENT）   │
-├─────────────────────────────────────┤
 │  llm/      LLM 兜底（来源判定/有状态stub/覆盖率闭环）│
 └─────────────────────────────────────┘
 ```
+
+依赖方向固定为：`C++ extractor → FunctionIR → rules → adapters → execution`。
+`rules/` 只产生工具无关的语义 ID；WinAMS 列名、排序和地址投影由
+`winams/` adapter 负责。
 
 用例生成核心采用确定性规则引擎：先产生带分支义务、约束、oracle 和证据链的
 `TestIntent`，验证通过后才渲染 WinAMS CSV。规则归纳与审批流程见
