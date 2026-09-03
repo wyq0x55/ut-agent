@@ -1,8 +1,8 @@
-"""Typed TestBaseline contract.
+"""Typed versioned Base TestBaseline contract.
 
-The baseline is a project-level, versioned input to generation.  Policy
-sections intentionally remain data, rather than executable Python, so loading
-one cannot introduce a second rule language or an implicit version upgrade.
+Project-level switches such as MC/DC and approved exceptions belong to the
+project manifest.  Keeping them out of this model makes the baseline a stable
+base-test contract instead of a second project-policy registry.
 """
 from __future__ import annotations
 
@@ -21,9 +21,6 @@ class TestBaseline:
     id: str
     version: str
     status: str
-    base_profile: str = ""
-    mcdc_enabled: bool | None = None
-    approved_exceptions: tuple[str, ...] = ()
     source: dict[str, Any] = field(default_factory=dict)
     rules: tuple[dict[str, Any], ...] = ()
     coverage: dict[str, Any] = field(default_factory=dict)
@@ -57,11 +54,6 @@ class TestBaseline:
         return cls(
             id=str(raw["id"]), version=str(raw["version"]),
             status=str(raw["status"]),
-            base_profile=str(raw.get("base_profile", "")),
-            mcdc_enabled=(bool(raw["mcdc_enabled"])
-                          if "mcdc_enabled" in raw else None),
-            approved_exceptions=tuple(str(item) for item in
-                                      raw.get("approved_exceptions", [])),
             source=dict(raw.get("source", {})),
             rules=tuple(dict(item) for item in raw_rules),
             **policies,
@@ -73,6 +65,5 @@ class TestBaseline:
 
     def to_dict(self) -> dict[str, Any]:
         data = asdict(self)
-        data["approved_exceptions"] = list(self.approved_exceptions)
         data["rules"] = list(self.rules)
         return {"baseline": data}

@@ -3,7 +3,6 @@
   "project": {
     "id": "N-O2608-PSD-087",
     "context_manifest": "N-O2608-PSD-087.json",
-    "baseline": "psd-rebuild-mcdc@1.0",
     "scope": "all-indexed-functions"
   },
   "corpus": {

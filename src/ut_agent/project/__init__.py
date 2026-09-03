@@ -9,11 +9,9 @@ from .model import (
     TargetProfile,
 )
 from .resolve import resolve_project_context
-from .registry import ProjectBaselineBinding, load_project_baselines, project_baseline
 
 __all__ = [
     "BuildContext", "ProjectManifest", "ProjectRulePackRef",
     "ResolvedProjectContext", "TargetProfile", "load_manifest",
-    "resolve_project_context", "ProjectBaselineBinding", "load_project_baselines",
-    "project_baseline",
+    "resolve_project_context",
 ]

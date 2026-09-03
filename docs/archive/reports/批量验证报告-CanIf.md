@@ -1,3 +1,4 @@
+> Historical document. Not normative. Current architecture: ../../architecture.md
 # 批量通用性验证报告（一）：CanIf.c 全函数 + PduR 探针
 
 > 日期：2026-08-24 · 流水线版本：M2.5 闭环 + 指针表 stub + 配置 fixture ·

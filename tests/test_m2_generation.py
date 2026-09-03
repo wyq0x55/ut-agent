@@ -1,6 +1,6 @@
 """M2 验收：stub 与用例表 CSV 的脚本生成结果对上手写 golden。
 
-golden 是契约（docs/用例表与CSV格式规格.md）：
+WinAMS CSV 格式契约见 ``docs/winams/coverage-csv.md``：
 - stub 源码：代码部分（去注释去空白）与手写完全一致
 - CSV：列头与手写完全一致；分支注释行/组合行结构一致；设定列全量枚举；
   期待/记录列填 ?（由 M2.5 执行回填——手写 golden 里是人工推导值）

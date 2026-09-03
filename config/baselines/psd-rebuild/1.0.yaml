@@ -1,10 +1,7 @@
 baseline:
-  id: psd-rebuild-mcdc
+  id: psd-rebuild
   version: "1.0"
   status: approved
-  base_profile: "PSD再構築"
-  mcdc_enabled: true
-  approved_exceptions: []
   source:
     document: "単体テスト項目基準書_Ver.1.6.xlsx"
     sheet: "PSD再構築"
@@ -47,7 +44,6 @@ baseline:
   coverage:
     criterion: "PSD再構築"
   condition_policy:
-    mcdc: true
     logical_connectives: ["&&", "||"]
     condition_outcome: true
     source_rules: ["psd.4.compare", "psd.4.mcdc"]

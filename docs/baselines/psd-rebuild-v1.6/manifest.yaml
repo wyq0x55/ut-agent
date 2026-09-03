@@ -10,7 +10,7 @@ source:
   translation_policy: "只翻译说明，不改写原始单元格内容"
   conversion: "按测试基准显式分段；无关内容单独记录并排除"
 baseline:
-  id: "psd-rebuild-mcdc"
+  id: "psd-rebuild"
   profile: "PSD再構築"
   name: "PSD 重构"
   name_original: "PSD再構築"

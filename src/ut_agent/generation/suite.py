@@ -74,8 +74,7 @@ def generate_suite(function_ir: FunctionIR,
     """
     baseline = project_context.baseline
     profile = project_context.manifest.profile
-    mcdc_enabled = (bool(profile["mcdc_enabled"])
-                    if "mcdc_enabled" in profile else None)
+    mcdc_enabled = bool(profile.get("mcdc_enabled", False))
     obligations = derive_obligations(
         function_ir, baseline, mcdc_enabled=mcdc_enabled,
         project_rule_pack=project_context.project_rule_pack,

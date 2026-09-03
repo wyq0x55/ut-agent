@@ -1,3 +1,4 @@
+> Historical document. Not normative. Current architecture: ../../architecture.md
 # 单元测试 AI Agent 实施计划
 
 > 依据《单元测试自动化方案.md》与 Issues #1 ~ #6 落地：基于 `ut-clang-extract` C++ Extractor 的确定性单元测试生成流水线，90% 规则确定性生成 + 3 个 LLM 介入点，全部带机器校验闭环。

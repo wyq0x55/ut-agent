@@ -18,7 +18,7 @@ from convert_baseline_xlsx import _markdown_value, _yaml_lines, convert
 
 SHEET = "PSD再構築"
 REVISION = "Ver.1.6"
-BASELINE_ID = "psd-rebuild-mcdc"
+BASELINE_ID = "psd-rebuild"
 
 
 SECTION_SPECS = (

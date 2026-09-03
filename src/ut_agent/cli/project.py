@@ -109,11 +109,6 @@ def run_validate_corpus(args) -> int:
             f"语料项目与 context manifest 不一致: "
             f"{corpus_manifest.project_id} != {context.project_id}"
         )
-    if context.baseline_ref != corpus_manifest.baseline_ref:
-        raise ValueError(
-            f"语料 baseline 与 context manifest 不一致: "
-            f"{corpus_manifest.baseline_ref} != {context.baseline_ref}"
-        )
     output_root = Path(args.out).resolve()
     units = generate_project_from_index(
         corpus_manifest.index_csv,

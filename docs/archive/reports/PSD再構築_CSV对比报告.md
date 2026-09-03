@@ -1,3 +1,4 @@
+> Historical document. Not normative. Current architecture: ../../architecture.md
 # PSD 再構築交付 CSV 对比报告
 
 ## 结论

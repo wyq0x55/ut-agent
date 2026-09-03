@@ -12,16 +12,19 @@ from ut_agent.generation import (
 from ut_agent.ir import (
     Atom, Branch, CallSite, ControlVar, Effect, FunctionIR, Param, TypeInfo,
 )
-from ut_agent.project import load_project_baselines
 from ut_agent.project.model import ProjectManifest, ResolvedProjectContext
 from ut_agent.targets.winams.harness import plan_harness
 from ut_agent.targets.winams.csv import render_suite_csv
 
 
 def _context():
-    baseline = load_baseline("config/baselines/psd-rebuild-mcdc/1.0.yaml")
+    baseline = load_baseline("config/baselines/psd-rebuild/1.0.yaml")
     return ResolvedProjectContext(
-        ProjectManifest("N-O2606-PSD-049", baseline.id, baseline.version), baseline
+        ProjectManifest(
+            "N-O2606-PSD-049", baseline.id, baseline.version,
+            profile={"mcdc_enabled": True},
+        ),
+        baseline,
     )
 
 
@@ -189,9 +192,13 @@ def test_baseline_loader_rejects_unknown_document_fields(tmp_path):
         load_baseline(path)
 
 
-def test_project_baseline_registry_preserves_version_lock():
-    binding = load_project_baselines("config/projects/project-baselines.yaml")[
-        "N-O2504-PHD-020"
-    ]
-    assert binding.baseline_ref == "psd-rebuild-mcdc@1.0"
-    assert binding.to_dict()["baseline"] == binding.baseline_ref
+def test_project_manifest_is_the_single_strategy_source():
+    from ut_agent.project import load_manifest, resolve_project_context
+
+    manifest = load_manifest("config/projects/N-O2608-PSD-087.json")
+    context = resolve_project_context("config/projects/N-O2608-PSD-087.json")
+    assert manifest.baseline_ref == "psd-rebuild@1.0"
+    assert context.provenance["baseline_version"] == "1.0"
+    assert context.provenance["mcdc_enabled"] is True
+    assert "base_profile" not in manifest.profile
+    assert "profile_version" not in manifest.profile

@@ -53,7 +53,6 @@ class ProjectCorpusManifest:
     path: Path
     project_id: str
     context_manifest: Path
-    baseline_ref: str
     scope: str
     index_csv: Path
     product_root: Path
@@ -68,7 +67,6 @@ class ProjectCorpusManifest:
             "project": {
                 "id": self.project_id,
                 "context_manifest": str(self.context_manifest),
-                "baseline": self.baseline_ref,
                 "scope": self.scope,
             },
             "corpus": {
@@ -111,7 +109,6 @@ def load_corpus_manifest(path: Path) -> ProjectCorpusManifest:
         path=path,
         project_id=project["id"],
         context_manifest=_resolve(base, project["context_manifest"]),
-        baseline_ref=project["baseline"],
         scope=project["scope"],
         index_csv=_resolve(base, corpus["index_csv"]),
         product_root=_resolve(base, corpus["product_root"]),
@@ -609,7 +606,7 @@ def build_corpus_validation_report(
         "status": "PASS" if units and not all_gaps else "REVIEW_REQUIRED",
         "project": {
             "id": manifest.project_id,
-            "baseline": manifest.baseline_ref,
+            "baseline": getattr(context, "baseline_ref", "unknown"),
             "scope": manifest.scope,
             "function_count": len(units),
         },

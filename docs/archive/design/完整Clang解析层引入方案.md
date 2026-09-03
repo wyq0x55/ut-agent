@@ -1,3 +1,4 @@
+> Historical document. Not normative. Current architecture: ../../architecture.md
 # 完整 Clang 解析层引入方案
 
 > 目标：以 C++ LibTooling/ASTMatchers 建立唯一、可追溯、确定性的 C 语义事实源，
