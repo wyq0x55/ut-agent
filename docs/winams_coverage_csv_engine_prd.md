@@ -21,7 +21,7 @@ WinAMS 覆盖率测试 CSV 生成引擎
 
 ```text
 项目测试观点映射
-+ Clang AST 源码分析
++ ut-clang-extract (C++ LibTooling) 源码分析
 + 测试用例划分规则
 + 历史用例验证
 + WinAMS 格式输出
@@ -34,7 +34,7 @@ WinAMS 覆盖率测试 CSV 生成引擎
 ## 2. 核心原则
 
 1. 相同输入必须生成相同结果。
-2. 源码 AST 是程序语义的主要依据。
+2. 源码 AST（由 ut-clang-extract 提取的 FunctionIR）是程序语义的主要依据。
 3. 项目测试观点决定使用哪套用例划分规则。
 4. 历史用例用于验证和补充规则，不直接复制。
 5. CSV 格式生成与测试用例划分解耦。
@@ -76,7 +76,7 @@ CSV 必须使用 CP932 编码和 CRLF 换行。
   ↓
 解析测试观点 Profile
   ↓
-Clang AST 分析目标函数
+ut-clang-extract 分析目标函数
   ↓
 生成 FunctionIR
   ↓
@@ -123,7 +123,7 @@ profile_version
 
 ### 5.2 源码分析
 
-使用 Clang AST 和预处理信息识别：
+使用 ut-clang-extract (C++ Clang LibTooling) 提取器与预处理信息识别：
 
 - 函数参数、返回值和类型
 - 全局变量和数组

@@ -7,7 +7,7 @@
 ## 0. 定位与范围
 
 - **目标**：把方案文档变成可运行、可复现、可评测的系统，最终能对真实项目模块批量产出达标的 C0/C1/MC/DC 测试与审查报告。
-- **范围**：以 WinAMS 单元测试流水线为主；与 SILS 方案共享的部分（libclang 解析层）单独抽出复用。
+- **范围**：以 WinAMS 单元测试流水线为主；与 SILS 方案共享的部分（ut-clang-extract C++ LibTooling 解析层）单独抽出复用。
 - **不变的铁律**（写进 AGENTS.md）：
   1. 确定性核心路径永不引入 LLM（同输入必须同输出，这是审查一致性的根基）
   2. LLM 一切输出必须有机器校验闭环（编译通过 / 覆盖率达标 / schema 合法）
@@ -19,6 +19,7 @@
 
 ```
 ut-agent/
+├── tooling/           # ut-clang-extract（唯一 C++ Clang LibTooling 语义提取引擎）
 ├── src/ut_agent/
 │   ├── project/       # 项目 manifest、Baseline/ProjectRulePack 解析与锁定
 │   ├── baseline/      # 版本化、已审批 TestBaseline 数据契约
@@ -28,14 +29,12 @@ ut-agent/
 │   ├── targets/winams/# CSV、Stub、DefineVar 和 WinAMS 工程适配器
 │   ├── toolchain/     # 唯一 C++ Clang extractor、编译和 host 进程边界
 │   ├── reporting/     # 构建产物证据和诊断报告
-│   ├── cli/           # parser + 命令路由；业务实现按命令拆分
+│   ├── cli/           # CLI 命令路由；业务实现按命令拆分
 │   └── llm/           # 三个介入点（仅非确定性辅助路径）
-├── schemas/           # FunctionIR、Baseline、ProjectManifest 合同
+├── schemas/           # FunctionIR、Baseline、ProjectManifest Schema 合同
 ├── config/            # baseline、project-rules、projects、winams 配置
-├── eval/              # 基准函数集 + 评测脚本（一次到位率、轮数、token）
-├── examples/          # 代表模块 + golden 输出（CSV、覆盖率、报告）
+├── docs/              # 规格文档与 docs/baselines/ 测试基准定义
 ├── tests/             # pytest 单测 + golden-file 回归
-├── docs/              # 格式规格（WinAMS 工程文件/CSV/覆盖率输出）
 └── AGENTS.md
 ```
 
@@ -73,7 +72,7 @@ ut-agent/
 
 #### M1 解析层（1.5 周）
 
-1. libclang 扫描模块 → 函数清单、调用关系、内部/外部函数分类 → IR
+1. ut-clang-extract 扫描模块 → 函数清单、调用关系、内部/外部函数分类 → FunctionIR
 2. 判断语句 → 原子条件列表（控制变量、比较方向、边界值）→ IR
 3. golden 回归测试：代表模块解析结果与人工核对一致
 
@@ -151,7 +150,7 @@ ut-agent/
 
 ## 3. 与 SILS 方案的协同
 
-- `parser/`（libclang 解析 + 源码索引）与 SILS 方案的"源码索引层"是同一东西：抽成独立包（如 `c-index`），两边共用，避免两套解析
+- C++ extractor 层（ut-clang-extract 解析 + 源码索引）与 SILS 方案的"源码索引层"为同一事实源，统一产生 FunctionIR v3
 - 评测方法论（golden 基准集、一次到位率、校验闭环模式）两项目复用同一套框架
 - 落地顺序建议：单元测试流水线 A 线先行（不依赖 LLM，也不依赖 WinAMS），SILS 的源码索引直接从本项目 M1 取成果
 
@@ -161,7 +160,7 @@ ut-agent/
 |---|---|---|
 | WinAMS 批处理接口能力不确认 | B 线（M3 起）返工 | 闸门移至 B 线 M0b；A 线不依赖，确认期间照常推进 |
 | MC/DC 组合爆炸（条件数多） | 用例数失控、LLM 轮数暴涨 | pairwise 降维 + 轮数上限 + 报告中标注不可达项 |
-| libclang 边角（宏包裹的条件、函数指针调用） | 解析遗漏 | M1 列边角清单，显式报错优于静默漏掉 |
+| Clang 边角（宏包裹的条件、函数指针调用） | 解析遗漏 | M1 列边角清单，显式报错优于静默漏掉 |
 | LLM 输出不稳定 | 成本/一致性波动 | prompt 版本化 + 基准集回归评测，prompt 改动必须跑 eval |
 | 商业工具信息入仓 | 合规 | 仓库只含编排代码与格式文档；WinAMS 工程样例脱敏；开源与否见决策点 1 |
 

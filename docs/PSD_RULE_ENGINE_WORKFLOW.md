@@ -68,7 +68,7 @@ Characteristics:
 Behavior:
 
 ```text
-Read Source AST
+Read Source AST (via C++ ut-clang-extract)
 
 ↓
 
