@@ -14,10 +14,10 @@ jobs:
           python-version: "3.11"
       - run: python -m pip install --upgrade pip
       - run: python -m pip install -e ".[dev]"
-      - run: python -m pytest tests/test_issue1_architecture.py tests/test_ir_json.py
+      - run: python -m pytest tests/test_issue3_architecture.py tests/test_ir_json.py
 
   clang-fixtures:
-    runs-on: windows-latest
+    runs-on: windows-2022
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
