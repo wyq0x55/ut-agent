@@ -10,11 +10,10 @@
     "project": {
       "type": "object",
       "additionalProperties": false,
-      "required": ["id", "context_manifest", "baseline", "scope"],
+      "required": ["id", "context_manifest", "scope"],
       "properties": {
         "id": {"type": "string", "minLength": 1},
         "context_manifest": {"type": "string", "minLength": 1},
-        "baseline": {"type": "string", "pattern": "^[^@]+@[^@]+$"},
         "scope": {"const": "all-indexed-functions"}
       }
     },

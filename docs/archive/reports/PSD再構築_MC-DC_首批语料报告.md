@@ -1,3 +1,4 @@
+> Historical document. Not normative. Current architecture: ../../architecture.md
 # PSD 再構築 + MC/DC 首批语料报告
 
 ## 范围

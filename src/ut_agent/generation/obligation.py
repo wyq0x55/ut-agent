@@ -18,13 +18,6 @@ def _case_label(case) -> str:
     return f"case {case.label}:"
 
 
-def _mcdc_enabled(baseline: TestBaseline) -> bool:
-    if baseline.mcdc_enabled is not None:
-        return baseline.mcdc_enabled
-    return bool(baseline.coverage.get("mcdc", False)
-                or baseline.condition_policy.get("mcdc", False))
-
-
 def _policy_bool(section: dict, names: tuple[str, ...], default: bool) -> bool:
     for name in names:
         if name in section:
@@ -149,7 +142,10 @@ def derive_obligations(ir: FunctionIR, baseline: TestBaseline,
                         boundary_value=point,
                         description=f"atom {index} {label} boundary {point}",
                     ))
-        enabled = _mcdc_enabled(baseline) if mcdc_enabled is None else bool(mcdc_enabled)
+        # MC/DC is a project-level switch.  A direct baseline API call has no
+        # project context, so it is deliberately disabled unless the caller
+        # supplies the explicit switch.
+        enabled = bool(mcdc_enabled)
         if not enabled or len(branch.atoms) < 2:
             continue
         if (branch.connective or "") not in {"&&", "||"}:

@@ -1,7 +1,7 @@
 """M1 golden 回归：CanIf_SetPduMode 解析结果必须与手写规格一致。
 
 对照物：examples/golden/CanIf_SetPduMode/testdata.csv（B01..B09 手工登记）
-与 docs/用例表与CSV格式规格.md。改动期望值须说明拍板出处。
+与 docs/winams/coverage-csv.md。改动期望值须说明拍板出处。
 """
 import os
 from pathlib import Path

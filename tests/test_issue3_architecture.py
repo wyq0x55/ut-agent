@@ -35,7 +35,7 @@ def test_project_manifest_resolves_locked_baseline(tmp_path):
     manifest = tmp_path / "manifest.json"
     manifest.write_text(json.dumps({
         "project": {"id": "N-O2606-PSD-049"},
-        "baseline": {"id": "psd-rebuild-mcdc", "version": "1.0"},
+        "baseline": {"id": "psd-rebuild", "version": "1.0"},
         "rules": {"project_pack": None},
         "build": {"profile": "default"},
         "winams": {"profile": "standard"},
@@ -43,7 +43,7 @@ def test_project_manifest_resolves_locked_baseline(tmp_path):
     from ut_agent.project import resolve_project_context
     context = resolve_project_context(manifest, config_root=ROOT / "config")
     assert context.project_id == "N-O2606-PSD-049"
-    assert context.baseline_ref == "psd-rebuild-mcdc@1.0"
+    assert context.baseline_ref == "psd-rebuild@1.0"
     assert context.provenance["function_ir_version"] == 3
 
 

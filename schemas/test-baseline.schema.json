@@ -14,9 +14,6 @@
         "id": {"type": "string", "minLength": 1},
         "version": {"type": "string", "minLength": 1},
         "status": {"const": "approved"},
-        "base_profile": {"type": "string"},
-        "mcdc_enabled": {"type": "boolean"},
-        "approved_exceptions": {"type": "array", "items": {"type": "string"}},
         "source": {"type": "object"},
         "rules": {
           "type": "array",

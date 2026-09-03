@@ -1,3 +1,4 @@
+> Historical document. Not normative. Current architecture: ../../architecture.md
 # WinAMS 用例表与 stub 格式规格（v1.0）
 
 本项目的交付对象是 WinAMS 工程，不再把项目早期的 `case_id` 自定义 CSV

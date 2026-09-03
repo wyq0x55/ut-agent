@@ -11,7 +11,7 @@ from ut_agent.generation.boundary import control_candidates
 from ut_agent.generation.obligation import derive_obligations
 from ut_agent.generation.solver import solve_obligation
 from ut_agent.ir import Atom, Branch, ControlVar, FunctionIR, Param, TypeInfo, ValueOrigin
-from ut_agent.project import load_manifest, load_project_baselines
+from ut_agent.project import load_manifest
 from ut_agent.reporting import (
     STANDARD_GAP_CATEGORIES,
     compare_function_semantics,
@@ -35,15 +35,14 @@ def test_issue6_corpus_manifest_locks_all_indexed_functions():
     manifest = load_corpus_manifest(CORPUS)
     validate_corpus_paths(manifest)
     context = load_manifest(manifest.context_manifest)
-    binding = load_project_baselines(ROOT / "config" / "projects" / "project-baselines.yaml")
     assert manifest.project_id == "N-O2608-PSD-087"
     assert manifest.scope == "all-indexed-functions"
-    assert context.baseline_ref == manifest.baseline_ref
-    assert binding[manifest.project_id].baseline_ref == manifest.baseline_ref
+    assert context.baseline_ref == "psd-rebuild@1.0"
+    assert "baseline" not in manifest.to_dict()["project"]
 
 
 def test_issue6_baseline_keeps_source_mapped_approved_rules():
-    baseline = load_baseline(ROOT / "config" / "baselines" / "psd-rebuild-mcdc" / "1.0.yaml")
+    baseline = load_baseline(ROOT / "config" / "baselines" / "psd-rebuild" / "1.0.yaml")
     assert len(baseline.rules) == 8
     assert {item["status"] for item in baseline.rules} == {"approved"}
     assert {item["rule_id"] for item in baseline.rules} >= {
@@ -153,7 +152,7 @@ def test_issue6_pointer_guards_and_dereferences_use_typed_domains():
     assert candidates["*ptr"]["values"] == {0, 3, 4, 5, 255}
     assert _pointer_column_key("ptr", "@ptr[0]", ir) == "*ptr"
     baseline = load_baseline(ROOT / "config" / "baselines" /
-                             "psd-rebuild-mcdc" / "1.0.yaml")
+                             "psd-rebuild" / "1.0.yaml")
     nested_true = next(item for item in derive_obligations(ir, baseline)
                        if item.oid == "value:T")
     witness = solve_obligation(ir, nested_true, baseline)
@@ -204,7 +203,7 @@ def test_issue6_loop_policy_emits_internal_loop_entry_obligations():
         control_vars=[ControlVar("index", "index", "local", type_info=info)],
     )
     baseline = load_baseline(ROOT / "config" / "baselines" /
-                             "psd-rebuild-mcdc" / "1.0.yaml")
+                             "psd-rebuild" / "1.0.yaml")
     obligations = derive_obligations(ir, baseline)
     assert [(item.kind, item.branch_id, item.outcome) for item in obligations] == [
         ("loop", "loop", True),

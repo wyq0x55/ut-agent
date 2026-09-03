@@ -5,7 +5,7 @@ build-backend = "setuptools.build_meta"
 [project]
 name = "ut-agent"
 version = "0.1.0"
-description = "嵌入式 C 单元测试用例生成流水线：确定性枚举为主体，LLM 仅兜底（规格见 docs/用例表与CSV格式规格.md）"
+description = "嵌入式 C 单元测试语义生成与 WinAMS 投影流水线：C++ ut-clang-extract 提供唯一源码语义事实源，Python 负责确定性编排"
 requires-python = ">=3.10"
 dependencies = ["jsonschema>=4.21,<5"]
 

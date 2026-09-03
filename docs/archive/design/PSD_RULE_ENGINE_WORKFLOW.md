@@ -1,3 +1,4 @@
+> Historical document. Not normative. Current architecture: ../../architecture.md
 # PSD Semantic Rule Engine Workflow
 
 > Version: 1.0  

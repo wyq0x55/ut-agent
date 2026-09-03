@@ -31,6 +31,16 @@
     },
     "build": {"type": "object"},
     "winams": {"type": "object"},
-    "profile": {"type": "object"}
+    "profile": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "mcdc_enabled": {"type": "boolean"},
+        "approved_exceptions": {
+          "type": "array",
+          "items": {"type": "string"}
+        }
+      }
+    }
   }
 }

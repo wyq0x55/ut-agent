@@ -1,4 +1,4 @@
-"""Typed project manifest and resolved-context models."""
+"""Typed project manifest and resolved project-context models."""
 from __future__ import annotations
 
 from dataclasses import asdict, dataclass, field
@@ -70,6 +70,23 @@ class ProjectManifest:
                 or not isinstance(winams_raw, Mapping)
                 or not isinstance(profile_raw, Mapping)):
             raise ValueError("build/winams/profile 必须是 object")
+        allowed_profile_keys = {"mcdc_enabled", "approved_exceptions"}
+        unknown_profile_keys = set(profile_raw) - allowed_profile_keys
+        if unknown_profile_keys:
+            raise ValueError(
+                "ProjectManifest.profile 不允许重复基础基准字段: "
+                f"{sorted(unknown_profile_keys)}"
+            )
+        mcdc_enabled = profile_raw.get("mcdc_enabled", False)
+        if not isinstance(mcdc_enabled, bool):
+            raise ValueError("ProjectManifest.profile.mcdc_enabled 必须是 boolean")
+        exceptions = profile_raw.get("approved_exceptions", [])
+        if not isinstance(exceptions, list) or any(
+            not isinstance(item, str) for item in exceptions
+        ):
+            raise ValueError(
+                "ProjectManifest.profile.approved_exceptions 必须是 string array"
+            )
         return cls(
             project_id=str(project["id"]),
             baseline_id=str(baseline["id"]),
@@ -129,6 +146,7 @@ class ResolvedProjectContext:
             "project_id": self.project_id,
             "baseline_id": self.baseline.id,
             "baseline_version": self.baseline.version,
+            "baseline_ref": self.baseline.ref,
             "project_rule_pack_version": (
                 self.manifest.project_rule_pack.version
                 if self.manifest.project_rule_pack else "none"
@@ -137,17 +155,9 @@ class ResolvedProjectContext:
                 self.manifest.project_rule_pack.id
                 if self.manifest.project_rule_pack else "none"
             ),
-            "base_profile": str(profile.get("base_profile", self.baseline.base_profile)),
-            "mcdc_enabled": (
-                bool(profile["mcdc_enabled"])
-                if "mcdc_enabled" in profile
-                else bool(self.baseline.mcdc_enabled)
-            ),
-            "profile_version": str(profile.get("profile_version", self.baseline.version)),
+            "mcdc_enabled": bool(profile.get("mcdc_enabled", False)),
             "approved_exceptions": tuple(
-                str(item) for item in profile.get(
-                    "approved_exceptions", self.baseline.approved_exceptions
-                )
+                str(item) for item in profile.get("approved_exceptions", [])
             ),
             "function_ir_version": self.function_ir_version,
             "generator_version": self.generator_version,

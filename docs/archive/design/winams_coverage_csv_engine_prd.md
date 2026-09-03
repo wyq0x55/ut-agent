@@ -1,3 +1,4 @@
+> Historical document. Not normative. Current architecture: ../../architecture.md
 # WinAMS 覆盖率测试 CSV 生成引擎 PRD
 
 ## 1. 产品概述

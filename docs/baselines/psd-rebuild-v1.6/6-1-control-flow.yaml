@@ -9,7 +9,7 @@ source:
   language: "中文说明 + 日文原文证据"
   translation_policy: "只翻译说明，不改写原始单元格内容"
 baseline:
-  id: "psd-rebuild-mcdc"
+  id: "psd-rebuild"
   profile: "PSD再構築"
   section_id: "6-1"
   name: "各种条件语句"
