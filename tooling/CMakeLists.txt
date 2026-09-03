@@ -25,6 +25,10 @@ if(NOT UT_AGENT_DIA_GUIDS OR NOT EXISTS "${UT_AGENT_DIA_GUIDS}")
       "C:/Program Files/Microsoft Visual Studio/18/Professional/DIA SDK/lib/amd64"
       "C:/Program Files/Microsoft Visual Studio/18/Community/DIA SDK/lib/amd64"
       "C:/Program Files/Microsoft Visual Studio/18/BuildTools/DIA SDK/lib/amd64"
+      "C:/Program Files/Microsoft Visual Studio/2019/Enterprise/DIA SDK/lib/amd64"
+      "C:/Program Files/Microsoft Visual Studio/2019/Professional/DIA SDK/lib/amd64"
+      "C:/Program Files/Microsoft Visual Studio/2019/Community/DIA SDK/lib/amd64"
+      "C:/Program Files/Microsoft Visual Studio/2019/BuildTools/DIA SDK/lib/amd64"
       "C:/Program Files/Microsoft Visual Studio/2022/Enterprise/DIA SDK/lib/amd64"
       "C:/Program Files/Microsoft Visual Studio/2022/Professional/DIA SDK/lib/amd64"
       "C:/Program Files/Microsoft Visual Studio/2022/Community/DIA SDK/lib/amd64"
@@ -33,6 +37,10 @@ if(NOT UT_AGENT_DIA_GUIDS OR NOT EXISTS "${UT_AGENT_DIA_GUIDS}")
       "C:/Program Files (x86)/Microsoft Visual Studio/18/Professional/DIA SDK/lib/amd64"
       "C:/Program Files (x86)/Microsoft Visual Studio/18/Community/DIA SDK/lib/amd64"
       "C:/Program Files (x86)/Microsoft Visual Studio/18/BuildTools/DIA SDK/lib/amd64"
+      "C:/Program Files (x86)/Microsoft Visual Studio/2019/Enterprise/DIA SDK/lib/amd64"
+      "C:/Program Files (x86)/Microsoft Visual Studio/2019/Professional/DIA SDK/lib/amd64"
+      "C:/Program Files (x86)/Microsoft Visual Studio/2019/Community/DIA SDK/lib/amd64"
+      "C:/Program Files (x86)/Microsoft Visual Studio/2019/BuildTools/DIA SDK/lib/amd64"
       "C:/Program Files (x86)/Microsoft Visual Studio/18/BuildTools/VC/Tools/MSVC/14.51.36231/lib/onecore/x64"
     NO_DEFAULT_PATH
   )
@@ -46,12 +54,33 @@ if(WIN32 AND TARGET LLVMDebugInfoPDB AND
 endif()
 if(UT_AGENT_DIA_GUIDS AND TARGET LLVMDebugInfoPDB)
   get_target_property(UT_AGENT_PDB_LINKS LLVMDebugInfoPDB INTERFACE_LINK_LIBRARIES)
-  string(REPLACE
+  set(UT_AGENT_RECORDED_DIA_PATHS
+    "C:/Program Files/Microsoft Visual Studio/18/Enterprise/DIA SDK/lib/amd64/diaguids.lib"
+    "C:/Program Files/Microsoft Visual Studio/18/Professional/DIA SDK/lib/amd64/diaguids.lib"
+    "C:/Program Files/Microsoft Visual Studio/18/Community/DIA SDK/lib/amd64/diaguids.lib"
+    "C:/Program Files/Microsoft Visual Studio/18/BuildTools/DIA SDK/lib/amd64/diaguids.lib"
+    "C:/Program Files/Microsoft Visual Studio/2019/Enterprise/DIA SDK/lib/amd64/diaguids.lib"
+    "C:/Program Files/Microsoft Visual Studio/2019/Professional/DIA SDK/lib/amd64/diaguids.lib"
+    "C:/Program Files/Microsoft Visual Studio/2019/Community/DIA SDK/lib/amd64/diaguids.lib"
+    "C:/Program Files/Microsoft Visual Studio/2019/BuildTools/DIA SDK/lib/amd64/diaguids.lib"
     "C:/Program Files/Microsoft Visual Studio/2022/Enterprise/DIA SDK/lib/amd64/diaguids.lib"
-    "${UT_AGENT_DIA_GUIDS}"
-    UT_AGENT_PDB_LINKS
-    "${UT_AGENT_PDB_LINKS}"
+    "C:/Program Files/Microsoft Visual Studio/2022/Professional/DIA SDK/lib/amd64/diaguids.lib"
+    "C:/Program Files/Microsoft Visual Studio/2022/Community/DIA SDK/lib/amd64/diaguids.lib"
+    "C:/Program Files/Microsoft Visual Studio/2022/BuildTools/DIA SDK/lib/amd64/diaguids.lib"
+    "C:/Program Files (x86)/Microsoft Visual Studio/18/Enterprise/DIA SDK/lib/amd64/diaguids.lib"
+    "C:/Program Files (x86)/Microsoft Visual Studio/18/Professional/DIA SDK/lib/amd64/diaguids.lib"
+    "C:/Program Files (x86)/Microsoft Visual Studio/18/Community/DIA SDK/lib/amd64/diaguids.lib"
+    "C:/Program Files (x86)/Microsoft Visual Studio/18/BuildTools/DIA SDK/lib/amd64/diaguids.lib"
+    "C:/Program Files (x86)/Microsoft Visual Studio/2019/Enterprise/DIA SDK/lib/amd64/diaguids.lib"
+    "C:/Program Files (x86)/Microsoft Visual Studio/2019/Professional/DIA SDK/lib/amd64/diaguids.lib"
+    "C:/Program Files (x86)/Microsoft Visual Studio/2019/Community/DIA SDK/lib/amd64/diaguids.lib"
+    "C:/Program Files (x86)/Microsoft Visual Studio/2019/BuildTools/DIA SDK/lib/amd64/diaguids.lib"
+    "C:/Program Files (x86)/Microsoft Visual Studio/18/BuildTools/VC/Tools/MSVC/14.51.36231/lib/onecore/x64/diaguids.lib"
   )
+  foreach(UT_AGENT_RECORDED_DIA_PATH IN LISTS UT_AGENT_RECORDED_DIA_PATHS)
+    string(REPLACE "${UT_AGENT_RECORDED_DIA_PATH}" "${UT_AGENT_DIA_GUIDS}"
+      UT_AGENT_PDB_LINKS "${UT_AGENT_PDB_LINKS}")
+  endforeach()
   set_property(TARGET LLVMDebugInfoPDB PROPERTY INTERFACE_LINK_LIBRARIES
     "${UT_AGENT_PDB_LINKS}"
   )
