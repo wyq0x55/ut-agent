@@ -151,10 +151,10 @@ def test_extractor_pass_boundary_and_v3_schema_are_present():
     pass_sources = sorted(set(re.findall(r"passes/[A-Za-z0-9_]+\.cpp", cmake)))
     assert pass_sources
     for source in pass_sources:
-        source_path = EXTRACTOR / source.replace("/", "\\")
+        source_path = EXTRACTOR / source
         assert source_path.is_file(), source
         header = source[:-4] + ".h"
-        assert (EXTRACTOR / header.replace("/", "\\")).is_file(), header
+        assert (EXTRACTOR / header).is_file(), header
         assert f'#include "{header}"' in main
     assert "parameterWriteEffects()" in main
     assert '"order", Effect.Order' in main
