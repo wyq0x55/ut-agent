@@ -14,7 +14,12 @@ jobs:
           python-version: "3.11"
       - run: python -m pip install --upgrade pip
       - run: python -m pip install -e ".[dev]"
-      - run: python -m pytest tests/test_issue3_architecture.py tests/test_ir_json.py
+      - name: Run architecture and documentation gates
+        run: |
+          python script/check_architecture.py
+          python script/check_docs.py
+      - name: Run Python contract tests
+        run: python -m pytest tests/test_issue3_architecture.py tests/test_ir_json.py tests/test_issue9_doc_config.py
 
   clang-fixtures:
     runs-on: windows-latest
@@ -23,26 +28,64 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: "3.11"
-      - name: Install LLVM
+      - name: Install LLVM development archive
         shell: pwsh
-        run: choco install llvm --no-progress --yes
+        run: |
+          $ErrorActionPreference = "Stop"
+          $llvmVersion = "20.1.8"
+          $archive = "clang+llvm-$llvmVersion-x86_64-pc-windows-msvc.tar.xz"
+          $archivePath = Join-Path $env:RUNNER_TEMP $archive
+          $llvm = Join-Path $env:RUNNER_TEMP "clang+llvm-$llvmVersion-x86_64-pc-windows-msvc"
+          $llvmConfig = Join-Path $llvm "lib/cmake/llvm/LLVMConfig.cmake"
+          $clangConfig = Join-Path $llvm "lib/cmake/clang/ClangConfig.cmake"
+          if (-not (Test-Path -LiteralPath $llvmConfig) -or
+              -not (Test-Path -LiteralPath $clangConfig)) {
+            $encodedArchive = $archive.Replace("+", "%2B")
+            $url = "https://github.com/llvm/llvm-project/releases/download/llvmorg-$llvmVersion/$encodedArchive"
+            Invoke-WebRequest -Uri $url -OutFile $archivePath
+            $expected = "f229769f11d6a6edc8ada599c0cda964b7dee6ab1a08c6cf9dd7f513e85b107f"
+            $actual = (Get-FileHash -LiteralPath $archivePath -Algorithm SHA256).Hash.ToLowerInvariant()
+            if ($actual -ne $expected) {
+              throw "LLVM archive SHA-256 mismatch: expected $expected, got $actual"
+            }
+            tar -xf $archivePath -C $env:RUNNER_TEMP
+            if ($LASTEXITCODE -ne 0) {
+              throw "LLVM archive extraction failed with exit code $LASTEXITCODE"
+            }
+          }
+          if (-not (Test-Path -LiteralPath $llvmConfig) -or
+              -not (Test-Path -LiteralPath $clangConfig)) {
+            throw "LLVM development archive is missing CMake package files under $llvm"
+          }
+          "UT_AGENT_LLVM=$llvm" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+          "$llvm/bin" | Out-File -FilePath $env:GITHUB_PATH -Encoding utf8 -Append
       - name: Install Python package
         shell: pwsh
         run: python -m pip install -e ".[dev]"
       - name: Build Clang extractor
         shell: pwsh
         run: |
-          $llvm = "C:/Program Files/LLVM"
+          $llvm = $env:UT_AGENT_LLVM
+          if (-not $llvm) {
+            throw "UT_AGENT_LLVM was not exported by the LLVM installation step"
+          }
           cmake -S tooling -B build `
             "-DLLVM_DIR=$llvm/lib/cmake/llvm" `
             "-DClang_DIR=$llvm/lib/cmake/clang"
-          cmake --build build --config Release
-          New-Item -ItemType Directory -Force -Path .build/ut-clang-extract-nmake2/bin | Out-Null
-          if (Test-Path build/bin/Release/ut-clang-extract.exe) {
-            Copy-Item build/bin/Release/ut-clang-extract.exe .build/ut-clang-extract-nmake2/bin/ut-clang-extract.exe
-          } else {
-            Copy-Item build/bin/ut-clang-extract.exe .build/ut-clang-extract-nmake2/bin/ut-clang-extract.exe
+          if ($LASTEXITCODE -ne 0) {
+            throw "CMake configure failed with exit code $LASTEXITCODE"
           }
+          cmake --build build --config Release
+          if ($LASTEXITCODE -ne 0) {
+            throw "CMake build failed with exit code $LASTEXITCODE"
+          }
+          $extractor = Get-ChildItem -Path build -Filter ut-clang-extract.exe -Recurse -File |
+            Select-Object -First 1
+          if (-not $extractor) {
+            throw "CMake build did not produce ut-clang-extract.exe"
+          }
+          New-Item -ItemType Directory -Force -Path .build/ut-clang-extract-nmake2/bin | Out-Null
+          Copy-Item -LiteralPath $extractor.FullName -Destination .build/ut-clang-extract-nmake2/bin/ut-clang-extract.exe -Force
       - name: Run extractor fixtures
         shell: pwsh
         run: python -m pytest tests/test_clang_extractor.py tests/test_ir_json.py

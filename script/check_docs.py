@@ -182,6 +182,40 @@ def check_config_single_source(root: Path = ROOT) -> list[str]:
                 payload = raw.get("baseline", raw)
                 if not isinstance(payload, dict):
                     raise ValueError("baseline payload must be object")
+                approval = payload.get("approval")
+                required_approval = {
+                    "authority", "approved_by", "approved_at", "scope",
+                    "reason", "evidence",
+                }
+                if not isinstance(approval, dict):
+                    violations.append(
+                        f"approved baseline lacks approval metadata: {path.relative_to(root)}"
+                    )
+                else:
+                    missing_approval = required_approval - approval.keys()
+                    if missing_approval:
+                        violations.append(
+                            f"baseline approval metadata incomplete {path.relative_to(root)}: "
+                            f"{sorted(missing_approval)}"
+                        )
+                    evidence = approval.get("evidence", [])
+                    if not isinstance(evidence, list) or not evidence:
+                        violations.append(
+                            f"baseline approval evidence must be non-empty: {path.relative_to(root)}"
+                        )
+                    elif any(not isinstance(item, str) or not item.strip() for item in evidence):
+                        violations.append(
+                            f"baseline approval evidence must contain non-empty strings: "
+                            f"{path.relative_to(root)}"
+                        )
+                    for item in evidence if isinstance(evidence, list) else []:
+                        if not isinstance(item, str) or item.startswith(("http://", "https://")):
+                            continue
+                        evidence_path = (root / item).resolve()
+                        if root not in evidence_path.parents or not evidence_path.is_file():
+                            violations.append(
+                                f"missing baseline approval evidence {path.relative_to(root)}: {item}"
+                            )
                 repeated = {"base_profile", "mcdc_enabled", "approved_exceptions"}.intersection(payload)
                 if repeated:
                     violations.append(
@@ -220,7 +254,7 @@ def check_config_single_source(root: Path = ROOT) -> list[str]:
                 provenance = context.provenance
                 required = {
                     "baseline_id", "baseline_version", "baseline_ref", "mcdc_enabled",
-                    "project_rule_pack_version",
+                    "baseline_approval", "project_rule_pack_version",
                 }
                 missing = required - provenance.keys()
                 if missing:

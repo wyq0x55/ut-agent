@@ -21,4 +21,5 @@
 - [WinAMS coverage CSV contract](winams/coverage-csv.md)
 - [PSD 基准来源证据](baselines/psd-rebuild-v1.6/index.md)
 - [PSD runtime baseline](../config/baselines/psd-rebuild/1.0.yaml)
+- [PSD runtime baseline approval record](baselines/psd-rebuild-v1.6/approval.md)
 - [历史资料说明](archive/README.md)
