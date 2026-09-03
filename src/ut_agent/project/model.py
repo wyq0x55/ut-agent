@@ -147,6 +147,7 @@ class ResolvedProjectContext:
             "baseline_id": self.baseline.id,
             "baseline_version": self.baseline.version,
             "baseline_ref": self.baseline.ref,
+            "baseline_approval": dict(self.baseline.approval),
             "project_rule_pack_version": (
                 self.manifest.project_rule_pack.version
                 if self.manifest.project_rule_pack else "none"

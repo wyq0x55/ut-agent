@@ -21,6 +21,7 @@ class TestBaseline:
     id: str
     version: str
     status: str
+    approval: dict[str, Any] = field(default_factory=dict)
     source: dict[str, Any] = field(default_factory=dict)
     rules: tuple[dict[str, Any], ...] = ()
     coverage: dict[str, Any] = field(default_factory=dict)
@@ -40,6 +41,12 @@ class TestBaseline:
         missing = {"id", "version", "status"} - set(raw)
         if missing:
             raise ValueError(f"TestBaseline 缺少字段: {sorted(missing)}")
+        approval = raw.get("approval", {})
+        if not isinstance(approval, Mapping):
+            raise ValueError("TestBaseline.approval 必须是 object")
+        status = str(raw["status"])
+        if status == "approved" and not approval:
+            raise ValueError("approved TestBaseline requires approval metadata")
         policies = {
             name: dict(raw.get(name, {}))
             for name in _POLICY_NAMES
@@ -53,7 +60,8 @@ class TestBaseline:
             raise ValueError("TestBaseline.rules 必须是 object array")
         return cls(
             id=str(raw["id"]), version=str(raw["version"]),
-            status=str(raw["status"]),
+            status=status,
+            approval=dict(approval),
             source=dict(raw.get("source", {})),
             rules=tuple(dict(item) for item in raw_rules),
             **policies,
