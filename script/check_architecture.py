@@ -1,4 +1,4 @@
-"""Deterministic architecture gate for the Issue #3 domain split.
+"""Deterministic architecture gate for the Issue #3 domain split and Issue #1 sole-fact-source constraints.
 
 Usage: ``python script/check_architecture.py``.  The checker only inspects
 Python import declarations and tracked source locations; it does not import
@@ -15,7 +15,7 @@ SRC = ROOT / "src" / "ut_agent"
 OLD_FILES = (
     "ir.py", "cli.py",
 )
-OLD_DIRS = ("parser", "rules", "cases", "winams", "host", "stub", "artifacts")
+OLD_DIRS = ("parser", "rules", "cases", "winams", "host", "stub", "artifacts", "flow")
 FORBIDDEN = {
     "generation": ("ut_agent.learning", "ut_agent.targets.winams", "ut_agent.toolchain"),
     "baseline": ("ut_agent.generation", "ut_agent.targets.winams"),
@@ -44,6 +44,12 @@ def violations() -> list[str]:
     for name in OLD_DIRS:
         if any((SRC / name).glob("*.py")):
             errors.append(f"old package remains: {SRC / name}")
+
+    for path in sorted(SRC.rglob("*.py")):
+        for imported in _imports(path):
+            if imported == "clang.cindex" or imported.startswith("clang.cindex."):
+                errors.append(f"{path}: forbidden import of clang.cindex (ut-clang-extract is sole fact producer)")
+
     for domain, prefixes in FORBIDDEN.items():
         root = SRC / domain
         for path in sorted(root.glob("*.py")):

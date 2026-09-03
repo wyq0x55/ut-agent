@@ -1,175 +1,65 @@
 # 单元测试 AI Agent 实施计划
 
-> 依据《单元测试自动化方案.md》落地：WinAMS 流水线工程化，90% 脚本生成 + 3 个 LLM 介入点，全部带机器校验闭环。
+> 依据《单元测试自动化方案.md》与 Issues #1 ~ #6 落地：基于 `ut-clang-extract` C++ Extractor 的确定性单元测试生成流水线，90% 规则确定性生成 + 3 个 LLM 介入点，全部带机器校验闭环。
 
 ---
 
 ## 0. 定位与范围
 
-- **目标**：把方案文档变成可运行、可复现、可评测的系统，最终能对真实项目模块批量产出达标的 C0/C1/MC/DC 测试与审查报告。
-- **范围**：以 WinAMS 单元测试流水线为主；与 SILS 方案共享的部分（libclang 解析层）单独抽出复用。
+- **目标**：把方案文档变成可运行、可复现、可评测的系统，最终能对真实项目模块批量产出达标的 C0/C1/MC-DC 测试与审查报告。
+- **范围**：以 WinAMS 单元测试流水线为主；采用 C++ LibTooling Extractor 作为唯一 C 源码语义事实源。
 - **不变的铁律**（写进 AGENTS.md）：
   1. 确定性核心路径永不引入 LLM（同输入必须同输出，这是审查一致性的根基）
-  2. LLM 一切输出必须有机器校验闭环（编译通过 / 覆盖率达标 / schema 合法）
-  3. 所有 prompt 版本化、用量记账，token 成本按函数可核算
+  2. 单一事实源：`ut-clang-extract`（C++ LibTooling）是唯一 C 源码语义分析引擎，Python 不重新解析 C 源码
+  3. LLM 一切输出必须有机器校验闭环（编译通过 / 覆盖率达标 / schema 合法）
+  4. 所有 prompt 版本化、用量记账，token 成本按函数可核算
 
 ---
 
-## 1. 仓库结构与技术选型
+## 1. 仓库物理结构与技术选型
 
 ```
-ut-agent/
-├── src/ut_agent/
-│   ├── project/       # 项目 manifest、Baseline/ProjectRulePack 解析与锁定
-│   ├── baseline/      # 版本化、已审批 TestBaseline 数据契约
-│   ├── ir/            # C++ extractor 产出的 FunctionIR schema 与 codec
-│   ├── generation/    # Obligation → Constraint → Solve → Evaluate → Oracle
-│   ├── learning/      # Golden/语料归纳；不进入正式生成主链
-│   ├── targets/winams/# CSV、Stub、DefineVar 和 WinAMS 工程适配器
-│   ├── toolchain/     # 唯一 C++ Clang extractor、编译和 host 进程边界
-│   ├── reporting/     # 构建产物证据和诊断报告
-│   ├── cli/           # parser + 命令路由；业务实现按命令拆分
-│   └── llm/           # 三个介入点（仅非确定性辅助路径）
-├── schemas/           # FunctionIR、Baseline、ProjectManifest 合同
-├── config/            # baseline、project-rules、projects、winams 配置
-├── eval/              # 基准函数集 + 评测脚本（一次到位率、轮数、token）
-├── examples/          # 代表模块 + golden 输出（CSV、覆盖率、报告）
-├── tests/             # pytest 单测 + golden-file 回归
-├── docs/              # 格式规格（WinAMS 工程文件/CSV/覆盖率输出）
-└── AGENTS.md
+src/ut_agent/
+├── ir/            # C++ extractor 产出的 Typed FunctionIR (v3) schema, dataclass 与 codec
+├── baseline/      # 版本化、已审批 Base TestBaseline 与 Requirement Modules 加载与校验
+├── project/       # 项目 Manifest、Registry、ResolvedTestPolicy 解析与锁定
+├── generation/    # 确定性生成引擎 (Obligation → Constraint → Solve → Evaluate → Oracle → Validate → Suite)
+├── targets/winams/# CSV、Harness、DefineVar、Stub 和 WinAMS 投影适配器
+├── learning/      # Golden 语义标准化、语义 Diff、Gap 分类与规则推导（仅对比/学习，不介入生成）
+├── reporting/     # 语料库差异报告与证据链生成
+├── toolchain/     # 唯一 C++ Clang Extractor 驱动、CompileContext 构建与进程边界
+├── cli/           # 统一 CLI 解析与命令路由
+└── llm/           # 三个介入点（仅非确定性辅助路径）
 ```
 
-**选型**（沿用方案结论，不引入框架）：
+**选型**：
 
 | 项 | 选择 | 理由 |
 |---|---|---|
-| 主控 | 裸 Python 3.11+ | 线性流水线，无框架必要 |
-| 解析 | `ut-clang-extract`（C++ LibTooling） | 唯一 C 语义事实源，保留 AST 与 provenance |
-| 组合 | itertools + pandas | 笛卡尔积/pairwise 足够 |
-| 执行 | subprocess 调 WinAMS 批处理 | 确定性 |
-| LLM | OpenAI 兼容接口，模型可配置 | 小模型干便宜活，按介入点路由模型 |
-| CI | GitHub Actions：lint + pytest + golden 回归 | 见下方 CI 策略 |
-
-**CI 策略（关键设计）**：GitHub Runner 上没有 WinAMS。执行层抽象为 `Runner` 接口、三种实现：`HostRunner`（gcc/clang 编译执行自动生成的 driver，真执行真覆盖率，CI 可跑，见 M2.5）、`RealRunner`（本机调 WinAMS 批处理，交付用）、`MockRunner`（回放录制的 WinAMS 输出，做格式回归，fixtures 即 golden 文件）。CI 跑 HostRunner + MockRunner，无 WinAMS 环境下整条流水线可回归。
+| 主控 | 裸 Python 3.10+ | 线性流水线，逻辑严密，无框架开销 |
+| 解析 | `ut-clang-extract`（C++ LibTooling） | 唯一 C 语义事实源，保留 typed AST 与 provenance |
+| 规则引擎 | 8 阶段确定性生成引擎 | 高效、100% 确定性、同输入同输出 |
+| 目标投影 | WinAMS Adapter (CP932/CRLF CSV, Harness, DefineVar) | 隔离生成语义与目标工具格式 |
+| LLM | OpenAI 兼容接口，模型可配置 | 仅在来源判定兜底、有状态 stub、覆盖率闭环介入 |
 
 ---
 
-## 2. 里程碑计划
+## 2. 里程碑与发展方向
 
-> 按是否依赖 WinAMS 拆成两条线。**A 线只依赖 C 源码，现在就能开工**；B 线等 Gaio 批处理确认后启动。工作量按 1 人全职估算，单位人周；每个里程碑有明确验收标准，不达标不进下一个。
+### Phase 1: 锁存单一 C 源码事实源 (Issue #1)
+- C++ Extractor 输出 Typed `FunctionIR` v3 JSON/Dataclass。
+- 清理 Python 内部一切 C 源码正则与补推断逻辑，添加 `check_architecture.py` CI 门禁。
 
-### A 线：仅依赖 C 源码（立即可开工，约 6 周）
+### Phase 2: 确定性生成引擎重构 (Issue #2)
+- 实现从 `ResolvedTestPolicy` + `FunctionIR` 到 `Obligation` -> `Constraint` -> `Solve` -> `Evaluate` -> `Oracle` -> `Validate` -> `Suite` 的完整 8 阶段流水线。
+- `SemanticEvaluator` 基于 UUT 源码语义求值 post-state，Oracle 提取 Caller-visible expected effects，不读取 Golden。
 
-#### M0 仓库与契约（0.5 周）
+### Phase 3: 领域边界与包结构重构 (Issue #3)
+- 完成 `ir`, `baseline`, `project`, `generation`, `targets/winams`, `learning`, `reporting`, `toolchain` 的物理分离。
 
-| 事项 | 产出 |
-|---|---|
-| 仓库骨架 + CI 空跑 + AGENTS.md | 可 clone 即用 |
-| 选定首个代表模块（真实项目代码，含全局变量/多层调用/stub 依赖，规模适中） | `examples/` 入库 |
-| IR schema 定稿：函数/调用图/原子条件/**用例表**——全流水线契约，后续所有环节消费它 | schema + 文档 |
-| 收集现有人工测试留下的 WinAMS CSV/工程文件样例，整理格式文档（只读格式，不碰执行） | `docs/formats.md` 初稿 |
+### Phase 4: 组合式策略模型 (Issue #5)
+- 建立 `ResolvedTestPolicy = Base TestBaseline + Requirement Modules + ProjectRulePack` 机制。
 
-**验收**：schema 评审通过；格式样例齐备。Gaio 确认与手工全流程走通移至 B 线，不在本里程碑。
-
-#### M1 解析层（1.5 周）
-
-1. libclang 扫描模块 → 函数清单、调用关系、内部/外部函数分类 → IR
-2. 判断语句 → 原子条件列表（控制变量、比较方向、边界值）→ IR
-3. golden 回归测试：代表模块解析结果与人工核对一致
-
-**验收**：代表模块全部函数/条件解析正确（人工抽查 100%）；宏、函数指针等边角情况列出清单，逐个明确支持或显式报错退出。
-
-#### M2 用例生成（2 周）
-
-1. 变量来源判定：函数内数据流 + 常量传播 → 每个条件变量标注 {入参 | 全局 | stub 返回值}；失败打 `needs_llm` 标记（M4a 接，当前直接报出）
-2. 边界值枚举 {min, min+1, 本身±1, max-1, max}，多输入笛卡尔积，超阈值降 pairwise
-3. C0/C1 组合挑选；MC/DC 按标准成对算法（每原子条件独立翻转）
-4. **产出为工具无关的"用例表"（纯 IR）**；CSV 渲染做成薄适配器，按 `docs/formats.md` 初稿输出，B 线 M3 用真机校准
-
-**验收**：代表模块用例表与人工枚举对照，C0/C1 无遗漏；CSV 渲染通过 golden/schema 测试（是否被 WinAMS 接受留待 M3 验证）。
-**度量开始记录**：每函数用例数、枚举耗时（纯脚本，应毫秒级）。
-
-#### M2.5 host 执行器（1 周，建议做）
-
-- stub 骨架生成（确定性脚本；WinAMS 自带 stub 自动生成功能可作对照）+ 用例表 → 自动生成 C driver（设入参/全局/stub 返回值）→ gcc/clang 编译执行 → 覆盖率采集
-- 覆盖率工具：clang source-based coverage（LLVM 17+ 支持 MC/DC）为主，gcov 兜底 C0/C1
-- 价值：① 覆盖率闭环算法（M4b 核心）在 A 线就能开发调试，不必等 WinAMS；② CI 从"回放"升级为"真执行"，用例质量提前可验证；③ 为 LLM 生成结果提供编译/运行校验环境
-- 定位：**开发期反馈引擎**，交付仍以 WinAMS 覆盖率为准；编译器差异可能使个别分支的覆盖判定不一致，用例本身可迁移
-
-#### M4a LLM 基建 + 两个介入点（1.5 周）
-
-每个介入点独立 feature flag，可单独开关：
-
-1. **LLM 基建**：provider 抽象、prompt 注册表（固定小 prompt，版本号入 git）、用量/成本记账按函数落账、失败重试
-2. **来源判定兜底**：数据流判定失败时喂该函数源码 → LLM 给映射 → 校验：变量必须真实存在于 IR，否则打回重试
-3. **有状态 stub**：LLM 生成带计数/分支的 stub 行为代码 → 校验：host 编译通过 + 相关分支覆盖率提升（M2.5 验证；目标编译器差异 B 线补校准）
-4. 基准集（10~20 个函数，含条件组合多、依赖状态机的难例）与评测框架就位
-
-**验收**：来源兜底对照人工标注准确率 ≥ 90%；有状态 stub 编译通过率 ≥ 80%。
-
-### B 线：依赖 WinAMS（Gaio 确认后，约 5 周）
-
-#### M0b 外部确认（0.5 周，闸门）
-
-- 批处理接口/版本、命令行参数、CSV 正式格式、覆盖率导出格式、自动化许可范围 → `docs/winams-interface.md`
-- **风险闸门**：若批处理能力受限（如覆盖率结果不可导出），回到方案层重议，不硬做
-
-#### M3 真实执行（1.5 周）
-
-1. `RealRunner` 调 WinAMS 批处理；CSV 渲染层按真机校准
-2. 覆盖率解析对接（C0/C1/MC/DC，按函数/分支粒度）；覆盖缺口结构化输出（闭环输入）；MockRunner 固化 golden
-3. 报告模板生成（模板 + 解析结果，无 LLM）
-
-**验收**：代表模块端到端 **0 次 LLM 调用** 跑通，覆盖率不低于手工基线；CI 全绿。
-
-#### M4b 覆盖率闭环（1 周）
-
-- 未覆盖分支源码片段 + 已有用例 → LLM 设计新输入 → 写回 CSV → 重跑 → 循环 ≤ N 轮（N 可配，建议 5）。有覆盖率反馈，质量可验证
-- 算法已在 M2.5 的 host 环境调通，此处切换反馈源为 WinAMS
-- 指标：
-
-| 指标 | 定义 | 目标（首版） |
-|---|---|---|
-| 一次到位率 | 无 LLM 重试即通过校验的比例 | ≥ 60% |
-| 闭环收敛率 | N 轮内 MC/DC 达标函数比例 | ≥ 85% |
-| token 成本 | 每函数平均花费（分介入点统计） | 记录，暂不设阈值 |
-| 幻觉率 | LLM 输出引用不存在变量/分支的比例 | ≤ 5%（校验兜底后应近 0） |
-
-#### M5 批量推广与工程化（2 周）
-
-1. 主控批量调度：按模块扫描 → 队列执行，编译与 WinAMS 执行并行
-2. 增量模式：代码变更后只重测受影响函数（复用 M1 调用图）
-3. 断点续跑、失败隔离（单模块失败不影响整批）；汇总报表：各模块覆盖率、耗时、token 成本、LLM 介入统计
-
-**验收**：≥3 个真实项目模块批量跑通；产出"每模块人工耗时 vs 自动耗时"对比数据（汇报用）。
-
-### 可选扩展
-
-- **M6 模型评测**（1 周）：基准集上对比小/大模型，按介入点拆分成本收益；agent CLI（codex exec / ZCode headless）对比也在此。不依赖 WinAMS，A 线结束后即可做。
-
----
-
-## 3. 与 SILS 方案的协同
-
-- `parser/`（libclang 解析 + 源码索引）与 SILS 方案的"源码索引层"是同一东西：抽成独立包（如 `c-index`），两边共用，避免两套解析
-- 评测方法论（golden 基准集、一次到位率、校验闭环模式）两项目复用同一套框架
-- 落地顺序建议：单元测试流水线 A 线先行（不依赖 LLM，也不依赖 WinAMS），SILS 的源码索引直接从本项目 M1 取成果
-
-## 4. 风险清单
-
-| 风险 | 影响 | 对策 |
-|---|---|---|
-| WinAMS 批处理接口能力不确认 | B 线（M3 起）返工 | 闸门移至 B 线 M0b；A 线不依赖，确认期间照常推进 |
-| MC/DC 组合爆炸（条件数多） | 用例数失控、LLM 轮数暴涨 | pairwise 降维 + 轮数上限 + 报告中标注不可达项 |
-| libclang 边角（宏包裹的条件、函数指针调用） | 解析遗漏 | M1 列边角清单，显式报错优于静默漏掉 |
-| LLM 输出不稳定 | 成本/一致性波动 | prompt 版本化 + 基准集回归评测，prompt 改动必须跑 eval |
-| 商业工具信息入仓 | 合规 | 仓库只含编排代码与格式文档；WinAMS 工程样例脱敏；开源与否见决策点 1 |
-
-## 5. 待决策问题（讨论点）
-
-1. **仓库形态**：私有仓（公司项目制交付）还是开源？开源则 WinAMS 相关内容全部脱敏，MockRunner 反而成为卖点（无 WinAMS 也能体验）。
-2. **WinAMS 批处理确认**：已明确不阻塞 A 线开工；待定的是确认渠道与时间点，只决定 B 线启动时刻。A 线约 6 周，尽量在此窗口内完成确认。
-3. **LLM 供应商与模型路由**：用哪家 API？是否"小模型干来源兜底、大模型干有状态 stub"两级路由？
-4. **代表模块（已定 2026-08-23）**：双档基准——难档 `examples/classic-platform`（Arctic Core，AUTOSAR 3.1 全 BSW，真实复杂度）；易档 `examples/asusar-comstack`（教学向通信栈，代码干净）。首个手写 golden：`CanIf_SetPduMode`（switch+多原子 else-if+宏校验+全局读写+#if），格式规格见《用例表与CSV格式规格.md》。
-5. **人力**：1 人还是多人？多人则 M1（解析）与 M0（契约+格式整理）可并行，总周期压缩约 2 周。
-6. **M2.5 host 执行器做不做**：建议做——解锁覆盖率闭环的 A 线开发与 CI 真执行，代价约 1 周 + 维护一层 host 适配。
+### Phase 5: 首个真实项目闭环与 Gap 分类 (Issue #6)
+- 以 `N-O2608-PSD-087` 真实项目（PSD再構築 + MC-DC）建立全项目语义差异驱动迭代机制。
+- 引入标准 Gap Taxonomy，所有差异严格分类并在最上游根因层修复，同步补齐测试。
