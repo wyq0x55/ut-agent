@@ -1,0 +1,222 @@
+format_version: 1
+kind: "baseline-section-source"
+source:
+  file: "docs/単体テスト項目基準書_Ver.1.6.xlsx"
+  sheet: "PSD再構築"
+  revision: "Ver.1.6"
+  sha256: "d59762905c0566707ecf029ab188a8a05d13e2647c3866e383e83269655aba69"
+  semantic_status: "source_only"
+  language: "中文说明 + 日文原文证据"
+  translation_policy: "只翻译说明，不改写原始单元格内容"
+baseline:
+  id: "psd-rebuild-mcdc"
+  profile: "PSD再構築"
+  section_id: "4-1"
+  name: "变量之间比较"
+  name_original: "変数同士を比較する"
+  row_range: "130:142"
+  source_range: "PSD再構築!B130:G142"
+  category: "生成输入基准"
+  role: "generation_input"
+  role_zh: "生成输入基准"
+  generation_relevant: true
+  generation_relevant_zh: "是"
+  review_status: "needs_review"
+  review_status_zh: "需人工复核"
+  purpose: "变量与变量比较的最小、邻接和最大值组合。"
+  mapping_note: "变量与变量比较的最小、邻接和最大值组合。"
+  ai_guidance:
+    allowed: "只能使用已由 FunctionIR 的类型、AST 或 CFG 事实证明的内容生成候选用例。"
+    prohibited: "不得从原文描述、函数名或猜测补出源码事实；证据不足时保持 NEEDS_REVIEW。"
+  human_review_points:
+    - "确认该基准是否适用于当前产品和目标函数。"
+    - "确认输入值、预期值、Stub、Oracle 和寄存器/I-O 事实都有来源。"
+    - "确认是否存在项目例外；例外必须记录理由和来源，不直接静默放宽。"
+  artifact_yaml: "docs/baselines/psd-rebuild-v1.6/4-1-variable-compare.yaml"
+  artifact_markdown: "docs/baselines/psd-rebuild-v1.6/4-1-variable-compare.md"
+  cells:
+    - coordinate: "B130"
+      row: 130
+      column: 2
+      cell_type: "number"
+      value: "4"
+    - coordinate: "C130"
+      row: 130
+      column: 3
+      cell_type: "shared_string"
+      value: "条件判断文"
+    - coordinate: "D131"
+      row: 131
+      column: 4
+      cell_type: "shared_string"
+      value: "観点：期待通りに分岐が行われていることを確認する"
+    - coordinate: "C132"
+      row: 132
+      column: 3
+      cell_type: "shared_string"
+      value: "4-1"
+    - coordinate: "D132"
+      row: 132
+      column: 4
+      cell_type: "shared_string"
+      value: "変数同士を比較する"
+    - coordinate: "D134"
+      row: 134
+      column: 4
+      cell_type: "shared_string"
+      value: "例．If( u1_val_a == u1_val_b )"
+    - coordinate: "D135"
+      row: 135
+      column: 4
+      cell_type: "shared_string"
+      value: "入力値１"
+    - coordinate: "E135"
+      row: 135
+      column: 5
+      cell_type: "shared_string"
+      value: "入力値２"
+    - coordinate: "F135"
+      row: 135
+      column: 6
+      cell_type: "shared_string"
+      value: "説明"
+    - coordinate: "D136"
+      row: 136
+      column: 4
+      cell_type: "shared_string"
+      value: "u1_val_a"
+    - coordinate: "E136"
+      row: 136
+      column: 5
+      cell_type: "shared_string"
+      value: "u1_val_b"
+    - coordinate: "F136"
+      row: 136
+      column: 6
+      cell_type: "shared_string"
+      value: "u1_val_a"
+    - coordinate: "G136"
+      row: 136
+      column: 7
+      cell_type: "shared_string"
+      value: "u1_val_b"
+    - coordinate: "D137"
+      row: 137
+      column: 4
+      cell_type: "number"
+      value: "0"
+    - coordinate: "E137"
+      row: 137
+      column: 5
+      cell_type: "number"
+      value: "0"
+    - coordinate: "F137"
+      row: 137
+      column: 6
+      cell_type: "shared_string"
+      value: "最小値"
+    - coordinate: "G137"
+      row: 137
+      column: 7
+      cell_type: "shared_string"
+      value: "最小値"
+    - coordinate: "D138"
+      row: 138
+      column: 4
+      cell_type: "number"
+      value: "0"
+    - coordinate: "E138"
+      row: 138
+      column: 5
+      cell_type: "number"
+      value: "1"
+    - coordinate: "F138"
+      row: 138
+      column: 6
+      cell_type: "shared_string"
+      value: "最小値"
+    - coordinate: "G138"
+      row: 138
+      column: 7
+      cell_type: "shared_string"
+      value: "最小値+1"
+    - coordinate: "D139"
+      row: 139
+      column: 4
+      cell_type: "number"
+      value: "0"
+    - coordinate: "E139"
+      row: 139
+      column: 5
+      cell_type: "number"
+      value: "255"
+    - coordinate: "F139"
+      row: 139
+      column: 6
+      cell_type: "shared_string"
+      value: "最小値"
+    - coordinate: "G139"
+      row: 139
+      column: 7
+      cell_type: "shared_string"
+      value: "最大値"
+    - coordinate: "D140"
+      row: 140
+      column: 4
+      cell_type: "number"
+      value: "1"
+    - coordinate: "E140"
+      row: 140
+      column: 5
+      cell_type: "number"
+      value: "0"
+    - coordinate: "F140"
+      row: 140
+      column: 6
+      cell_type: "shared_string"
+      value: "最小値+1"
+    - coordinate: "G140"
+      row: 140
+      column: 7
+      cell_type: "shared_string"
+      value: "最小値"
+    - coordinate: "D141"
+      row: 141
+      column: 4
+      cell_type: "number"
+      value: "255"
+    - coordinate: "E141"
+      row: 141
+      column: 5
+      cell_type: "number"
+      value: "0"
+    - coordinate: "F141"
+      row: 141
+      column: 6
+      cell_type: "shared_string"
+      value: "最大値"
+    - coordinate: "G141"
+      row: 141
+      column: 7
+      cell_type: "shared_string"
+      value: "最小値"
+    - coordinate: "D142"
+      row: 142
+      column: 4
+      cell_type: "number"
+      value: "255"
+    - coordinate: "E142"
+      row: 142
+      column: 5
+      cell_type: "number"
+      value: "255"
+    - coordinate: "F142"
+      row: 142
+      column: 6
+      cell_type: "shared_string"
+      value: "最大値"
+    - coordinate: "G142"
+      row: 142
+      column: 7
+      cell_type: "shared_string"
+      value: "最大値"

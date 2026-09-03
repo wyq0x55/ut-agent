@@ -7,6 +7,8 @@ from __future__ import annotations
 
 import csv
 import io
+import re
+from collections import Counter
 from pathlib import Path
 from typing import Any
 
@@ -175,3 +177,160 @@ def semantic_csv_signature(path: Path) -> dict[str, Any]:
         "output_columns": tuple(sorted(parsed["output_columns"])),
         "cases": tuple(sorted(cases, key=repr)),
     }
+
+
+def normalize_label(label: str | None) -> str:
+    """Normalize presentation-only label noise without changing its meaning."""
+    value = "".join(str(label or "").split())
+    value = re.sub(r"\((\d+)\)$", "", value)
+    if value.startswith("組合せ(") and value.endswith(")"):
+        value = value[len("組合せ("):-1]
+        value = re.sub(r"\((\d+)\)$", "", value)
+    return value
+
+
+def label_kind(label: str | None, case_label: str | None = None) -> str:
+    """Classify a reviewed label into a comparison viewpoint."""
+    value = normalize_label(label or case_label)
+    lowered = value.lower()
+    if case_label or lowered.startswith("case") or lowered.startswith("default"):
+        return "switch_case"
+    if "=>" in value or "combination(" in lowered:
+        return "condition_combination"
+    if _is_true_label(value) or _is_false_label(value):
+        return "branch_outcome"
+    if value:
+        return "branch"
+    return "unlabelled"
+
+
+def _counts(values: list[str]) -> dict[str, int]:
+    return dict(sorted(Counter(values).items()))
+
+
+def _column_value_classes(parsed: dict[str, Any], columns: list[str]) -> dict[str, dict[str, int]]:
+    result: dict[str, dict[str, int]] = {}
+    for column in columns:
+        result[column] = _counts([
+            str(item["value_classes"].get(column, "unknown"))
+            for item in parsed["scenarios"]
+        ])
+    return result
+
+
+def _stub_columns(columns: list[str]) -> list[str]:
+    result = []
+    for column in columns:
+        compact = normalize_label(column).lower()
+        if (compact.startswith("amstb_") or "callcnt" in compact
+                or "ptout" in compact or "ptin" in compact
+                or "arg" in compact):
+            result.append(column)
+    return sorted(result)
+
+
+def normalize_golden_csv(path: Path) -> dict[str, Any]:
+    """Return stable semantic dimensions for a reviewed WinAMS CSV.
+
+    This is a comparison/reporting boundary only.  It never feeds a normal
+    generation call and intentionally retains value classes separately from
+    concrete literals so a free representative value is not confused with a
+    required value.
+    """
+    parsed = parse_golden_csv(Path(path))
+    all_columns = parsed["input_columns"] + parsed["output_columns"]
+    cases = []
+    viewpoint_labels: list[str] = []
+    for item in parsed["scenarios"]:
+        kind = label_kind(item["label"], item["case_label"])
+        label = normalize_label(item["label"] or item["case_label"])
+        if label:
+            viewpoint_labels.append(label)
+        strict_inputs = {
+            key: item["inputs"].get(key)
+            for key in parsed["input_columns"]
+            if kind == "switch_case"
+            or item["value_classes"].get(key) not in {"literal", "pointer-address"}
+        }
+        cases.append({
+            "kind": kind,
+            "label": label,
+            "outcome": item["outcome"],
+            "input_value_classes": {
+                key: item["value_classes"].get(key, "unknown")
+                for key in parsed["input_columns"]
+            },
+            "expected_value_classes": {
+                key: item["value_classes"].get(key, "unknown")
+                for key in parsed["output_columns"]
+            },
+            "required_input_values": strict_inputs,
+            "required_expected_values": {
+                key: item["expected"].get(key)
+                for key in parsed["output_columns"]
+            },
+        })
+    return {
+        "input_columns": list(parsed["input_columns"]),
+        "output_columns": list(parsed["output_columns"]),
+        "testcase_count": len(parsed["scenarios"]),
+        "viewpoints": {
+            "counts": _counts([item["kind"] for item in cases]),
+            "labels": sorted(set(viewpoint_labels)),
+        },
+        "condition_combinations": sorted({
+            item["label"] for item in cases
+            if item["kind"] == "condition_combination" and item["label"]
+        }),
+        "boundary_domain": {
+            "input_value_classes": _column_value_classes(
+                parsed, parsed["input_columns"]
+            ),
+            "expected_value_classes": _column_value_classes(
+                parsed, parsed["output_columns"]
+            ),
+            "all_value_classes": _counts([
+                str(value_class)
+                for item in parsed["scenarios"]
+                for value_class in item["value_classes"].values()
+            ]),
+        },
+        "stub": {
+            "declaration_count": len(parsed["stub_declarations"]),
+            "declarations": sorted({
+                str(row[1]) for row in parsed["stub_declarations"]
+                if len(row) > 1
+            }),
+            "columns": _stub_columns(all_columns),
+        },
+        "oracle": {
+            "output_count": parsed["output_count"],
+            "columns": list(parsed["output_columns"]),
+        },
+        "required_values": {
+            "inputs": [{
+                "kind": item["kind"], "label": item["label"],
+                "outcome": item["outcome"],
+                "values": item["required_input_values"],
+            } for item in cases if item["required_input_values"]],
+            "expected": [{
+                "kind": item["kind"], "label": item["label"],
+                "outcome": item["outcome"],
+                "values": item["required_expected_values"],
+            } for item in cases],
+        },
+        "projection": {
+            "input_count": parsed["input_count"],
+            "output_count": parsed["output_count"],
+            "comment_columns": list(all_columns),
+            "observed_label_count": len(parsed["observed_labels"]),
+            "scenario_count": len(parsed["scenarios"]),
+        },
+        "cases": cases,
+    }
+
+
+__all__ = [
+    "label_kind", "normalize_golden_csv", "normalize_label",
+    "parse_golden_csv", "semantic_csv_signature",
+]

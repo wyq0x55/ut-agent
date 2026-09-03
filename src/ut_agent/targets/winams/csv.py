@@ -24,7 +24,9 @@ from ut_agent.generation.semantic import (
     pointer_address_key,
     pointer_value_key,
 )
-from ut_agent.generation.engine import evaluate_branch
+from ut_agent.generation.engine import (
+    _control_env, evaluate_atom, evaluate_branch,
+)
 from ut_agent.targets.winams.projection import WinAMSProjection, pointer_address
 
 
@@ -510,7 +512,9 @@ def _winams_param_read_columns(param, *, static_function: bool = False) -> list[
     return columns
 
 
-def _pointer_column_key(name: str, column: str) -> str:
+def _pointer_column_key(
+    name: str, column: str, ir: FunctionIR | None = None,
+) -> str:
     """Map a WinAMS pointer-value column back to its semantic IR key.
 
     WinAMS spells the scalar pointee of a static pointer as ``@name[0]``
@@ -519,6 +523,22 @@ def _pointer_column_key(name: str, column: str) -> str:
     adapter boundary instead of creating a second semantic identity.
     """
     compact = str(column).strip().lstrip("@*")
+    if ir is not None:
+        # A static pointer's ``@name[0]`` column is the target spelling for
+        # the extractor-proven ``*name`` control when that fact exists.  Do
+        # not bind it to the generic pointee:value seed: that seed is only a
+        # compatibility alias and is not the value selected by the solver.
+        control_names = {
+            str(control.name) for control in ir.control_vars
+        } | {
+            str(control.var) for control in ir.control_vars
+        }
+        semantic_path = (
+            f"*{name}" if compact in {name, f"{name}[0]"}
+            else str(column).strip().lstrip("@")
+        )
+        if semantic_path in control_names:
+            return semantic_path
     if compact in {name, f"{name}[0]"}:
         return pointer_value_key(name)
     return pointer_value_key(name, compact)
@@ -1074,7 +1094,7 @@ def _winams_columns(ir: FunctionIR) -> WinAMSProjection:
         ):
             _append_column(
                 inputs, input_seen,
-                (column, _pointer_column_key(param.name, column)),
+                (column, _pointer_column_key(param.name, column, ir)),
             )
 
     # The remaining inputs are branch/observable state.  Source line ordering
@@ -1459,6 +1479,22 @@ def _branch_rows(branch, rows: list[dict], ir: FunctionIR,
     return [dict(rows[0])] if outcome else []
 
 
+def _mcdc_label(branch, intent: TestIntent, ir: FunctionIR) -> str:
+    """Render the extractor-backed MC/DC truth vector as a WinAMS label."""
+    try:
+        env = _control_env(intent.inputs, ir)
+        atom_values = [evaluate_atom(atom, env) for atom in branch.atoms]
+        decision = evaluate_branch(branch, env)
+    except (KeyError, TypeError, ValueError):
+        # A validated MC/DC intent should always have enough typed facts for
+        # this projection.  Keep a reviewable label if an older IR cannot
+        # replay the truth vector instead of inventing a data value.
+        return "組合せ(MC/DC)"
+    connective = branch.connective or "?"
+    vector = connective.join("T" if value else "F" for value in atom_values)
+    return f"組合せ({vector}=>{'T' if decision else 'F'})"
+
+
 def _pointer_address_value(key: str | None, ir: FunctionIR) -> int | None:
     if not key or not key.startswith("param:") or not key.endswith(":address"):
         return None
@@ -1748,6 +1784,17 @@ def render_intents_csv(ir: FunctionIR, result: GenerationResult, *,
                     if child.bid not in emitted_children:
                         emit_branch(child)
                 return
+            if branch.kind == "for":
+                # A loop is one WinAMS branch unit with one executable
+                # entry vector.  The iterator remains an internal proof
+                # value; it is never exposed as a target input column.
+                out.append(f";$L$,{_winams_condition(branch)}")
+                out.extend(data_line(item) for item in intents
+                           if item.obligation.branch_id == branch.bid
+                           and item.obligation.kind == "loop")
+                for child in children.get(branch.bid, []):
+                    emit_branch(child)
+                return
             out.append(f";$L$,{_winams_condition(branch)}")
             labeled = [
                 item for item in intents
@@ -1795,7 +1842,24 @@ def render_intents_csv(ir: FunctionIR, result: GenerationResult, *,
                     suffix = f" {_DEAD_BRANCH_COMMENT}" if dead else ""
                     out.append(f";$L$,{label_text}{suffix}")
                     if not dead:
-                        out.extend(data_line(item) for item in grouped.get((branch.bid, outcome), []))
+                        out.extend(data_line(item) for item in grouped.get(
+                            (branch.bid, outcome), []
+                        ) if item.obligation.kind != "mcdc")
+
+                # MC/DC vectors are first-class combination viewpoints.  Do
+                # not hide them under TRUE/FALSE: the label is derived from
+                # the solved FunctionIR witness and the rows remain the same
+                # validated intents.
+                combinations: dict[str, list[TestIntent]] = {}
+                for item in intents:
+                    if (item.obligation.branch_id == branch.bid
+                            and item.obligation.kind == "mcdc"):
+                        combinations.setdefault(
+                            _mcdc_label(branch, item, ir), []
+                        ).append(item)
+                for label_text, group in combinations.items():
+                    out.append(f";$L$,{label_text}")
+                    out.extend(data_line(item) for item in group)
 
             # Non-switch children are still kept under their parent branch.
             # Without a dedicated then/else range in the v3 schema, the

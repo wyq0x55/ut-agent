@@ -25,6 +25,7 @@ class TestBaseline:
     mcdc_enabled: bool | None = None
     approved_exceptions: tuple[str, ...] = ()
     source: dict[str, Any] = field(default_factory=dict)
+    rules: tuple[dict[str, Any], ...] = ()
     coverage: dict[str, Any] = field(default_factory=dict)
     condition_policy: dict[str, Any] = field(default_factory=dict)
     boundary_policy: dict[str, Any] = field(default_factory=dict)
@@ -48,6 +49,11 @@ class TestBaseline:
         }
         if any(not isinstance(raw.get(name, {}), Mapping) for name in _POLICY_NAMES):
             raise ValueError("TestBaseline policy section 必须是 object")
+        raw_rules = raw.get("rules", [])
+        if not isinstance(raw_rules, list) or any(
+            not isinstance(item, Mapping) for item in raw_rules
+        ):
+            raise ValueError("TestBaseline.rules 必须是 object array")
         return cls(
             id=str(raw["id"]), version=str(raw["version"]),
             status=str(raw["status"]),
@@ -57,6 +63,7 @@ class TestBaseline:
             approved_exceptions=tuple(str(item) for item in
                                       raw.get("approved_exceptions", [])),
             source=dict(raw.get("source", {})),
+            rules=tuple(dict(item) for item in raw_rules),
             **policies,
         )
 
@@ -67,4 +74,5 @@ class TestBaseline:
     def to_dict(self) -> dict[str, Any]:
         data = asdict(self)
         data["approved_exceptions"] = list(self.approved_exceptions)
+        data["rules"] = list(self.rules)
         return {"baseline": data}

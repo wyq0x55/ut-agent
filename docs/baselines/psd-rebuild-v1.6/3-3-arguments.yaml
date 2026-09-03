@@ -1,0 +1,102 @@
+format_version: 1
+kind: "baseline-section-source"
+source:
+  file: "docs/単体テスト項目基準書_Ver.1.6.xlsx"
+  sheet: "PSD再構築"
+  revision: "Ver.1.6"
+  sha256: "d59762905c0566707ecf029ab188a8a05d13e2647c3866e383e83269655aba69"
+  semantic_status: "source_only"
+  language: "中文说明 + 日文原文证据"
+  translation_policy: "只翻译说明，不改写原始单元格内容"
+baseline:
+  id: "psd-rebuild-mcdc"
+  profile: "PSD再構築"
+  section_id: "3-3"
+  name: "函数参数"
+  name_original: "関数の引数"
+  row_range: "121:127"
+  source_range: "PSD再構築!C121:F127"
+  category: "生成输入基准"
+  role: "generation_input"
+  role_zh: "生成输入基准"
+  generation_relevant: true
+  generation_relevant_zh: "是"
+  review_status: "needs_review"
+  review_status_zh: "需人工复核"
+  purpose: "将 Stub 实参作为可观察输入；指针方向必须有 AST 证据。"
+  mapping_note: "将 Stub 实参作为可观察输入；指针方向必须有 AST 证据。"
+  ai_guidance:
+    allowed: "只能使用已由 FunctionIR 的类型、AST 或 CFG 事实证明的内容生成候选用例。"
+    prohibited: "不得从原文描述、函数名或猜测补出源码事实；证据不足时保持 NEEDS_REVIEW。"
+  human_review_points:
+    - "确认该基准是否适用于当前产品和目标函数。"
+    - "确认输入值、预期值、Stub、Oracle 和寄存器/I-O 事实都有来源。"
+    - "确认是否存在项目例外；例外必须记录理由和来源，不直接静默放宽。"
+  artifact_yaml: "docs/baselines/psd-rebuild-v1.6/3-3-arguments.yaml"
+  artifact_markdown: "docs/baselines/psd-rebuild-v1.6/3-3-arguments.md"
+  cells:
+    - coordinate: "C121"
+      row: 121
+      column: 3
+      cell_type: "shared_string"
+      value: "3-3"
+    - coordinate: "D121"
+      row: 121
+      column: 4
+      cell_type: "shared_string"
+      value: "関数の引数"
+    - coordinate: "D122"
+      row: 122
+      column: 4
+      cell_type: "shared_string"
+      value: "スタブ関数で引数を変数として扱う"
+    - coordinate: "D124"
+      row: 124
+      column: 4
+      cell_type: "shared_string"
+      value: "例. u1l_job_test(u1l_dat_test) ;                ※関数の引数 ARG_u1_dat_test"
+    - coordinate: "D125"
+      row: 125
+      column: 4
+      cell_type: "shared_string"
+      value: "入力値"
+    - coordinate: "E125"
+      row: 125
+      column: 5
+      cell_type: "shared_string"
+      value: "初期値"
+    - coordinate: "F125"
+      row: 125
+      column: 6
+      cell_type: "shared_string"
+      value: "期待値"
+    - coordinate: "D126"
+      row: 126
+      column: 4
+      cell_type: "shared_string"
+      value: "u1l_dat_test"
+    - coordinate: "E126"
+      row: 126
+      column: 5
+      cell_type: "shared_string"
+      value: "ARG_u1_dat_test"
+    - coordinate: "F126"
+      row: 126
+      column: 6
+      cell_type: "shared_string"
+      value: "ARG_u1_dat_test"
+    - coordinate: "D127"
+      row: 127
+      column: 4
+      cell_type: "number"
+      value: "255"
+    - coordinate: "E127"
+      row: 127
+      column: 5
+      cell_type: "number"
+      value: "0"
+    - coordinate: "F127"
+      row: 127
+      column: 6
+      cell_type: "number"
+      value: "255"

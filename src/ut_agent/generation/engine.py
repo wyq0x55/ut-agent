@@ -602,6 +602,48 @@ def evaluate_branch(branch: Branch, env: dict[str, Any],
     raise ValueError(f"分支 {branch.bid} 的混合连接词尚不支持")
 
 
+def branch_path_reachable(ir: FunctionIR, branch: Branch,
+                          env: dict[str, Any]) -> bool | None:
+    """Check extractor-proven enclosing branch conditions.
+
+    ``parent_bid`` is a semantic nesting fact, not a renderer hint.  A
+    child branch in a normal nested body is executable only when its parent
+    is true.  An ``elseif`` child is the alternative arm of its preceding
+    chain and therefore requires the enclosing condition to be false.  A
+    switch is a structural parent without a boolean outcome, so its case
+    reachability remains represented by the case obligation itself.
+
+    ``None`` means the available FunctionIR cannot prove the path; callers
+    must keep that obligation reviewable rather than treating it as false.
+    """
+    by_id = {item.bid: item for item in ir.branches}
+    current = branch
+    visited: set[str] = set()
+    while current.parent_bid:
+        if current.bid in visited:
+            return None
+        visited.add(current.bid)
+        parent = by_id.get(current.parent_bid)
+        if parent is None:
+            return None
+        if parent.kind == "switch":
+            current = parent
+            continue
+        if current.parent_outcome is not None:
+            required = bool(current.parent_outcome)
+        else:
+            required = not (
+                current.kind == "elseif" and current.chain_index > 0
+            )
+        try:
+            if evaluate_branch(parent, env) != required:
+                return False
+        except (KeyError, TypeError, ValueError):
+            return None
+        current = parent
+    return True
+
+
 def _required_outputs(ir: FunctionIR) -> list[str]:
     required = []
     if ir.ret_type not in ("", "void"):
@@ -689,6 +731,28 @@ def _remap_derived_candidates(ir: FunctionIR, candidates: dict) -> None:
         driver = by_name.get(driver_name) or by_var.get(_norm(driver_name))
         source = candidates.get(control.name)
         if driver is None or not source or not isinstance(table_values, dict):
+            candidates.pop(control.name, None)
+            continue
+        related_atoms = [
+            atom for branch in ir.branches for atom in branch.atoms
+            if _norm(atom.var) in {_norm(control.name), _norm(control.var)}
+        ]
+        if related_atoms:
+            # The derived value is not itself a testcase column.  For a
+            # branch predicate over that value, every extractor-proven table
+            # index is a finite driver candidate; the targeted solver will
+            # select the first index that proves the requested outcome.
+            indexes = set()
+            for raw_index in table_values:
+                try:
+                    indexes.add(int(raw_index))
+                except (TypeError, ValueError):
+                    continue
+            target = candidates.setdefault(
+                driver.name,
+                {"cv": driver, "values": set(), "enum": {}},
+            )
+            target["values"].update(indexes)
             candidates.pop(control.name, None)
             continue
         desired = set(source.get("values", set()))
@@ -1595,7 +1659,10 @@ def _generic_intents(
                         if _switch_case_matches(case, selector, branch.cases):
                             selected = env
                             break
-                elif evaluate_branch(branch, env) == obligation.outcome:
+                elif (
+                    branch_path_reachable(ir, branch, env) is True
+                    and evaluate_branch(branch, env) == obligation.outcome
+                ):
                     selected = env
                     break
             except (KeyError, TypeError, ValueError):
@@ -1658,6 +1725,13 @@ def _domain_key_for(ir: FunctionIR, expression: str,
         if wanted in {_norm(control.name), _norm(control.var)}:
             if control.name in domains:
                 return control.name
+            origin = _origin_record(control.value_origin)
+            if isinstance(origin, dict) and origin.get("kind") == "const_table_field":
+                driver = str(origin.get("driver", ""))
+                for candidate in ir.control_vars:
+                    if driver in {_norm(candidate.name), _norm(candidate.var)} \
+                            and candidate.name in domains:
+                        return candidate.name
     for key in domains:
         if _norm(key) == wanted:
             return key
@@ -1778,7 +1852,10 @@ def _targeted_branch_candidate(ir: FunctionIR,
 
     env = _control_env(raw, ir)
     try:
-        return env if evaluate_branch(branch, env) == outcome else None
+        return (
+            env if branch_path_reachable(ir, branch, env) is True
+            and evaluate_branch(branch, env) == outcome else None
+        )
     except (KeyError, TypeError, ValueError):
         return None
 

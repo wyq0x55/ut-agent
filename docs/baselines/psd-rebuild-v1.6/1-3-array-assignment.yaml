@@ -1,0 +1,157 @@
+format_version: 1
+kind: "baseline-section-source"
+source:
+  file: "docs/単体テスト項目基準書_Ver.1.6.xlsx"
+  sheet: "PSD再構築"
+  revision: "Ver.1.6"
+  sha256: "d59762905c0566707ecf029ab188a8a05d13e2647c3866e383e83269655aba69"
+  semantic_status: "source_only"
+  language: "中文说明 + 日文原文证据"
+  translation_policy: "只翻译说明，不改写原始单元格内容"
+baseline:
+  id: "psd-rebuild-mcdc"
+  profile: "PSD再構築"
+  section_id: "1-3"
+  name: "数组赋值"
+  name_original: "配列への代入"
+  row_range: "75:82"
+  source_range: "PSD再構築!C75:K82"
+  category: "生成输入基准"
+  role: "generation_input"
+  role_zh: "生成输入基准"
+  generation_relevant: true
+  generation_relevant_zh: "是"
+  review_status: "needs_review"
+  review_status_zh: "需人工复核"
+  purpose: "固定数组索引，确认目标元素变化且其他元素保持语义不变。"
+  mapping_note: "固定数组索引，确认目标元素变化且其他元素保持语义不变。"
+  ai_guidance:
+    allowed: "只能使用已由 FunctionIR 的类型、AST 或 CFG 事实证明的内容生成候选用例。"
+    prohibited: "不得从原文描述、函数名或猜测补出源码事实；证据不足时保持 NEEDS_REVIEW。"
+  human_review_points:
+    - "确认该基准是否适用于当前产品和目标函数。"
+    - "确认输入值、预期值、Stub、Oracle 和寄存器/I-O 事实都有来源。"
+    - "确认是否存在项目例外；例外必须记录理由和来源，不直接静默放宽。"
+  artifact_yaml: "docs/baselines/psd-rebuild-v1.6/1-3-array-assignment.yaml"
+  artifact_markdown: "docs/baselines/psd-rebuild-v1.6/1-3-array-assignment.md"
+  cells:
+    - coordinate: "C75"
+      row: 75
+      column: 3
+      cell_type: "shared_string"
+      value: "1-3"
+    - coordinate: "D75"
+      row: 75
+      column: 4
+      cell_type: "shared_string"
+      value: "配列への代入"
+    - coordinate: "D76"
+      row: 76
+      column: 4
+      cell_type: "shared_string"
+      value: "任意の配列要素の値が期待値どおりに変化しており、それ以外の配列要素の値が変化しないことを確認すること"
+    - coordinate: "D77"
+      row: 77
+      column: 4
+      cell_type: "shared_string"
+      value: "配列のインデックスを固定して実施する (期待値はすべての配列要素の値を確認すること)"
+    - coordinate: "D79"
+      row: 79
+      column: 4
+      cell_type: "shared_string"
+      value: "例．u1_ary[ u1_index ] = u1a_val_a ;            ※u1_ary[  ]のサイズは10"
+    - coordinate: "D80"
+      row: 80
+      column: 4
+      cell_type: "shared_string"
+      value: "入力値"
+    - coordinate: "F80"
+      row: 80
+      column: 6
+      cell_type: "shared_string"
+      value: "初期値"
+    - coordinate: "I80"
+      row: 80
+      column: 9
+      cell_type: "shared_string"
+      value: "期待値"
+    - coordinate: "D81"
+      row: 81
+      column: 4
+      cell_type: "shared_string"
+      value: "u1a_val_a"
+    - coordinate: "E81"
+      row: 81
+      column: 5
+      cell_type: "shared_string"
+      value: "u1_index"
+    - coordinate: "F81"
+      row: 81
+      column: 6
+      cell_type: "shared_string"
+      value: "u1_ary[ 0 ]"
+    - coordinate: "G81"
+      row: 81
+      column: 7
+      cell_type: "shared_string"
+      value: "…"
+    - coordinate: "H81"
+      row: 81
+      column: 8
+      cell_type: "shared_string"
+      value: "u1_ary[ 9 ]"
+    - coordinate: "I81"
+      row: 81
+      column: 9
+      cell_type: "shared_string"
+      value: "u1_ary[ 0 ]"
+    - coordinate: "J81"
+      row: 81
+      column: 10
+      cell_type: "shared_string"
+      value: "…"
+    - coordinate: "K81"
+      row: 81
+      column: 11
+      cell_type: "shared_string"
+      value: "u1_ary[ 9 ]"
+    - coordinate: "D82"
+      row: 82
+      column: 4
+      cell_type: "number"
+      value: "255"
+    - coordinate: "E82"
+      row: 82
+      column: 5
+      cell_type: "number"
+      value: "0"
+    - coordinate: "F82"
+      row: 82
+      column: 6
+      cell_type: "number"
+      value: "0"
+    - coordinate: "G82"
+      row: 82
+      column: 7
+      cell_type: "number"
+      value: "0"
+    - coordinate: "H82"
+      row: 82
+      column: 8
+      cell_type: "number"
+      value: "0"
+    - coordinate: "I82"
+      row: 82
+      column: 9
+      cell_type: "number"
+      value: "255"
+    - coordinate: "J82"
+      row: 82
+      column: 10
+      cell_type: "number"
+      value: "0"
+    - coordinate: "K82"
+      row: 82
+      column: 11
+      cell_type: "number"
+      value: "0"

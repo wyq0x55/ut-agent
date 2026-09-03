@@ -1,0 +1,257 @@
+format_version: 1
+kind: "baseline-section-source"
+source:
+  file: "docs/単体テスト項目基準書_Ver.1.6.xlsx"
+  sheet: "PSD再構築"
+  revision: "Ver.1.6"
+  sha256: "d59762905c0566707ecf029ab188a8a05d13e2647c3866e383e83269655aba69"
+  semantic_status: "source_only"
+  language: "中文说明 + 日文原文证据"
+  translation_policy: "只翻译说明，不改写原始单元格内容"
+baseline:
+  id: "psd-rebuild-mcdc"
+  profile: "PSD再構築"
+  section_id: "4-5"
+  name: "数组比较"
+  name_original: "任意のインデックスに固定して比較を行う。(任意のインデックス以外はFALSEの値を入れる)"
+  row_range: "210:221"
+  source_range: "PSD再構築!C210:J221"
+  category: "生成输入基准"
+  role: "generation_input"
+  role_zh: "生成输入基准"
+  generation_relevant: true
+  generation_relevant_zh: "是"
+  review_status: "needs_review"
+  review_status_zh: "需人工复核"
+  purpose: "固定数组索引进行比较，其他数组元素设置为 FALSE 侧，并覆盖表数组索引。"
+  mapping_note: "固定数组索引进行比较，其他数组元素设置为 FALSE 侧，并覆盖表数组索引。"
+  ai_guidance:
+    allowed: "只能使用已由 FunctionIR 的类型、AST 或 CFG 事实证明的内容生成候选用例。"
+    prohibited: "不得从原文描述、函数名或猜测补出源码事实；证据不足时保持 NEEDS_REVIEW。"
+  human_review_points:
+    - "确认该基准是否适用于当前产品和目标函数。"
+    - "确认输入值、预期值、Stub、Oracle 和寄存器/I-O 事实都有来源。"
+    - "确认是否存在项目例外；例外必须记录理由和来源，不直接静默放宽。"
+  artifact_yaml: "docs/baselines/psd-rebuild-v1.6/4-5-array-compare.yaml"
+  artifact_markdown: "docs/baselines/psd-rebuild-v1.6/4-5-array-compare.md"
+  cells:
+    - coordinate: "D210"
+      row: 210
+      column: 4
+      cell_type: "shared_string"
+      value: "配列との比較"
+    - coordinate: "C211"
+      row: 211
+      column: 3
+      cell_type: "shared_string"
+      value: "4-5"
+    - coordinate: "D211"
+      row: 211
+      column: 4
+      cell_type: "shared_string"
+      value: "任意のインデックスに固定して比較を行う。(任意のインデックス以外はFALSEの値を入れる)"
+    - coordinate: "D212"
+      row: 212
+      column: 4
+      cell_type: "shared_string"
+      value: "ただし、テーブルとして扱われる配列はすべてのインデックスで確認する"
+    - coordinate: "D214"
+      row: 214
+      column: 4
+      cell_type: "shared_string"
+      value: "例．If( U1_VAL <= u1_ary[ u1_index ] )            ※u1_ary[  ]のサイズは10、U1_VALの値は5とする"
+    - coordinate: "J214"
+      row: 214
+      column: 10
+      cell_type: "shared_string"
+      value: "U1_VAL-1 or and U1_VAL+1(※U1_VALと真偽が異なる側)"
+    - coordinate: "D215"
+      row: 215
+      column: 4
+      cell_type: "shared_string"
+      value: "入力値"
+    - coordinate: "I215"
+      row: 215
+      column: 9
+      cell_type: "shared_string"
+      value: "説明"
+    - coordinate: "D216"
+      row: 216
+      column: 4
+      cell_type: "shared_string"
+      value: "u1_index"
+    - coordinate: "E216"
+      row: 216
+      column: 5
+      cell_type: "shared_string"
+      value: "u1_aray[0]"
+    - coordinate: "F216"
+      row: 216
+      column: 6
+      cell_type: "shared_string"
+      value: "u1_aray[1]"
+    - coordinate: "G216"
+      row: 216
+      column: 7
+      cell_type: "shared_string"
+      value: "…"
+    - coordinate: "H216"
+      row: 216
+      column: 8
+      cell_type: "shared_string"
+      value: "u1_aray[9]"
+    - coordinate: "I216"
+      row: 216
+      column: 9
+      cell_type: "shared_string"
+      value: "u1_aray[0]"
+    - coordinate: "D217"
+      row: 217
+      column: 4
+      cell_type: "number"
+      value: "0"
+    - coordinate: "E217"
+      row: 217
+      column: 5
+      cell_type: "number"
+      value: "0"
+    - coordinate: "F217"
+      row: 217
+      column: 6
+      cell_type: "number"
+      value: "0"
+    - coordinate: "G217"
+      row: 217
+      column: 7
+      cell_type: "number"
+      value: "0"
+    - coordinate: "H217"
+      row: 217
+      column: 8
+      cell_type: "number"
+      value: "0"
+    - coordinate: "I217"
+      row: 217
+      column: 9
+      cell_type: "shared_string"
+      value: "最小値"
+    - coordinate: "D218"
+      row: 218
+      column: 4
+      cell_type: "number"
+      value: "0"
+    - coordinate: "E218"
+      row: 218
+      column: 5
+      cell_type: "number"
+      value: "4"
+    - coordinate: "F218"
+      row: 218
+      column: 6
+      cell_type: "number"
+      value: "0"
+    - coordinate: "G218"
+      row: 218
+      column: 7
+      cell_type: "number"
+      value: "0"
+    - coordinate: "H218"
+      row: 218
+      column: 8
+      cell_type: "number"
+      value: "0"
+    - coordinate: "I218"
+      row: 218
+      column: 9
+      cell_type: "shared_string"
+      value: "定数値-1"
+    - coordinate: "D219"
+      row: 219
+      column: 4
+      cell_type: "number"
+      value: "0"
+    - coordinate: "E219"
+      row: 219
+      column: 5
+      cell_type: "number"
+      value: "5"
+    - coordinate: "F219"
+      row: 219
+      column: 6
+      cell_type: "number"
+      value: "0"
+    - coordinate: "G219"
+      row: 219
+      column: 7
+      cell_type: "number"
+      value: "0"
+    - coordinate: "H219"
+      row: 219
+      column: 8
+      cell_type: "number"
+      value: "0"
+    - coordinate: "I219"
+      row: 219
+      column: 9
+      cell_type: "shared_string"
+      value: "定数値"
+    - coordinate: "D220"
+      row: 220
+      column: 4
+      cell_type: "number"
+      value: "0"
+    - coordinate: "E220"
+      row: 220
+      column: 5
+      cell_type: "number"
+      value: "6"
+    - coordinate: "F220"
+      row: 220
+      column: 6
+      cell_type: "number"
+      value: "0"
+    - coordinate: "G220"
+      row: 220
+      column: 7
+      cell_type: "number"
+      value: "0"
+    - coordinate: "H220"
+      row: 220
+      column: 8
+      cell_type: "number"
+      value: "0"
+    - coordinate: "I220"
+      row: 220
+      column: 9
+      cell_type: "shared_string"
+      value: "定数値+1"
+    - coordinate: "D221"
+      row: 221
+      column: 4
+      cell_type: "number"
+      value: "0"
+    - coordinate: "E221"
+      row: 221
+      column: 5
+      cell_type: "number"
+      value: "255"
+    - coordinate: "F221"
+      row: 221
+      column: 6
+      cell_type: "number"
+      value: "0"
+    - coordinate: "G221"
+      row: 221
+      column: 7
+      cell_type: "number"
+      value: "0"
+    - coordinate: "H221"
+      row: 221
+      column: 8
+      cell_type: "number"
+      value: "0"
+    - coordinate: "I221"
+      row: 221
+      column: 9
+      cell_type: "shared_string"
+      value: "最大値"

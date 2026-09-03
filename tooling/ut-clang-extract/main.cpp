@@ -2387,6 +2387,42 @@ private:
     return Parent;
   }
 
+  std::optional<std::pair<std::string, std::optional<bool>>>
+  directParentBranch(const Stmt *Statement) const {
+    const Stmt *Current = Statement;
+    for (unsigned Depth = 0; Depth < 64 && Current; ++Depth) {
+      auto Parents = Context.getParents(*Current);
+      if (Parents.empty())
+        break;
+      const DynTypedNode &Parent = Parents[0];
+      if (const auto *If = Parent.get<IfStmt>()) {
+        auto Found = BranchIds.find(If);
+        if (Found != BranchIds.end()) {
+          const bool InThen = If->getThen() && sourceRangeContains(
+              If->getThen()->getSourceRange(), Statement->getSourceRange());
+          const bool InElse = If->getElse() && sourceRangeContains(
+              If->getElse()->getSourceRange(), Statement->getSourceRange());
+          if (InThen || InElse)
+            return std::make_pair(Found->second,
+                                  std::optional<bool>(InThen));
+        }
+      }
+      if (const auto *ParentStmt = Parent.get<Stmt>()) {
+        auto Found = BranchStmtIds.find(ParentStmt);
+        if (Found != BranchStmtIds.end())
+          return std::make_pair(Found->second, std::optional<bool>());
+        Current = ParentStmt;
+        continue;
+      }
+      if (const auto *ParentExpr = Parent.get<Expr>()) {
+        Current = ParentExpr;
+        continue;
+      }
+      break;
+    }
+    return std::nullopt;
+  }
+
   llvm::json::Array switchCases(const SwitchStmt *Statement) const {
     struct CaseValue {
       unsigned Line;
@@ -2428,7 +2464,8 @@ private:
   void addBranch(llvm::StringRef Kind, const Stmt *Statement,
                  const Expr *Condition, unsigned ChainIndex = 0,
                  std::optional<std::string> Parent = std::nullopt,
-                 llvm::json::Array Cases = llvm::json::Array{}) {
+                 llvm::json::Array Cases = llvm::json::Array{},
+                 std::optional<bool> ParentOutcome = std::nullopt) {
     std::string Bid = "b" + std::to_string(Branches.size());
     llvm::json::Array Atoms;
     collectAtoms(Condition, Atoms);
@@ -2493,6 +2530,9 @@ private:
                                       : llvm::json::Value(nullptr)},
         {"parent_bid", Parent ? llvm::json::Value(*Parent)
                                : llvm::json::Value(nullptr)},
+        {"parent_outcome", ParentOutcome
+                               ? llvm::json::Value(*ParentOutcome)
+                               : llvm::json::Value(nullptr)},
         {"condition_tree", std::move(ConditionTree)},
         {"selector", std::move(Selector)},
         {"provenance", provenance(SM, Statement->getSourceRange(), Kind,
@@ -2500,6 +2540,7 @@ private:
         {"extensions", std::move(Extensions)}};
     if (const auto *If = dyn_cast<IfStmt>(Statement))
       BranchIds[If] = Bid;
+    BranchStmtIds[Statement] = Bid;
     Branches.push_back(llvm::json::Value(std::move(Branch)));
   }
 
@@ -2507,8 +2548,14 @@ public:
   bool VisitIfStmt(IfStmt *Statement) {
     unsigned ChainIndex = 0;
     std::optional<std::string> Parent = parentBranch(Statement, ChainIndex);
+    std::optional<bool> ParentOutcome;
+    if (auto Direct = directParentBranch(Statement)) {
+      Parent = Direct->first;
+      ParentOutcome = Direct->second;
+    }
     addBranch(ChainIndex == 0 ? "if" : "elseif", Statement,
-              Statement->getCond(), ChainIndex, Parent);
+              Statement->getCond(), ChainIndex, Parent,
+              llvm::json::Array{}, ParentOutcome);
     return true;
   }
 
@@ -3178,6 +3225,7 @@ private:
   std::set<std::string> Locals;
   std::set<const ParmVarDecl *> WrittenParams;
   std::map<const IfStmt *, std::string> BranchIds;
+  std::map<const Stmt *, std::string> BranchStmtIds;
   std::map<std::string, ControlFact> Controls;
   std::map<std::string, GlobalFact> GlobalObjects;
   std::map<std::string, std::map<std::string, GlobalFieldAccess>>

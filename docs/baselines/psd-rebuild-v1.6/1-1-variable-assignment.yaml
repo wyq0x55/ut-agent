@@ -1,0 +1,122 @@
+format_version: 1
+kind: "baseline-section-source"
+source:
+  file: "docs/単体テスト項目基準書_Ver.1.6.xlsx"
+  sheet: "PSD再構築"
+  revision: "Ver.1.6"
+  sha256: "d59762905c0566707ecf029ab188a8a05d13e2647c3866e383e83269655aba69"
+  semantic_status: "source_only"
+  language: "中文说明 + 日文原文证据"
+  translation_policy: "只翻译说明，不改写原始单元格内容"
+baseline:
+  id: "psd-rebuild-mcdc"
+  profile: "PSD再構築"
+  section_id: "1-1"
+  name: "左右两边都是变量时的赋值"
+  name_original: "右辺、左辺とも変数の場合"
+  row_range: "56:65"
+  source_range: "PSD再構築!B56:F65"
+  category: "生成输入基准"
+  role: "generation_input"
+  role_zh: "生成输入基准"
+  generation_relevant: true
+  generation_relevant_zh: "是"
+  review_status: "needs_review"
+  review_status_zh: "需人工复核"
+  purpose: "变量到变量赋值后确认目标变量状态。"
+  mapping_note: "变量到变量赋值后确认目标变量状态。"
+  ai_guidance:
+    allowed: "只能使用已由 FunctionIR 的类型、AST 或 CFG 事实证明的内容生成候选用例。"
+    prohibited: "不得从原文描述、函数名或猜测补出源码事实；证据不足时保持 NEEDS_REVIEW。"
+  human_review_points:
+    - "确认该基准是否适用于当前产品和目标函数。"
+    - "确认输入值、预期值、Stub、Oracle 和寄存器/I-O 事实都有来源。"
+    - "确认是否存在项目例外；例外必须记录理由和来源，不直接静默放宽。"
+  artifact_yaml: "docs/baselines/psd-rebuild-v1.6/1-1-variable-assignment.yaml"
+  artifact_markdown: "docs/baselines/psd-rebuild-v1.6/1-1-variable-assignment.md"
+  cells:
+    - coordinate: "B56"
+      row: 56
+      column: 2
+      cell_type: "number"
+      value: "1"
+    - coordinate: "C56"
+      row: 56
+      column: 3
+      cell_type: "shared_string"
+      value: "代入文"
+    - coordinate: "D57"
+      row: 57
+      column: 4
+      cell_type: "shared_string"
+      value: "観点：期待値どおりに値が変化することを確認する"
+    - coordinate: "C58"
+      row: 58
+      column: 3
+      cell_type: "shared_string"
+      value: "1-1"
+    - coordinate: "D58"
+      row: 58
+      column: 4
+      cell_type: "shared_string"
+      value: "右辺、左辺とも変数の場合"
+    - coordinate: "D59"
+      row: 59
+      column: 4
+      cell_type: "shared_string"
+      value: "入力値は、型の最大値とする。"
+    - coordinate: "D60"
+      row: 60
+      column: 4
+      cell_type: "shared_string"
+      value: "代入される変数には、初期値を設定しておく（初期値：通常は代入される変数の型の最小値とする）"
+    - coordinate: "D62"
+      row: 62
+      column: 4
+      cell_type: "shared_string"
+      value: "例．u1l_Eprom_ModReq  = u1a_ModReq ;"
+    - coordinate: "D63"
+      row: 63
+      column: 4
+      cell_type: "shared_string"
+      value: "入力値"
+    - coordinate: "E63"
+      row: 63
+      column: 5
+      cell_type: "shared_string"
+      value: "初期値"
+    - coordinate: "F63"
+      row: 63
+      column: 6
+      cell_type: "shared_string"
+      value: "期待値"
+    - coordinate: "D64"
+      row: 64
+      column: 4
+      cell_type: "shared_string"
+      value: "u1a_ModReq "
+    - coordinate: "E64"
+      row: 64
+      column: 5
+      cell_type: "shared_string"
+      value: "u1l_Eprom_ModReq"
+    - coordinate: "F64"
+      row: 64
+      column: 6
+      cell_type: "shared_string"
+      value: "u1l_Eprom_ModReq"
+    - coordinate: "D65"
+      row: 65
+      column: 4
+      cell_type: "number"
+      value: "255"
+    - coordinate: "E65"
+      row: 65
+      column: 5
+      cell_type: "number"
+      value: "0"
+    - coordinate: "F65"
+      row: 65
+      column: 6
+      cell_type: "number"
+      value: "255"

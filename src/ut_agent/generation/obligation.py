@@ -72,11 +72,28 @@ def derive_obligations(ir: FunctionIR, baseline: TestBaseline,
     boundary_enabled = _policy_bool(
         baseline.boundary_policy, ("obligations", "points"), False,
     )
+    loop_enabled = _policy_bool(
+        baseline.loop_policy, ("iteration_count", "boundary_state"), False,
+    )
     switch_enabled = _policy_bool(
         baseline.switch_policy, ("preserve_cases", "cases"), True,
     )
     for branch in ir.branches:
         if branch.kind == "for":
+            if loop_enabled:
+                rule_name = (
+                    "iteration_count"
+                    if baseline.loop_policy.get("iteration_count", False)
+                    else "boundary_state"
+                )
+                obligations.append(_obligation(
+                    baseline, source_fact=f"branch:{branch.bid}",
+                    rule_id=f"baseline.loop_policy.{rule_name}",
+                    oid=f"{branch.bid}:loop-entry", kind="loop",
+                    branch_id=branch.bid, outcome=True,
+                    boundary_class="loop-entry",
+                    description=branch.cond_text or branch.cond_text_expanded,
+                ))
             continue
         if branch.kind == "switch" and branch.cases and switch_enabled:
             for index, case in enumerate(branch.cases):

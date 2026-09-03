@@ -7,17 +7,75 @@ baseline:
   approved_exceptions: []
   source:
     document: "単体テスト項目基準書_Ver.1.6.xlsx"
+    sheet: "PSD再構築"
+    revision: "Ver.1.6"
+    transcription: "docs/baselines/psd-rebuild-v1.6/manifest.yaml"
+    rule_mapping: "baseline.rules"
+  rules:
+    - rule_id: psd.0-2.typed-domain
+      source: "PSD再構築!C37:H55"
+      meaning: "按类型的最小值、典型值、最大值建立输入域"
+      status: approved
+    - rule_id: psd.1.assignment
+      source: "PSD再構築!C58:K91"
+      meaning: "变量、常量、数组和寄存器/I-O赋值后的状态确认"
+      status: approved
+    - rule_id: psd.3.stub
+      source: "PSD再構築!C97:F130"
+      meaning: "调用次数、返回值和实参/指针参数的 stub 观点"
+      status: approved
+    - rule_id: psd.4.compare
+      source: "PSD再構築!C132:K178"
+      meaning: "变量比较、变量与常量比较及邻接边界值"
+      status: approved
+    - rule_id: psd.4.mcdc
+      source: "PSD再構築!C179:K210"
+      meaning: "AND/OR 条件组合与 MC/DC 独立条件观点"
+      status: approved
+    - rule_id: psd.4.array
+      source: "PSD再構築!C211:K221"
+      meaning: "固定数组索引并保持其他元素语义不变"
+      status: approved
+    - rule_id: psd.6.control
+      source: "PSD再構築!C231:I277"
+      meaning: "if/else-if/switch/default/loop 的控制流观点"
+      status: approved
+    - rule_id: psd.6.order
+      source: "PSD再構築!C281:D292"
+      meaning: "TRUE/FALSE、case 顺序和剩余值升序的确定性排列"
+      status: approved
   coverage:
     criterion: "PSD再構築"
   condition_policy:
     mcdc: true
+    logical_connectives: ["&&", "||"]
+    condition_outcome: true
+    source_rules: ["psd.4.compare", "psd.4.mcdc"]
   boundary_policy:
     typed: true
+    representative_values: ["min", "median", "max"]
+    adjacent_constant_values: true
+    source_rules: ["psd.0-2.typed-domain", "psd.4.compare"]
   switch_policy:
     preserve_cases: true
-  loop_policy: {}
-  array_policy: {}
+    include_default: true
+    source_rules: ["psd.6.control", "psd.6.order"]
+  loop_policy:
+    iteration_count: true
+    boundary_state: true
+    source_rules: ["psd.6.control"]
+  array_policy:
+    fixed_index: true
+    preserve_other_elements: true
+    source_rules: ["psd.4.array"]
   stub_policy:
     external_calls_are_environment: true
+    call_count: true
+    return_value: true
+    arguments: true
+    source_rules: ["psd.3.stub"]
   ordering_policy:
     deterministic: true
+    case_order: source
+    remaining_values: ascending
+    source_rules: ["psd.6.order"]

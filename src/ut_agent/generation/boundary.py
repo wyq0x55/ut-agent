@@ -75,6 +75,20 @@ def _enum_names(type_info: TypeInfo | None) -> dict[int, str]:
     return {value: name for name, value in type_info.enum_values.items()}
 
 
+def _atom_type_info(ir: FunctionIR, atom, control) -> TypeInfo | None:
+    """Select an extractor-proven scalar type for a condition operand.
+
+    A dereference atom is serialized with the pointer's ``TypeInfo``.  Its
+    finite candidate domain is the extractor-proven pointee domain, whereas a
+    NULL guard needs the pointer's two-state null/non-null domain.
+    """
+    type_info = atom.type_info or control.type_info
+    if str(atom.var).replace(" ", "").startswith("*") and type_info is not None:
+        if type_info.pointee_info is not None:
+            return type_info.pointee_info
+    return type_info
+
+
 def control_candidates(ir: FunctionIR) -> dict:
     """Build candidates from typed atoms and the extractor's selector fact."""
     controls = {control.var: control for control in ir.control_vars}
@@ -95,7 +109,12 @@ def control_candidates(ir: FunctionIR) -> dict:
             control = controls.get(atom.var)
             if control is None or control.constant_value is not None:
                 continue
-            typed_domain = _domain(atom.type_info) or _domain(control.type_info)
+            type_info = _atom_type_info(ir, atom, control)
+            if atom.boundary is None and atom.boundary_name == "NULL":
+                if type_info is not None and type_info.kind == "pointer":
+                    add(control, {0, 1})
+                continue
+            typed_domain = _domain(type_info)
             add(control, _five_points(atom.boundary, typed_domain))
 
         if branch.kind != "switch":

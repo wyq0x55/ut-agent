@@ -87,6 +87,19 @@ def evaluate_obligation(ir: FunctionIR, obligation: TestObligation,
                                 required_outputs=required, complete=complete)
     try:
         env = engine._control_env(assignment, ir)
+        path = engine.branch_path_reachable(ir, branch, env)
+        if path is not True:
+            reason = (
+                "branch path is not reachable"
+                if path is False else
+                "branch path cannot be proven from FunctionIR"
+            )
+            return EvaluationResult(
+                UNKNOWN if path is None else FAIL,
+                obligation.oid, reason=reason,
+                pre_state=dict(assignment), post_state=post_state,
+                required_outputs=required, complete=complete,
+            )
         if obligation.kind == "case":
             case = engine._find_switch_case(branch, obligation)
             if case is None:

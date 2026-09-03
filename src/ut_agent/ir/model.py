@@ -190,6 +190,7 @@ class Branch:
     cond_text_spelling: str = ""
     cond_text_expanded: str = ""
     parent_bid: Optional[str] = None
+    parent_outcome: Optional[bool] = None
     condition_tree: Optional[dict[str, Any]] = None
     selector: Optional[ValueOrigin] = None
     provenance: Optional[Provenance] = None

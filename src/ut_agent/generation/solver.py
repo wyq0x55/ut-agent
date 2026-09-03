@@ -64,6 +64,9 @@ def _matches(ir: FunctionIR, obligation: TestObligation,
                    if item.bid == obligation.branch_id), None)
     if branch is None:
         return None
+    path = engine.branch_path_reachable(ir, branch, env)
+    if path is not True:
+        return path
     if obligation.kind == "case":
         case = engine._find_switch_case(branch, obligation)
         if case is None:

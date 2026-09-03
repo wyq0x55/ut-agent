@@ -340,6 +340,7 @@
         "constant_value": { "type": ["boolean", "null"] },
         "constant_reason": { "type": ["string", "null"] },
         "parent_bid": { "type": ["string", "null"] },
+        "parent_outcome": { "type": ["boolean", "null"] },
         "condition_tree": { "type": ["object", "null"] },
         "selector": { "anyOf": [{ "$ref": "#/$defs/value_origin" }, { "type": "null" }] },
         "provenance": { "$ref": "#/$defs/provenance" },

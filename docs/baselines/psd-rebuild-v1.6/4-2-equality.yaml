@@ -1,0 +1,137 @@
+format_version: 1
+kind: "baseline-section-source"
+source:
+  file: "docs/単体テスト項目基準書_Ver.1.6.xlsx"
+  sheet: "PSD再構築"
+  revision: "Ver.1.6"
+  sha256: "d59762905c0566707ecf029ab188a8a05d13e2647c3866e383e83269655aba69"
+  semantic_status: "source_only"
+  language: "中文说明 + 日文原文证据"
+  translation_policy: "只翻译说明，不改写原始单元格内容"
+baseline:
+  id: "psd-rebuild-mcdc"
+  profile: "PSD再構築"
+  section_id: "4-2"
+  name: "变量值与常量值相等"
+  name_original: "変数値と定数値の一致"
+  row_range: "145:155"
+  source_range: "PSD再構築!C145:F155"
+  category: "生成输入基准"
+  role: "generation_input"
+  role_zh: "生成输入基准"
+  generation_relevant: true
+  generation_relevant_zh: "是"
+  review_status: "needs_review"
+  review_status_zh: "需人工复核"
+  purpose: "变量与常量相等比较的常量邻接值、常量值、类型最小/最大值。"
+  mapping_note: "变量与常量相等比较的常量邻接值、常量值、类型最小/最大值。"
+  ai_guidance:
+    allowed: "只能使用已由 FunctionIR 的类型、AST 或 CFG 事实证明的内容生成候选用例。"
+    prohibited: "不得从原文描述、函数名或猜测补出源码事实；证据不足时保持 NEEDS_REVIEW。"
+  human_review_points:
+    - "确认该基准是否适用于当前产品和目标函数。"
+    - "确认输入值、预期值、Stub、Oracle 和寄存器/I-O 事实都有来源。"
+    - "确认是否存在项目例外；例外必须记录理由和来源，不直接静默放宽。"
+  artifact_yaml: "docs/baselines/psd-rebuild-v1.6/4-2-equality.yaml"
+  artifact_markdown: "docs/baselines/psd-rebuild-v1.6/4-2-equality.md"
+  cells:
+    - coordinate: "C145"
+      row: 145
+      column: 3
+      cell_type: "shared_string"
+      value: "4-2"
+    - coordinate: "D145"
+      row: 145
+      column: 4
+      cell_type: "shared_string"
+      value: "変数値と定数値の一致"
+    - coordinate: "D146"
+      row: 146
+      column: 4
+      cell_type: "shared_string"
+      value: "入力値は、定数-1、定数値、定数+1、最小値、最大値の35種類。"
+    - coordinate: "D148"
+      row: 148
+      column: 4
+      cell_type: "shared_string"
+      value: "例．If( U1_VAL == u1_val_a )     ※定数U1_VALは5とする"
+    - coordinate: "D149"
+      row: 149
+      column: 4
+      cell_type: "shared_string"
+      value: "値の区分"
+    - coordinate: "E149"
+      row: 149
+      column: 5
+      cell_type: "shared_string"
+      value: "入力値１"
+    - coordinate: "E150"
+      row: 150
+      column: 5
+      cell_type: "shared_string"
+      value: "u1_val_a"
+    - coordinate: "D151"
+      row: 151
+      column: 4
+      cell_type: "shared_string"
+      value: "最小値"
+    - coordinate: "E151"
+      row: 151
+      column: 5
+      cell_type: "number"
+      value: "0"
+    - coordinate: "F151"
+      row: 151
+      column: 6
+      cell_type: "boolean"
+      value: "0"
+    - coordinate: "D152"
+      row: 152
+      column: 4
+      cell_type: "shared_string"
+      value: "定数-1"
+    - coordinate: "E152"
+      row: 152
+      column: 5
+      cell_type: "number"
+      value: "4"
+    - coordinate: "D153"
+      row: 153
+      column: 4
+      cell_type: "shared_string"
+      value: "定数値"
+    - coordinate: "E153"
+      row: 153
+      column: 5
+      cell_type: "number"
+      value: "5"
+    - coordinate: "F153"
+      row: 153
+      column: 6
+      cell_type: "boolean"
+      value: "1"
+    - coordinate: "D154"
+      row: 154
+      column: 4
+      cell_type: "shared_string"
+      value: "定数+1"
+    - coordinate: "E154"
+      row: 154
+      column: 5
+      cell_type: "number"
+      value: "6"
+    - coordinate: "D155"
+      row: 155
+      column: 4
+      cell_type: "shared_string"
+      value: "最大値"
+    - coordinate: "E155"
+      row: 155
+      column: 5
+      cell_type: "number"
+      value: "255"
+    - coordinate: "F155"
+      row: 155
+      column: 6
+      cell_type: "boolean"
+      value: "0"

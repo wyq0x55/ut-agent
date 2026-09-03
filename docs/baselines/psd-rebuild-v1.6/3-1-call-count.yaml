@@ -1,0 +1,127 @@
+format_version: 1
+kind: "baseline-section-source"
+source:
+  file: "docs/単体テスト項目基準書_Ver.1.6.xlsx"
+  sheet: "PSD再構築"
+  revision: "Ver.1.6"
+  sha256: "d59762905c0566707ecf029ab188a8a05d13e2647c3866e383e83269655aba69"
+  semantic_status: "source_only"
+  language: "中文说明 + 日文原文证据"
+  translation_policy: "只翻译说明，不改写原始单元格内容"
+baseline:
+  id: "psd-rebuild-mcdc"
+  profile: "PSD再構築"
+  section_id: "3-1"
+  name: "函数调用"
+  name_original: "関数コール"
+  row_range: "95:111"
+  source_range: "PSD再構築!B95:E111"
+  category: "生成输入基准"
+  role: "generation_input"
+  role_zh: "生成输入基准"
+  generation_relevant: true
+  generation_relevant_zh: "是"
+  review_status: "needs_review"
+  review_status_zh: "需人工复核"
+  purpose: "确认外部函数调用次数和 Stub 内调用计数。"
+  mapping_note: "确认外部函数调用次数和 Stub 内调用计数。"
+  ai_guidance:
+    allowed: "只能使用已由 FunctionIR 的类型、AST 或 CFG 事实证明的内容生成候选用例。"
+    prohibited: "不得从原文描述、函数名或猜测补出源码事实；证据不足时保持 NEEDS_REVIEW。"
+  human_review_points:
+    - "确认该基准是否适用于当前产品和目标函数。"
+    - "确认输入值、预期值、Stub、Oracle 和寄存器/I-O 事实都有来源。"
+    - "确认是否存在项目例外；例外必须记录理由和来源，不直接静默放宽。"
+  artifact_yaml: "docs/baselines/psd-rebuild-v1.6/3-1-call-count.yaml"
+  artifact_markdown: "docs/baselines/psd-rebuild-v1.6/3-1-call-count.md"
+  cells:
+    - coordinate: "B95"
+      row: 95
+      column: 2
+      cell_type: "number"
+      value: "3"
+    - coordinate: "C95"
+      row: 95
+      column: 3
+      cell_type: "shared_string"
+      value: "関数コール"
+    - coordinate: "D96"
+      row: 96
+      column: 4
+      cell_type: "shared_string"
+      value: "観点：期待通りに関数が呼ばれていること、関数入出力が正しく行われていることを確認する"
+    - coordinate: "C97"
+      row: 97
+      column: 3
+      cell_type: "shared_string"
+      value: "3-1"
+    - coordinate: "D97"
+      row: 97
+      column: 4
+      cell_type: "shared_string"
+      value: "関数コール"
+    - coordinate: "D98"
+      row: 98
+      column: 4
+      cell_type: "shared_string"
+      value: "スタブ関数内のインクリメント変数がインクリメントされていることを確認する"
+    - coordinate: "D100"
+      row: 100
+      column: 4
+      cell_type: "shared_string"
+      value: "test()"
+    - coordinate: "D102"
+      row: 102
+      column: 4
+      cell_type: "shared_string"
+      value: "STB関数"
+    - coordinate: "D103"
+      row: 103
+      column: 4
+      cell_type: "shared_string"
+      value: "void STB_test(void)"
+    - coordinate: "D104"
+      row: 104
+      column: 4
+      cell_type: "shared_string"
+      value: "{"
+    - coordinate: "D105"
+      row: 105
+      column: 4
+      cell_type: "shared_string"
+      value: "  CALL_test++;"
+    - coordinate: "D106"
+      row: 106
+      column: 4
+      cell_type: "shared_string"
+      value: "}"
+    - coordinate: "D109"
+      row: 109
+      column: 4
+      cell_type: "shared_string"
+      value: "入力値１"
+    - coordinate: "E109"
+      row: 109
+      column: 5
+      cell_type: "shared_string"
+      value: "期待値"
+    - coordinate: "D110"
+      row: 110
+      column: 4
+      cell_type: "shared_string"
+      value: "CALL_test"
+    - coordinate: "E110"
+      row: 110
+      column: 5
+      cell_type: "shared_string"
+      value: "CALL_test"
+    - coordinate: "D111"
+      row: 111
+      column: 4
+      cell_type: "number"
+      value: "0"
+    - coordinate: "E111"
+      row: 111
+      column: 5
+      cell_type: "number"
+      value: "1"

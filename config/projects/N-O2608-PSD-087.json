@@ -1,0 +1,13 @@
+{
+  "project": {"id": "N-O2608-PSD-087"},
+  "baseline": {"id": "psd-rebuild-mcdc", "version": "1.0"},
+  "rules": {"project_pack": null},
+  "build": {"profile": "rh850-ghs"},
+  "winams": {"profile": "standard"},
+  "profile": {
+    "base_profile": "PSD再構築",
+    "profile_version": "PSD再構築-v1",
+    "mcdc_enabled": true,
+    "scope": "all-indexed-functions"
+  }
+}

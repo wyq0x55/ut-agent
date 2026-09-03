@@ -1,0 +1,87 @@
+format_version: 1
+kind: "baseline-section-source"
+source:
+  file: "docs/単体テスト項目基準書_Ver.1.6.xlsx"
+  sheet: "PSD再構築"
+  revision: "Ver.1.6"
+  sha256: "d59762905c0566707ecf029ab188a8a05d13e2647c3866e383e83269655aba69"
+  semantic_status: "source_only"
+  language: "中文说明 + 日文原文证据"
+  translation_policy: "只翻译说明，不改写原始单元格内容"
+baseline:
+  id: "psd-rebuild-mcdc"
+  profile: "PSD再構築"
+  section_id: "6-2"
+  name: "测试模式排列"
+  name_original: "テストパターンの並べ方"
+  row_range: "281:292"
+  source_range: "PSD再構築!C281:E292"
+  category: "确定性排序规则"
+  role: "ordering_policy"
+  role_zh: "确定性排序规则"
+  generation_relevant: true
+  generation_relevant_zh: "是"
+  review_status: "needs_review"
+  review_status_zh: "需人工复核"
+  purpose: "TRUE/FALSE、case 和剩余值的确定性排列。"
+  mapping_note: "TRUE/FALSE、case 和剩余值的确定性排列。"
+  ai_guidance:
+    allowed: "只能使用已由 FunctionIR 的类型、AST 或 CFG 事实证明的内容生成候选用例。"
+    prohibited: "不得从原文描述、函数名或猜测补出源码事实；证据不足时保持 NEEDS_REVIEW。"
+  human_review_points:
+    - "确认该基准是否适用于当前产品和目标函数。"
+    - "确认输入值、预期值、Stub、Oracle 和寄存器/I-O 事实都有来源。"
+    - "确认是否存在项目例外；例外必须记录理由和来源，不直接静默放宽。"
+  artifact_yaml: "docs/baselines/psd-rebuild-v1.6/6-2-ordering.yaml"
+  artifact_markdown: "docs/baselines/psd-rebuild-v1.6/6-2-ordering.md"
+  cells:
+    - coordinate: "C281"
+      row: 281
+      column: 3
+      cell_type: "shared_string"
+      value: "6-2"
+    - coordinate: "D281"
+      row: 281
+      column: 4
+      cell_type: "shared_string"
+      value: "テストパターンの並べ方"
+    - coordinate: "D282"
+      row: 282
+      column: 4
+      cell_type: "boolean"
+      value: "1"
+    - coordinate: "D284"
+      row: 284
+      column: 4
+      cell_type: "boolean"
+      value: "0"
+    - coordinate: "D286"
+      row: 286
+      column: 4
+      cell_type: "shared_string"
+      value: "組合せ(WinAMSが出力する順番に従う)"
+    - coordinate: "D288"
+      row: 288
+      column: 4
+      cell_type: "shared_string"
+      value: "．"
+    - coordinate: "D289"
+      row: 289
+      column: 4
+      cell_type: "shared_string"
+      value: "．"
+    - coordinate: "E289"
+      row: 289
+      column: 5
+      cell_type: "shared_string"
+      value: "残りは昇順"
+    - coordinate: "D290"
+      row: 290
+      column: 4
+      cell_type: "shared_string"
+      value: "．"
+    - coordinate: "D292"
+      row: 292
+      column: 4
+      cell_type: "shared_string"
+      value: "switch文に関しては、caseの順番に値を設定すること。"

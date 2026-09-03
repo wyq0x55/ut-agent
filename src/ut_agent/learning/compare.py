@@ -21,7 +21,10 @@ def compare_testcsv(project: GeneratedProject) -> list[tuple[str, bool]]:
         if unit.expected is None:
             result.append((unit.name, True))
             continue
-        golden = unit.expected.parent / "TestCsv.csv"
+        # ``expected`` is the explicitly declared Golden file.  Replacing it
+        # with a guessed sibling made the project comparator silently compare
+        # against a path that did not exist for reviewed WinAMS packages.
+        golden = unit.expected
         try:
             actual = semantic_csv_signature(unit.testcsv)
             expected = semantic_csv_signature(golden)

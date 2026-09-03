@@ -388,6 +388,32 @@ def test_standalone_preserves_switch_case_branch_nesting(tmp_path: Path):
     ]
 
 
+def test_standalone_emits_else_parent_outcome_for_nested_branch(tmp_path: Path):
+    executable = default_clang_extractor()
+    if executable is None:
+        pytest.skip("repository standalone extractor is not built")
+    source = tmp_path / "else_parent.c"
+    source.write_text(
+        "typedef unsigned char u1;\n"
+        "void target(void) {\n"
+        "  u1 value = 0U;\n"
+        "  if (value != 0U) { } else {\n"
+        "    if (value == 1U) { }\n"
+        "  }\n"
+        "}\n",
+        encoding="ascii",
+    )
+
+    ir = ClangExtractor(executable).extract(
+        make_compile_context([source]), "target", cwd=tmp_path,
+    )
+
+    outer, nested = ir.branches
+    assert outer.parent_bid is None
+    assert nested.parent_bid == outer.bid
+    assert nested.parent_outcome is False
+
+
 def test_standalone_tracks_return_and_local_value_effects(tmp_path: Path):
     executable = default_clang_extractor()
     if executable is None:

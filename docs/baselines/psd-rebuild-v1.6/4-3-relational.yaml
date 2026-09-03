@@ -1,0 +1,272 @@
+format_version: 1
+kind: "baseline-section-source"
+source:
+  file: "docs/単体テスト項目基準書_Ver.1.6.xlsx"
+  sheet: "PSD再構築"
+  revision: "Ver.1.6"
+  sha256: "d59762905c0566707ecf029ab188a8a05d13e2647c3866e383e83269655aba69"
+  semantic_status: "source_only"
+  language: "中文说明 + 日文原文证据"
+  translation_policy: "只翻译说明，不改写原始单元格内容"
+baseline:
+  id: "psd-rebuild-mcdc"
+  profile: "PSD再構築"
+  section_id: "4-3"
+  name: "常量与变量的大小比较"
+  name_original: "条件判定が定数と変数の大小比較"
+  row_range: "158:177"
+  source_range: "PSD再構築!A158:G177"
+  category: "生成输入基准"
+  role: "generation_input"
+  role_zh: "生成输入基准"
+  generation_relevant: true
+  generation_relevant_zh: "是"
+  review_status: "needs_review"
+  review_status_zh: "需人工复核"
+  purpose: "常量与变量大小关系比较，保留使真值发生变化的邻接值。"
+  mapping_note: "常量与变量大小关系比较，保留使真值发生变化的邻接值。"
+  ai_guidance:
+    allowed: "只能使用已由 FunctionIR 的类型、AST 或 CFG 事实证明的内容生成候选用例。"
+    prohibited: "不得从原文描述、函数名或猜测补出源码事实；证据不足时保持 NEEDS_REVIEW。"
+  human_review_points:
+    - "确认该基准是否适用于当前产品和目标函数。"
+    - "确认输入值、预期值、Stub、Oracle 和寄存器/I-O 事实都有来源。"
+    - "确认是否存在项目例外；例外必须记录理由和来源，不直接静默放宽。"
+  artifact_yaml: "docs/baselines/psd-rebuild-v1.6/4-3-relational.yaml"
+  artifact_markdown: "docs/baselines/psd-rebuild-v1.6/4-3-relational.md"
+  cells:
+    - coordinate: "C158"
+      row: 158
+      column: 3
+      cell_type: "shared_string"
+      value: "4-3"
+    - coordinate: "D158"
+      row: 158
+      column: 4
+      cell_type: "shared_string"
+      value: "条件判定が定数と変数の大小比較"
+    - coordinate: "D159"
+      row: 159
+      column: 4
+      cell_type: "shared_string"
+      value: "定数値（及び　定数値-1　または　定数値+1）、変数の最小・最大値の組み合わせ。"
+    - coordinate: "C161"
+      row: 161
+      column: 3
+      cell_type: "shared_string"
+      value: "①"
+    - coordinate: "D161"
+      row: 161
+      column: 4
+      cell_type: "shared_string"
+      value: "例．If( U1_VAL <= u1_val_a )  ※定数：5"
+    - coordinate: "G161"
+      row: 161
+      column: 7
+      cell_type: "shared_string"
+      value: "U1_VAL-1 or and U1_VAL+1(※U1_VALと真偽が異なる側)"
+    - coordinate: "D162"
+      row: 162
+      column: 4
+      cell_type: "shared_string"
+      value: "値の区分"
+    - coordinate: "E162"
+      row: 162
+      column: 5
+      cell_type: "shared_string"
+      value: "入力値１"
+    - coordinate: "E163"
+      row: 163
+      column: 5
+      cell_type: "shared_string"
+      value: "u1_val_a"
+    - coordinate: "D164"
+      row: 164
+      column: 4
+      cell_type: "shared_string"
+      value: "最小値"
+    - coordinate: "E164"
+      row: 164
+      column: 5
+      cell_type: "number"
+      value: "0"
+    - coordinate: "F164"
+      row: 164
+      column: 6
+      cell_type: "boolean"
+      value: "0"
+    - coordinate: "D165"
+      row: 165
+      column: 4
+      cell_type: "shared_string"
+      value: "定数-1"
+    - coordinate: "E165"
+      row: 165
+      column: 5
+      cell_type: "number"
+      value: "4"
+    - coordinate: "F165"
+      row: 165
+      column: 6
+      cell_type: "boolean"
+      value: "0"
+    - coordinate: "D166"
+      row: 166
+      column: 4
+      cell_type: "shared_string"
+      value: "定数"
+    - coordinate: "E166"
+      row: 166
+      column: 5
+      cell_type: "number"
+      value: "5"
+    - coordinate: "F166"
+      row: 166
+      column: 6
+      cell_type: "boolean"
+      value: "1"
+    - coordinate: "D167"
+      row: 167
+      column: 4
+      cell_type: "shared_string"
+      value: "定数+1"
+    - coordinate: "E167"
+      row: 167
+      column: 5
+      cell_type: "number"
+      value: "6"
+    - coordinate: "F167"
+      row: 167
+      column: 6
+      cell_type: "boolean"
+      value: "1"
+    - coordinate: "A168"
+      row: 168
+      column: 1
+      cell_type: "shared_string"
+      value: ";"
+    - coordinate: "D168"
+      row: 168
+      column: 4
+      cell_type: "shared_string"
+      value: "最大値"
+    - coordinate: "E168"
+      row: 168
+      column: 5
+      cell_type: "number"
+      value: "255"
+    - coordinate: "F168"
+      row: 168
+      column: 6
+      cell_type: "boolean"
+      value: "1"
+    - coordinate: "C170"
+      row: 170
+      column: 3
+      cell_type: "shared_string"
+      value: "②"
+    - coordinate: "D170"
+      row: 170
+      column: 4
+      cell_type: "shared_string"
+      value: "例．If( U1_VAL < u1_val_a )  ※定数：5"
+    - coordinate: "G170"
+      row: 170
+      column: 7
+      cell_type: "shared_string"
+      value: "U1_VAL-1 or and U1_VAL+1(※U1_VALと真偽が異なる側)"
+    - coordinate: "D171"
+      row: 171
+      column: 4
+      cell_type: "shared_string"
+      value: "値の区分"
+    - coordinate: "E171"
+      row: 171
+      column: 5
+      cell_type: "shared_string"
+      value: "入力値１"
+    - coordinate: "E172"
+      row: 172
+      column: 5
+      cell_type: "shared_string"
+      value: "u1_val_a"
+    - coordinate: "D173"
+      row: 173
+      column: 4
+      cell_type: "shared_string"
+      value: "最小値"
+    - coordinate: "E173"
+      row: 173
+      column: 5
+      cell_type: "number"
+      value: "0"
+    - coordinate: "F173"
+      row: 173
+      column: 6
+      cell_type: "boolean"
+      value: "0"
+    - coordinate: "D174"
+      row: 174
+      column: 4
+      cell_type: "shared_string"
+      value: "定数-1"
+    - coordinate: "E174"
+      row: 174
+      column: 5
+      cell_type: "number"
+      value: "4"
+    - coordinate: "F174"
+      row: 174
+      column: 6
+      cell_type: "boolean"
+      value: "0"
+    - coordinate: "D175"
+      row: 175
+      column: 4
+      cell_type: "shared_string"
+      value: "定数"
+    - coordinate: "E175"
+      row: 175
+      column: 5
+      cell_type: "number"
+      value: "5"
+    - coordinate: "F175"
+      row: 175
+      column: 6
+      cell_type: "boolean"
+      value: "0"
+    - coordinate: "D176"
+      row: 176
+      column: 4
+      cell_type: "shared_string"
+      value: "定数+1"
+    - coordinate: "E176"
+      row: 176
+      column: 5
+      cell_type: "number"
+      value: "6"
+    - coordinate: "F176"
+      row: 176
+      column: 6
+      cell_type: "boolean"
+      value: "1"
+    - coordinate: "A177"
+      row: 177
+      column: 1
+      cell_type: "shared_string"
+      value: ";"
+    - coordinate: "D177"
+      row: 177
+      column: 4
+      cell_type: "shared_string"
+      value: "最大値"
+    - coordinate: "E177"
+      row: 177
+      column: 5
+      cell_type: "number"
+      value: "255"
+    - coordinate: "F177"
+      row: 177
+      column: 6
+      cell_type: "boolean"
+      value: "1"

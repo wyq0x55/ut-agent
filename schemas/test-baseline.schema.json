@@ -18,6 +18,20 @@
         "mcdc_enabled": {"type": "boolean"},
         "approved_exceptions": {"type": "array", "items": {"type": "string"}},
         "source": {"type": "object"},
+        "rules": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["rule_id", "source", "meaning", "status"],
+            "properties": {
+              "rule_id": {"type": "string", "minLength": 1},
+              "source": {"type": "string", "minLength": 1},
+              "meaning": {"type": "string", "minLength": 1},
+              "status": {"const": "approved"}
+            }
+          }
+        },
         "coverage": {"type": "object"},
         "condition_policy": {"type": "object"},
         "boundary_policy": {"type": "object"},

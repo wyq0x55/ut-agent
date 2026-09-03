@@ -1,0 +1,42 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://ut-agent.local/schema/project-corpus.json",
+  "title": "ut-agent ProjectCorpusManifest",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema_version", "project", "corpus", "evidence"],
+  "properties": {
+    "schema_version": {"const": 1},
+    "project": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["id", "context_manifest", "baseline", "scope"],
+      "properties": {
+        "id": {"type": "string", "minLength": 1},
+        "context_manifest": {"type": "string", "minLength": 1},
+        "baseline": {"type": "string", "pattern": "^[^@]+@[^@]+$"},
+        "scope": {"const": "all-indexed-functions"}
+      }
+    },
+    "corpus": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["index_csv", "product_root", "golden_root"],
+      "properties": {
+        "index_csv": {"type": "string", "minLength": 1},
+        "product_root": {"type": "string", "minLength": 1},
+        "golden_root": {"type": "string", "minLength": 1}
+      }
+    },
+    "evidence": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["baseline_document", "baseline_sheet", "baseline_revision"],
+      "properties": {
+        "baseline_document": {"type": "string", "minLength": 1},
+        "baseline_sheet": {"type": "string", "minLength": 1},
+        "baseline_revision": {"type": "string", "minLength": 1}
+      }
+    }
+  }
+}

@@ -40,6 +40,9 @@ def main(argv=None) -> int:
     if args.cmd == "psd-project":
         from .project import run_index
         return run_index(args)
+    if args.cmd == "validate-corpus":
+        from .project import run_validate_corpus
+        return run_validate_corpus(args)
     if args.cmd == "project":
         from .project import run_project
         return run_project(args)

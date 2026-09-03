@@ -71,7 +71,7 @@ def compare_project_with_gaps(project, *, baseline_ref: str) -> list[dict[str, A
     for unit in project.units:
         if unit.expected is None:
             continue
-        golden = unit.expected.parent / "TestCsv.csv"
+        golden = unit.expected
         result = compare_semantic_csv(
             unit.testcsv, golden, baseline_ref=baseline_ref, function=unit.name,
         )

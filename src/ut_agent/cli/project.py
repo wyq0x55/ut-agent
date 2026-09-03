@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import json
+import subprocess
 import sys
 from pathlib import Path
 
@@ -74,6 +75,76 @@ def run_index(args) -> int:
             file=sys.stderr,
         )
     return 0 if units else 1
+
+
+def _local_git_commit(root: Path) -> str:
+    result = subprocess.run(
+        ["git", "rev-parse", "HEAD"], cwd=str(root), check=False,
+        capture_output=True, text=True, encoding="utf-8",
+    )
+    commit = result.stdout.strip()
+    return commit if result.returncode == 0 and commit else "unknown"
+
+
+def run_validate_corpus(args) -> int:
+    """Run the explicit project loop, then compare its artifacts offline."""
+    from ut_agent.project import resolve_project_context
+    from ut_agent.reporting import (
+        build_corpus_validation_report,
+        load_corpus_manifest,
+        validate_corpus_paths,
+        write_corpus_validation_report,
+    )
+    from ut_agent.targets.winams.index import generate_project_from_index
+    from ut_agent import __version__
+
+    corpus_manifest = load_corpus_manifest(Path(args.manifest))
+    validate_corpus_paths(corpus_manifest)
+    context = resolve_project_context(
+        corpus_manifest.context_manifest,
+        config_root=Path(args.config_root) if args.config_root else None,
+    )
+    if context.project_id != corpus_manifest.project_id:
+        raise ValueError(
+            f"语料项目与 context manifest 不一致: "
+            f"{corpus_manifest.project_id} != {context.project_id}"
+        )
+    if context.baseline_ref != corpus_manifest.baseline_ref:
+        raise ValueError(
+            f"语料 baseline 与 context manifest 不一致: "
+            f"{corpus_manifest.baseline_ref} != {context.baseline_ref}"
+        )
+    output_root = Path(args.out).resolve()
+    units = generate_project_from_index(
+        corpus_manifest.index_csv,
+        corpus_manifest.product_root,
+        output_root,
+        clang_extractor=(Path(args.clang_extractor)
+                         if args.clang_extractor else None),
+        rules_path=Path(args.rules) if args.rules else None,
+        defines=parse_defines(args.define),
+        call_max=args.call_max,
+        extractor_timeout=args.extract_timeout,
+        check_golden=False,
+        project_context=context,
+    )
+    report = build_corpus_validation_report(
+        corpus_manifest, context, units,
+        output_root=output_root,
+        generator_commit=_local_git_commit(Path(__file__).resolve().parents[3]),
+        generator_version=__version__,
+    )
+    report_path = write_corpus_validation_report(
+        report, output_root / "corpus-validation-report.json"
+    )
+    totals = report["totals"]
+    print(
+        f"[validate-corpus] {report['status']} "
+        f"functions={totals['functions']} gaps={totals['gap_count']} "
+        f"report={report_path}",
+        file=sys.stderr,
+    )
+    return 0 if report["status"] == "PASS" else 1
 
 
 def run_project(args) -> int:

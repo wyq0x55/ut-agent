@@ -66,6 +66,19 @@ def build_parser() -> argparse.ArgumentParser:
     index.add_argument("--rules")
     index.add_argument("--clang-extractor", default=None)
 
+    corpus = sub.add_parser(
+        "validate-corpus",
+        help="按项目语料 manifest 对全部索引函数生成并做 Golden 语义差异报告",
+    )
+    corpus.add_argument("--manifest", required=True, help="项目语料 manifest")
+    corpus.add_argument("--out", required=True, help="本轮生成及报告目录")
+    corpus.add_argument("--config-root")
+    corpus.add_argument("--call-max", type=int, default=5)
+    corpus.add_argument("--extract-timeout", type=float, default=600.0)
+    corpus.add_argument("-D", "--define", action="append", default=[], metavar="NAME=VALUE")
+    corpus.add_argument("--rules")
+    corpus.add_argument("--clang-extractor", default=None)
+
     arm = sub.add_parser("arm-build", help="使用 Arm GNU Toolchain 生成 ARM ELF")
     arm.add_argument("source", nargs="+")
     arm.add_argument("-I", "--include", action="append", default=[])

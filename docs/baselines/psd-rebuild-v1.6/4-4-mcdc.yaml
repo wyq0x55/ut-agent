@@ -1,0 +1,272 @@
+format_version: 1
+kind: "baseline-section-source"
+source:
+  file: "docs/単体テスト項目基準書_Ver.1.6.xlsx"
+  sheet: "PSD再構築"
+  revision: "Ver.1.6"
+  sha256: "d59762905c0566707ecf029ab188a8a05d13e2647c3866e383e83269655aba69"
+  semantic_status: "source_only"
+  language: "中文说明 + 日文原文证据"
+  translation_policy: "只翻译说明，不改写原始单元格内容"
+baseline:
+  id: "psd-rebuild-mcdc"
+  profile: "PSD再構築"
+  section_id: "4-4"
+  name: "条件判断中包含 AND、OR"
+  name_original: "条件判定にAND、OR条件が含まれる場合"
+  row_range: "179:208"
+  source_range: "PSD再構築!C179:F208"
+  category: "生成输入基准"
+  role: "generation_input"
+  role_zh: "生成输入基准"
+  generation_relevant: true
+  generation_relevant_zh: "是"
+  review_status: "needs_review"
+  review_status_zh: "需人工复核"
+  purpose: "AND/OR 条件组合及独立条件变化；共同变量按一个输入列处理。"
+  mapping_note: "AND/OR 条件组合及独立条件变化；共同变量按一个输入列处理。"
+  ai_guidance:
+    allowed: "只能使用已由 FunctionIR 的类型、AST 或 CFG 事实证明的内容生成候选用例。"
+    prohibited: "不得从原文描述、函数名或猜测补出源码事实；证据不足时保持 NEEDS_REVIEW。"
+  human_review_points:
+    - "确认该基准是否适用于当前产品和目标函数。"
+    - "确认输入值、预期值、Stub、Oracle 和寄存器/I-O 事实都有来源。"
+    - "确认是否存在项目例外；例外必须记录理由和来源，不直接静默放宽。"
+  artifact_yaml: "docs/baselines/psd-rebuild-v1.6/4-4-mcdc.yaml"
+  artifact_markdown: "docs/baselines/psd-rebuild-v1.6/4-4-mcdc.md"
+  cells:
+    - coordinate: "C179"
+      row: 179
+      column: 3
+      cell_type: "shared_string"
+      value: "4-4"
+    - coordinate: "D179"
+      row: 179
+      column: 4
+      cell_type: "shared_string"
+      value: "条件判定にAND、OR条件が含まれる場合"
+    - coordinate: "D180"
+      row: 180
+      column: 4
+      cell_type: "shared_string"
+      value: "・AND条件の場合"
+    - coordinate: "D181"
+      row: 181
+      column: 4
+      cell_type: "shared_string"
+      value: "例．If(( 条件式１ ) && ( 条件式２ ))"
+    - coordinate: "D182"
+      row: 182
+      column: 4
+      cell_type: "shared_string"
+      value: "条件式２をTrueになる条件で固定し、条件式１の入力値を組み合わせる"
+    - coordinate: "D183"
+      row: 183
+      column: 4
+      cell_type: "shared_string"
+      value: "次に、条件式１をTrueになる条件で固定し、条件式２の入力値を組み合わせる"
+    - coordinate: "D185"
+      row: 185
+      column: 4
+      cell_type: "shared_string"
+      value: "条件式１"
+    - coordinate: "E185"
+      row: 185
+      column: 5
+      cell_type: "shared_string"
+      value: "条件式２"
+    - coordinate: "D186"
+      row: 186
+      column: 4
+      cell_type: "shared_string"
+      value: "T"
+    - coordinate: "E186"
+      row: 186
+      column: 5
+      cell_type: "shared_string"
+      value: "T"
+    - coordinate: "F186"
+      row: 186
+      column: 6
+      cell_type: "boolean"
+      value: "1"
+    - coordinate: "D187"
+      row: 187
+      column: 4
+      cell_type: "shared_string"
+      value: "F"
+    - coordinate: "E187"
+      row: 187
+      column: 5
+      cell_type: "shared_string"
+      value: "T"
+    - coordinate: "F187"
+      row: 187
+      column: 6
+      cell_type: "boolean"
+      value: "0"
+    - coordinate: "D188"
+      row: 188
+      column: 4
+      cell_type: "shared_string"
+      value: "T"
+    - coordinate: "E188"
+      row: 188
+      column: 5
+      cell_type: "shared_string"
+      value: "F"
+    - coordinate: "F188"
+      row: 188
+      column: 6
+      cell_type: "boolean"
+      value: "0"
+    - coordinate: "D190"
+      row: 190
+      column: 4
+      cell_type: "shared_string"
+      value: "・OR条件の場合"
+    - coordinate: "D191"
+      row: 191
+      column: 4
+      cell_type: "shared_string"
+      value: "例．If(( 条件式１ ) || ( 条件式２ ))"
+    - coordinate: "D192"
+      row: 192
+      column: 4
+      cell_type: "shared_string"
+      value: "条件式２をFalseになる条件で固定し、条件式１の入力値を組み合わせる"
+    - coordinate: "D193"
+      row: 193
+      column: 4
+      cell_type: "shared_string"
+      value: "次に、条件式１をFalseになる条件で固定し、条件式２の入力値を組み合わせる"
+    - coordinate: "D195"
+      row: 195
+      column: 4
+      cell_type: "shared_string"
+      value: "条件式１"
+    - coordinate: "E195"
+      row: 195
+      column: 5
+      cell_type: "shared_string"
+      value: "条件式２"
+    - coordinate: "D196"
+      row: 196
+      column: 4
+      cell_type: "boolean"
+      value: "0"
+    - coordinate: "E196"
+      row: 196
+      column: 5
+      cell_type: "boolean"
+      value: "0"
+    - coordinate: "F196"
+      row: 196
+      column: 6
+      cell_type: "boolean"
+      value: "0"
+    - coordinate: "D197"
+      row: 197
+      column: 4
+      cell_type: "boolean"
+      value: "0"
+    - coordinate: "E197"
+      row: 197
+      column: 5
+      cell_type: "boolean"
+      value: "1"
+    - coordinate: "F197"
+      row: 197
+      column: 6
+      cell_type: "boolean"
+      value: "1"
+    - coordinate: "D198"
+      row: 198
+      column: 4
+      cell_type: "boolean"
+      value: "1"
+    - coordinate: "E198"
+      row: 198
+      column: 5
+      cell_type: "boolean"
+      value: "0"
+    - coordinate: "F198"
+      row: 198
+      column: 6
+      cell_type: "boolean"
+      value: "1"
+    - coordinate: "D200"
+      row: 200
+      column: 4
+      cell_type: "shared_string"
+      value: "・条件式１と条件式２に共通の変数が使われている場合"
+    - coordinate: "D201"
+      row: 201
+      column: 4
+      cell_type: "shared_string"
+      value: "if文中に同じ変数が2回以上出てきても、入力値は１つとしてまとめる。"
+    - coordinate: "D202"
+      row: 202
+      column: 4
+      cell_type: "shared_string"
+      value: "例．If(( U1_DAT1 == u1_val_a ) || ( U1_DAT2 == u1_val_a ))      ※定数U1_DAT1の値は1, U1_DAT2の値は2とする"
+    - coordinate: "D203"
+      row: 203
+      column: 4
+      cell_type: "shared_string"
+      value: "値の区分"
+    - coordinate: "E203"
+      row: 203
+      column: 5
+      cell_type: "shared_string"
+      value: "入力値１"
+    - coordinate: "D204"
+      row: 204
+      column: 4
+      cell_type: "shared_string"
+      value: "最小値/定数値U1_DAT1-1"
+    - coordinate: "E204"
+      row: 204
+      column: 5
+      cell_type: "shared_string"
+      value: "u1_val_a = 0"
+    - coordinate: "D205"
+      row: 205
+      column: 4
+      cell_type: "shared_string"
+      value: "定数値U1_DAT1/定数値U1_DAT2-1"
+    - coordinate: "E205"
+      row: 205
+      column: 5
+      cell_type: "shared_string"
+      value: "u1_val_a = 1"
+    - coordinate: "D206"
+      row: 206
+      column: 4
+      cell_type: "shared_string"
+      value: "定数値U1_DAT2/定数値U1_DAT1+1"
+    - coordinate: "E206"
+      row: 206
+      column: 5
+      cell_type: "shared_string"
+      value: "u1_val_a = 2"
+    - coordinate: "D207"
+      row: 207
+      column: 4
+      cell_type: "shared_string"
+      value: "定数値U1_DAT2+1"
+    - coordinate: "E207"
+      row: 207
+      column: 5
+      cell_type: "shared_string"
+      value: "u1_val_a = 3"
+    - coordinate: "D208"
+      row: 208
+      column: 4
+      cell_type: "shared_string"
+      value: "最大値"
+    - coordinate: "E208"
+      row: 208
+      column: 5
+      cell_type: "shared_string"
+      value: "u1_val_a = 255"

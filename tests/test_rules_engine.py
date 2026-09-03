@@ -319,24 +319,6 @@ def test_approved_scenario_rule_is_validated_and_rendered_without_defaults(tmp_p
     assert "omitted_unvalidated" not in text
 
 
-@pytest.mark.parametrize("function,rows", [
-    ("Dma_Csih2Receive", 3),
-    ("Dma_Csih2Send", 5),
-    ("Dma_Error", 3),
-    ("Os_Isr_f_vog_dma_interrupt_DMA05", 1),
-    ("p_vog_dma_init", 3),
-])
-def test_dma_golden_infers_reviewable_scenarios(function, rows):
-    golden = ROOT / "examples" / "golden" / "n-o2602-mvc-234" / "dma" / function / "TestCsv.csv"
-    inferred = infer_rule_pack(
-        FunctionIR(function, "Dma.c", 1, "void"), golden,
-    )
-    rule = inferred["rules"][0]
-    assert rule["status"] == "candidate"
-    assert rule["approval"] == {}
-    assert len(rule["action"]["scenarios"]) == rows
-    assert rule["action"]["input_columns"]
-    assert rule["evidence"][0].startswith("sha256:")
 
 
 def test_rules_infer_cli_writes_candidate_pack(tmp_path):

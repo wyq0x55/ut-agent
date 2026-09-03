@@ -1,0 +1,427 @@
+format_version: 1
+kind: "baseline-section-source"
+source:
+  file: "docs/単体テスト項目基準書_Ver.1.6.xlsx"
+  sheet: "PSD再構築"
+  revision: "Ver.1.6"
+  sha256: "d59762905c0566707ecf029ab188a8a05d13e2647c3866e383e83269655aba69"
+  semantic_status: "source_only"
+  language: "中文说明 + 日文原文证据"
+  translation_policy: "只翻译说明，不改写原始单元格内容"
+baseline:
+  id: "psd-rebuild-mcdc"
+  profile: "PSD再構築"
+  section_id: "6-1"
+  name: "各种条件语句"
+  name_original: "色々な条件文"
+  row_range: "230:274"
+  source_range: "PSD再構築!B230:I274"
+  category: "生成输入基准"
+  role: "generation_input"
+  role_zh: "生成输入基准"
+  generation_relevant: true
+  generation_relevant_zh: "是"
+  review_status: "needs_review"
+  review_status_zh: "需人工复核"
+  purpose: "if/else-if、switch/default 和 for/while 的控制流、case 及循环次数。"
+  mapping_note: "if/else-if、switch/default 和 for/while 的控制流、case 及循环次数。"
+  ai_guidance:
+    allowed: "只能使用已由 FunctionIR 的类型、AST 或 CFG 事实证明的内容生成候选用例。"
+    prohibited: "不得从原文描述、函数名或猜测补出源码事实；证据不足时保持 NEEDS_REVIEW。"
+  human_review_points:
+    - "确认该基准是否适用于当前产品和目标函数。"
+    - "确认输入值、预期值、Stub、Oracle 和寄存器/I-O 事实都有来源。"
+    - "确认是否存在项目例外；例外必须记录理由和来源，不直接静默放宽。"
+  artifact_yaml: "docs/baselines/psd-rebuild-v1.6/6-1-control-flow.yaml"
+  artifact_markdown: "docs/baselines/psd-rebuild-v1.6/6-1-control-flow.md"
+  cells:
+    - coordinate: "B230"
+      row: 230
+      column: 2
+      cell_type: "number"
+      value: "6"
+    - coordinate: "C230"
+      row: 230
+      column: 3
+      cell_type: "shared_string"
+      value: "その他"
+    - coordinate: "C231"
+      row: 231
+      column: 3
+      cell_type: "shared_string"
+      value: "6-1"
+    - coordinate: "D231"
+      row: 231
+      column: 4
+      cell_type: "shared_string"
+      value: "色々な条件文"
+    - coordinate: "D233"
+      row: 233
+      column: 4
+      cell_type: "shared_string"
+      value: "条件式の種類"
+    - coordinate: "D235"
+      row: 235
+      column: 4
+      cell_type: "shared_string"
+      value: "if文"
+    - coordinate: "D236"
+      row: 236
+      column: 4
+      cell_type: "shared_string"
+      value: "4.条件判断文に従う"
+    - coordinate: "D238"
+      row: 238
+      column: 4
+      cell_type: "shared_string"
+      value: "else if文"
+    - coordinate: "D239"
+      row: 239
+      column: 4
+      cell_type: "shared_string"
+      value: "分岐元のif文と条件が重複しても、全ての条件を作成する。"
+    - coordinate: "D241"
+      row: 241
+      column: 4
+      cell_type: "shared_string"
+      value: "switch文"
+    - coordinate: "D242"
+      row: 242
+      column: 4
+      cell_type: "shared_string"
+      value: "期待通りに分岐が行われていることを確認する"
+    - coordinate: "D243"
+      row: 243
+      column: 4
+      cell_type: "shared_string"
+      value: "分岐条件の変数値を変えて、期待するcase文に移行するかを判定する。"
+    - coordinate: "D244"
+      row: 244
+      column: 4
+      cell_type: "shared_string"
+      value: "変数値の値は、各case文に移行する値、default文に移行する値、および型の最小値、最大値とする。"
+    - coordinate: "D246"
+      row: 246
+      column: 4
+      cell_type: "shared_string"
+      value: "例."
+    - coordinate: "F246"
+      row: 246
+      column: 6
+      cell_type: "shared_string"
+      value: "値の区分"
+    - coordinate: "G246"
+      row: 246
+      column: 7
+      cell_type: "shared_string"
+      value: "入力値"
+    - coordinate: "D247"
+      row: 247
+      column: 4
+      cell_type: "shared_string"
+      value: "switch( u1_val )"
+    - coordinate: "G247"
+      row: 247
+      column: 7
+      cell_type: "shared_string"
+      value: "u1_val"
+    - coordinate: "D248"
+      row: 248
+      column: 4
+      cell_type: "shared_string"
+      value: "{"
+    - coordinate: "F248"
+      row: 248
+      column: 6
+      cell_type: "shared_string"
+      value: "最小値/default"
+    - coordinate: "G248"
+      row: 248
+      column: 7
+      cell_type: "number"
+      value: "0"
+    - coordinate: "D249"
+      row: 249
+      column: 4
+      cell_type: "shared_string"
+      value: "    case 5:"
+    - coordinate: "F249"
+      row: 249
+      column: 6
+      cell_type: "shared_string"
+      value: "case 5-1"
+    - coordinate: "G249"
+      row: 249
+      column: 7
+      cell_type: "number"
+      value: "4"
+    - coordinate: "D250"
+      row: 250
+      column: 4
+      cell_type: "shared_string"
+      value: "        ～処理１～"
+    - coordinate: "F250"
+      row: 250
+      column: 6
+      cell_type: "shared_string"
+      value: "case 5"
+    - coordinate: "G250"
+      row: 250
+      column: 7
+      cell_type: "number"
+      value: "5"
+    - coordinate: "D251"
+      row: 251
+      column: 4
+      cell_type: "shared_string"
+      value: "    case 10:"
+    - coordinate: "F251"
+      row: 251
+      column: 6
+      cell_type: "shared_string"
+      value: "case 5+1"
+    - coordinate: "G251"
+      row: 251
+      column: 7
+      cell_type: "number"
+      value: "6"
+    - coordinate: "D252"
+      row: 252
+      column: 4
+      cell_type: "shared_string"
+      value: "        ～処理２～"
+    - coordinate: "F252"
+      row: 252
+      column: 6
+      cell_type: "shared_string"
+      value: "case 10-1"
+    - coordinate: "G252"
+      row: 252
+      column: 7
+      cell_type: "number"
+      value: "9"
+    - coordinate: "D253"
+      row: 253
+      column: 4
+      cell_type: "shared_string"
+      value: "    default :"
+    - coordinate: "F253"
+      row: 253
+      column: 6
+      cell_type: "shared_string"
+      value: "case 10"
+    - coordinate: "G253"
+      row: 253
+      column: 7
+      cell_type: "number"
+      value: "10"
+    - coordinate: "D254"
+      row: 254
+      column: 4
+      cell_type: "shared_string"
+      value: "}"
+    - coordinate: "F254"
+      row: 254
+      column: 6
+      cell_type: "shared_string"
+      value: "case 10+1"
+    - coordinate: "G254"
+      row: 254
+      column: 7
+      cell_type: "number"
+      value: "11"
+    - coordinate: "F255"
+      row: 255
+      column: 6
+      cell_type: "shared_string"
+      value: "最大値/default"
+    - coordinate: "G255"
+      row: 255
+      column: 7
+      cell_type: "number"
+      value: "255"
+    - coordinate: "F257"
+      row: 257
+      column: 6
+      cell_type: "shared_string"
+      value: "※case文の削除の場合は、削除された値（TRUE値）を設定し、default文が実行されることを確認"
+    - coordinate: "D258"
+      row: 258
+      column: 4
+      cell_type: "shared_string"
+      value: "for文、while文"
+    - coordinate: "D259"
+      row: 259
+      column: 4
+      cell_type: "shared_string"
+      value: "指定回数分ループを行っているかを判定する(ループ回数が期待する回数に対して過不足無いかを確認する)。"
+    - coordinate: "D260"
+      row: 260
+      column: 4
+      cell_type: "shared_string"
+      value: "winAMSで確認できない場合はシミュレータを使用して確認する。"
+    - coordinate: "D262"
+      row: 262
+      column: 4
+      cell_type: "shared_string"
+      value: "例：　※U1_IDX_MAX は5とする"
+    - coordinate: "D263"
+      row: 263
+      column: 4
+      cell_type: "shared_string"
+      value: "for(u1a_idx=0;U1_IDX_MAX > u1a_idx;u1a_idx++)"
+    - coordinate: "D264"
+      row: 264
+      column: 4
+      cell_type: "shared_string"
+      value: "{"
+    - coordinate: "D265"
+      row: 265
+      column: 4
+      cell_type: "shared_string"
+      value: "       u1_aray[u1a_idx] = U1_ZERO;"
+    - coordinate: "D266"
+      row: 266
+      column: 4
+      cell_type: "shared_string"
+      value: "       u1_index++;"
+    - coordinate: "D267"
+      row: 267
+      column: 4
+      cell_type: "shared_string"
+      value: "       stub();"
+    - coordinate: "D268"
+      row: 268
+      column: 4
+      cell_type: "shared_string"
+      value: "}"
+    - coordinate: "D269"
+      row: 269
+      column: 4
+      cell_type: "shared_string"
+      value: "初期値"
+    - coordinate: "D270"
+      row: 270
+      column: 4
+      cell_type: "shared_string"
+      value: "u1_aray[0]"
+    - coordinate: "E270"
+      row: 270
+      column: 5
+      cell_type: "shared_string"
+      value: "…"
+    - coordinate: "F270"
+      row: 270
+      column: 6
+      cell_type: "shared_string"
+      value: "u1_aray[4]"
+    - coordinate: "G270"
+      row: 270
+      column: 7
+      cell_type: "shared_string"
+      value: "u1_aray[5]"
+    - coordinate: "H270"
+      row: 270
+      column: 8
+      cell_type: "shared_string"
+      value: "u1_index"
+    - coordinate: "I270"
+      row: 270
+      column: 9
+      cell_type: "shared_string"
+      value: "stub_CNT"
+    - coordinate: "D271"
+      row: 271
+      column: 4
+      cell_type: "number"
+      value: "255"
+    - coordinate: "E271"
+      row: 271
+      column: 5
+      cell_type: "number"
+      value: "255"
+    - coordinate: "F271"
+      row: 271
+      column: 6
+      cell_type: "number"
+      value: "255"
+    - coordinate: "G271"
+      row: 271
+      column: 7
+      cell_type: "number"
+      value: "255"
+    - coordinate: "H271"
+      row: 271
+      column: 8
+      cell_type: "number"
+      value: "0"
+    - coordinate: "I271"
+      row: 271
+      column: 9
+      cell_type: "number"
+      value: "0"
+    - coordinate: "D272"
+      row: 272
+      column: 4
+      cell_type: "shared_string"
+      value: "期待値"
+    - coordinate: "D273"
+      row: 273
+      column: 4
+      cell_type: "shared_string"
+      value: "u1_aray[0]"
+    - coordinate: "E273"
+      row: 273
+      column: 5
+      cell_type: "shared_string"
+      value: "…"
+    - coordinate: "F273"
+      row: 273
+      column: 6
+      cell_type: "shared_string"
+      value: "u1_aray[4]"
+    - coordinate: "G273"
+      row: 273
+      column: 7
+      cell_type: "shared_string"
+      value: "u1_aray[5]"
+    - coordinate: "H273"
+      row: 273
+      column: 8
+      cell_type: "shared_string"
+      value: "u1_index"
+    - coordinate: "I273"
+      row: 273
+      column: 9
+      cell_type: "shared_string"
+      value: "stub_CNT"
+    - coordinate: "D274"
+      row: 274
+      column: 4
+      cell_type: "number"
+      value: "0"
+    - coordinate: "E274"
+      row: 274
+      column: 5
+      cell_type: "number"
+      value: "0"
+    - coordinate: "F274"
+      row: 274
+      column: 6
+      cell_type: "number"
+      value: "0"
+    - coordinate: "G274"
+      row: 274
+      column: 7
+      cell_type: "number"
+      value: "255"
+    - coordinate: "H274"
+      row: 274
+      column: 8
+      cell_type: "number"
+      value: "5"
+    - coordinate: "I274"
+      row: 274
+      column: 9
+      cell_type: "number"
+      value: "5"
