@@ -48,3 +48,14 @@ config/winams/standard.yaml
 - FunctionIR 和 generator version。
 
 缺失 baseline、版本不匹配、规则包未审批或 schema 不通过时停止正式生成。未知源码事实和未完成证据进入 review 状态，不能用默认值或占位产物伪装有效。
+
+## Runtime baseline approval
+
+An `approved` runtime baseline carries auditable approval metadata in the
+baseline document: authority, approver, decision date, scope, reason, and
+non-empty evidence references. The current decision record is
+[psd-rebuild@1.0 approval](baselines/psd-rebuild-v1.6/approval.md).
+
+The approval record is separate from source evidence. The source manifest may
+remain `source_only` / `needs_review`; those statuses are never promoted by
+the loader or by documentation cleanup.

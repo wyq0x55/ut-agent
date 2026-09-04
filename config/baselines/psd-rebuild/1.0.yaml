@@ -2,6 +2,13 @@ baseline:
   id: psd-rebuild
   version: "1.0"
   status: approved
+  approval:
+    authority: "repository-owner"
+    approved_by: "wyq0x55"
+    approved_at: "2026-09-03"
+    scope: "baseline-and-rules"
+    reason: "Explicit approval for runtime use of the source-mapped PSD baseline and its eight rules; source evidence remains separate."
+    evidence: ["docs/baselines/psd-rebuild-v1.6/approval.md", "docs/baselines/psd-rebuild-v1.6/manifest.yaml", "docs/baselines/psd-rebuild-v1.6/index.md"]
   source:
     document: "単体テスト項目基準書_Ver.1.6.xlsx"
     sheet: "PSD再構築"
