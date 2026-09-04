@@ -216,6 +216,44 @@ def compress_corpora(
         min_functions=min_functions,
         min_projects=min_projects,
     )
+    families_by_id = {
+        str(item.get("family_id")): item
+        for item in result.get("families", [])
+        if isinstance(item, dict)
+    }
+    # A CROSS_PROJECT label is only an eligibility classification.  Attach a
+    # separate, machine-readable leave-one-project-out result so approval can
+    # require an actual holdout check instead of trusting the classification.
+    for rule in result.get("candidate_pack", {}).get("rules", []):
+        if rule.get("match", {}).get("kind") != "semantic_family":
+            continue
+        family_id = str(rule.get("match", {}).get("family_id", ""))
+        family = families_by_id.get(family_id)
+        if family is None:
+            continue
+        projects = sorted(str(item) for item in family.get("projects", []))
+        folds = []
+        for held_out in projects:
+            training = [item for item in projects if item != held_out]
+            folds.append({
+                "held_out_project": held_out,
+                "training_projects": training,
+                "status": "PASS" if training else "FAIL",
+            })
+        validation = {
+            "strategy": "leave-one-project-out",
+            "status": (
+                "PASS"
+                if len(projects) >= min_projects
+                and bool(folds)
+                and all(item["status"] == "PASS" for item in folds)
+                else "FAIL"
+            ),
+            "project_count": len(projects),
+            "folds": folds,
+        }
+        rule["validation"] = validation
+        family["holdout_validation"] = validation
     result["source_corpora"] = [
         str(corpus.get("roots", {}).get("evidence", "")) for corpus in corpora
     ]

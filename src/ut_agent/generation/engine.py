@@ -5,7 +5,9 @@ from dataclasses import asdict
 from itertools import product
 from typing import Any
 
-from ut_agent.generation.boundary import control_candidates
+from ut_agent.generation.boundary import (
+    control_candidates, typed_boundary_points, typed_status_points,
+)
 from ut_agent.ir import Atom, Branch, FunctionIR, TypeInfo
 from ut_agent.generation.model import (
     Constraint, GenerationResult, NEEDS_REVIEW, RuleTrace, TestIntent,
@@ -774,6 +776,454 @@ def _remap_derived_candidates(ir: FunctionIR, candidates: dict) -> None:
         candidates.pop(control.name, None)
 
 
+def _repeated_or_variants(ir: FunctionIR, baseline: Any,
+                          obligation: Any,
+                          assignment: dict[str, Any]) -> tuple[dict[str, Any], ...] | None:
+    """Return MC/DC witnesses for a repeated-variable equality OR chain.
+
+    Repeated-variable conditions are one input dimension.  The independent
+    true witnesses are the distinct equality literals; the false side uses
+    the first and last extractor-proven values outside those literals.  This
+    is the typed form of the baseline's common-variable situation and avoids
+    a function-specific scenario table.
+    """
+    if getattr(obligation, "kind", None) != "mcdc":
+        return None
+    branch = next(
+        (item for item in ir.branches
+         if item.bid == getattr(obligation, "branch_id", None)), None,
+    )
+    if (branch is None or branch.connective != "||"
+            or len(branch.atoms) < 2):
+        return None
+    atoms = branch.atoms
+    controls = []
+    for atom in atoms:
+        control = next(
+            (item for item in ir.control_vars
+             if _norm(item.name) == _norm(atom.var)
+             or _norm(item.var) == _norm(atom.var)), None,
+        )
+        if control is None:
+            return None
+        controls.append(control)
+    if not controls or any(_norm(item.name) != _norm(controls[0].name)
+                           for item in controls):
+        return None
+    if any(atom.op != "==" or atom.boundary is None for atom in atoms):
+        return None
+    try:
+        index = int(obligation.condition_index)
+    except (TypeError, ValueError):
+        return None
+    if index < 0 or index >= len(atoms):
+        return None
+
+    candidates = control_candidates(
+        ir, boundary_policy=getattr(baseline, "boundary_policy", None),
+    )
+    entry = candidates.get(controls[0].name, {})
+    values = sorted(entry.get("values", ()))
+    literals = {atom.boundary for atom in atoms}
+    if obligation.outcome:
+        target_values = [atoms[index].boundary]
+    else:
+        outside = [value for value in values if value not in literals]
+        if not outside:
+            return None
+        target_values = [outside[0], outside[-1]]
+
+    variants: list[dict[str, Any]] = []
+    for value in target_values:
+        trial = dict(assignment)
+        trial[controls[0].name] = value
+        _clear_derived_bindings(trial, ir, {controls[0].name})
+        env = _control_env(trial, ir)
+        try:
+            atom_values = [evaluate_atom(atom, env) for atom in atoms]
+            expected_others = False
+            independent = (
+                atom_values[index] == obligation.outcome
+                and all(value is expected_others
+                        for pos, value in enumerate(atom_values)
+                        if pos != index)
+                and evaluate_branch(branch, env) == bool(obligation.outcome)
+                and branch_path_reachable(ir, branch, env) is True
+            )
+        except (KeyError, TypeError, ValueError):
+            independent = False
+        if independent:
+            variants.append(trial)
+    return tuple(variants) or (dict(assignment),)
+
+
+def _logical_status_variants(ir: FunctionIR, baseline: Any,
+                             obligation: Any,
+                             assignment: dict[str, Any]
+                             ) -> tuple[dict[str, Any], ...] | None:
+    """Expand the typed status/global-field situation in a two-atom AND.
+
+    Some embedded predicates combine a stub status with a request/category
+    field selected through an array index.  The baseline keeps one MC/DC
+    truth-vector witness, while the target contract also retains the
+    extractor-proven categorical values that preserve that vector.  Vary one
+    semantic input dimension at a time; never build a Cartesian product or
+    infer values from a function name.
+    """
+    if (getattr(obligation, "kind", None) != "mcdc"
+            or getattr(obligation, "condition_index", None) is None):
+        return None
+    branch = next(
+        (item for item in ir.branches
+         if item.bid == getattr(obligation, "branch_id", None)), None,
+    )
+    if (branch is None or branch.connective != "&&"
+            or len(branch.atoms) != 2):
+        return None
+    controls = []
+    for atom in branch.atoms:
+        controls.append(next(
+            (item for item in ir.control_vars
+             if _norm(item.name) == _norm(atom.var)
+             or _norm(item.var) == _norm(atom.var)), None,
+        ))
+    stub_indexes = [
+        index for index, control in enumerate(controls)
+        if control is not None and control.source == "stub"
+    ]
+    if len(stub_indexes) != 1:
+        return None
+    stub_index = stub_indexes[0]
+    field_index = 1 - stub_index
+    field = branch.atoms[field_index]
+    field_key = next(
+        (key for key in assignment if _norm(key) == _norm(field.var)), None,
+    )
+    if field_key is None or field.boundary is None or field.type_info is None:
+        return None
+    stub = branch.atoms[stub_index]
+    if stub.boundary is None:
+        return None
+    candidates = control_candidates(
+        ir, boundary_policy=getattr(baseline, "boundary_policy", None),
+    )
+    stub_control = controls[stub_index]
+    stub_values = tuple(sorted(
+        candidates.get(stub_control.name, {}).get("values", ())
+    ))
+    field_values = typed_status_points(
+        field.boundary, field.type_info,
+        getattr(baseline, "boundary_policy", None),
+    )
+    if not stub_values or not field_values:
+        return None
+
+    variants: list[dict[str, Any]] = [dict(assignment)]
+    try:
+        selected_index = int(obligation.condition_index)
+    except (TypeError, ValueError):
+        return None
+    if selected_index != stub_index:
+        return tuple(variants)
+
+    if bool(obligation.outcome):
+        # Keep the stub TRUE and retain additional categorical values for the
+        # global field that still makes its comparison atom TRUE.
+        for value in field_values:
+            if value == assignment.get(field_key):
+                continue
+            trial = dict(assignment)
+            trial[field_key] = value
+            try:
+                env = _control_env(trial, ir)
+                atom_values = [evaluate_atom(atom, env) for atom in branch.atoms]
+                valid = (
+                    atom_values[selected_index] is bool(obligation.outcome)
+                    and all(value is True for index, value in enumerate(atom_values)
+                            if index != selected_index)
+                    and evaluate_branch(branch, env) is True
+                    and branch_path_reachable(ir, branch, env) is True
+                )
+            except (KeyError, TypeError, ValueError):
+                valid = False
+            if valid:
+                variants.append(trial)
+    else:
+        # For the FALSE stub witness, retain the non-boundary status codes
+        # that keep the other atom TRUE.
+        current = assignment.get(stub_control.name)
+        for value in stub_values:
+            if value == current:
+                continue
+            trial = dict(assignment)
+            trial[stub_control.name] = value
+            _clear_derived_bindings(trial, ir, {stub_control.name})
+            try:
+                env = _control_env(trial, ir)
+                atom_values = [evaluate_atom(atom, env) for atom in branch.atoms]
+                valid = (
+                    atom_values[selected_index] is bool(obligation.outcome)
+                    and all(value is True for index, value in enumerate(atom_values)
+                            if index != selected_index)
+                    and evaluate_branch(branch, env) is False
+                    and branch_path_reachable(ir, branch, env) is True
+                )
+            except (KeyError, TypeError, ValueError):
+                valid = False
+            if valid:
+                variants.append(trial)
+    return tuple(variants)
+
+
+def _clear_derived_bindings(values: dict[str, Any], ir: FunctionIR,
+                            drivers: set[str]) -> None:
+    """Remove stale automatic locals before replaying a driver value.
+
+    A solver result contains the derived value that made its witness
+    executable.  When a coverage family varies the underlying table index,
+    retaining that local would make the new driver and the old derived value
+    disagree.  The next ``_control_env`` call then resolves the value again
+    from the extractor-owned origin relation.
+    """
+    normalized = {_norm(item) for item in drivers}
+    for control in ir.control_vars:
+        origin = _origin_record(control.value_origin)
+        if not isinstance(origin, dict):
+            continue
+        if origin.get("kind") != "const_table_field":
+            continue
+        driver = _norm(str(origin.get("driver", "")))
+        if driver not in normalized:
+            continue
+        values.pop(control.name, None)
+        values.pop(control.var, None)
+
+
+def _index_driver_limit(ir: FunctionIR, driver_name: str) -> int | None:
+    """Return the proven common bound for one dynamic index driver.
+
+    A table may contain a sentinel entry that is not present in a companion
+    buffer.  The executable domain is therefore the intersection of the
+    extractor-recorded array bounds for objects indexed by the same driver,
+    not the size of whichever table happened to produce a derived value.
+    """
+    wanted = _norm(driver_name)
+    limits: list[int] = []
+    for raw in ir.global_objects:
+        drivers = {_norm(item) for item in getattr(raw, "index_drivers", [])}
+        if wanted not in drivers:
+            continue
+        sizes = getattr(raw, "array_sizes", [])
+        if not sizes:
+            continue
+        try:
+            limit = int(sizes[0])
+        except (TypeError, ValueError):
+            continue
+        if limit > 0:
+            limits.append(limit)
+    return min(limits) if limits else None
+
+
+def _ancestor_branches(ir: FunctionIR, branch) -> tuple:
+    """Return lexical branch parents from the extractor's parent_bid facts."""
+    by_id = {item.bid: item for item in ir.branches}
+    result = []
+    parent_id = getattr(branch, "parent_bid", None)
+    while parent_id in by_id:
+        parent = by_id[parent_id]
+        result.append(parent)
+        parent_id = getattr(parent, "parent_bid", None)
+    return tuple(result)
+
+
+def _ancestor_uses_driver(ir: FunctionIR, branch, driver_name: str) -> bool:
+    """Detect an index already participating in an enclosing branch.
+
+    A nested branch over the same array index is a local viewpoint of the
+    enclosing scenario.  Expanding it to every array element would duplicate
+    the parent scenario rather than add a new semantic obligation.  This is
+    determined from typed control origins and expression variables, never
+    from a function name or a Golden row.
+    """
+    wanted = _norm(driver_name)
+    controls = {control.name: control for control in ir.control_vars}
+    controls.update({_norm(control.var): control for control in ir.control_vars})
+    for parent in _ancestor_branches(ir, branch):
+        for atom in parent.atoms:
+            if wanted == _norm(atom.var) or wanted in _norm(atom.var):
+                return True
+            control = controls.get(atom.var) or controls.get(_norm(atom.var))
+            origin = _origin_record(control.value_origin) if control else None
+            if isinstance(origin, dict) and wanted == _norm(
+                    str(origin.get("driver", ""))):
+                return True
+    return False
+
+
+def _clip_index_candidates(ir: FunctionIR, candidates: dict) -> None:
+    """Clip generated index witnesses to the extractor-proven common domain.
+
+    ``_remap_derived_candidates`` can move a finite table relation onto its
+    index driver, but the relation alone may include a sentinel entry that is
+    absent from a companion buffer.  Keep the clipping at the generic input
+    boundary so branch, condition, and boundary obligations all share the
+    same executable array domain.
+    """
+    for name, entry in candidates.items():
+        limit = _index_driver_limit(ir, name)
+        if limit is None:
+            continue
+        values = {
+            value for value in entry.get("values", set())
+            if isinstance(value, int) and not isinstance(value, bool)
+            and 0 <= value < limit
+        }
+        if values:
+            values.add(limit - 1)
+        entry["values"] = values
+
+
+def _coverage_variants(ir: FunctionIR, baseline: Any,
+                       obligation: Any,
+                       assignment: dict[str, Any]) -> tuple[dict[str, Any], ...]:
+    """Expand one proof witness for an extractor-proven table-index case.
+
+    The array policy describes a semantic situation, not a function-specific
+    exception: when a branch compares a value produced by a finite constant
+    table, every table index is an executable viewpoint.  The C++ extractor
+    supplies the table relation and its driver; this helper only replays that
+    typed relation and never reads a Golden or parses source text.
+    """
+    repeated_or = _repeated_or_variants(ir, baseline, obligation, assignment)
+    if repeated_or is not None:
+        return repeated_or
+    logical_status = _logical_status_variants(
+        ir, baseline, obligation, assignment,
+    )
+    if logical_status is not None:
+        return logical_status
+    if (getattr(obligation, "kind", None) != "branch"
+            or getattr(obligation, "outcome", None) is None
+            or not bool(getattr(baseline, "array_policy", {}).get(
+                "fixed_index", False))):
+        return (dict(assignment),)
+    branch = next(
+        (item for item in ir.branches
+         if item.bid == getattr(obligation, "branch_id", None)), None,
+    )
+    if branch is None:
+        return (dict(assignment),)
+    by_name = {str(control.name): control for control in ir.control_vars}
+    by_var = {_norm(control.var): control for control in ir.control_vars}
+    drivers: dict[str, list[int]] = {}
+    for atom in branch.atoms:
+        control = by_name.get(str(atom.var)) or by_var.get(_norm(atom.var))
+        origin = _origin_record(control.value_origin) if control else None
+        if (not isinstance(origin, dict)
+                or origin.get("kind") != "const_table_field"):
+            continue
+        driver_name = str(origin.get("driver", ""))
+        driver = by_name.get(driver_name) or by_var.get(_norm(driver_name))
+        table_values = origin.get("table_values")
+        if driver is None or not isinstance(table_values, dict):
+            continue
+        indexes: list[int] = []
+        for raw_index in table_values:
+            try:
+                indexes.append(int(raw_index))
+            except (TypeError, ValueError):
+                continue
+        if indexes:
+            limit = _index_driver_limit(ir, driver.name)
+            if limit is not None:
+                indexes = [index for index in indexes if 0 <= index < limit]
+            if indexes:
+                drivers[driver.name] = sorted(set(indexes))
+
+    # A direct scalar comparison over a dynamic array index is the same
+    # fixed-index coverage family even when no derived table field participates
+    # in the predicate.  Do not expand a driver that already has a derived
+    # table relation: in that situation the branch's typed table witnesses are
+    # the controlling domain and expanding the raw parameter would duplicate
+    # or invent cases for the same semantic situation.
+    derived_drivers = {
+        _norm(str(_origin_record(control.value_origin).get("driver", "")))
+        for control in ir.control_vars
+        if isinstance(_origin_record(control.value_origin), dict)
+        and _origin_record(control.value_origin).get("kind") == "const_table_field"
+    }
+    for atom in branch.atoms:
+        control = by_name.get(str(atom.var)) or by_var.get(_norm(atom.var))
+        if control is None:
+            continue
+        if control.source not in {"param", "global", "local_from_global"}:
+            continue
+        limit = _index_driver_limit(ir, control.name)
+        if limit is not None:
+            if (_norm(control.name) in derived_drivers
+                    and not _ancestor_uses_driver(ir, branch, control.name)):
+                continue
+            if _ancestor_uses_driver(ir, branch, control.name):
+                # Keep the approved typed boundary representatives for a
+                # nested viewpoint.  The common index domain's endpoints are
+                # already present after candidate clipping.
+                indexes = list(typed_boundary_points(
+                    getattr(atom, "boundary", None),
+                    getattr(atom, "type_info", None),
+                    getattr(baseline, "boundary_policy", None),
+                ))
+                indexes = [
+                    index for index in indexes
+                    if isinstance(index, int) and 0 <= index < limit
+                ]
+                indexes.extend((0, limit - 1))
+                # Preserve the solver's reachable witness even when the
+                # enclosing branch excludes the lowest table indexes.  The
+                # boundary representatives are an expansion of that witness,
+                # not a replacement for it.
+                current_index = assignment.get(control.name)
+                if (isinstance(current_index, int)
+                        and not isinstance(current_index, bool)
+                        and 0 <= current_index < limit):
+                    indexes.append(current_index)
+                indexes = sorted(set(indexes))
+                if not indexes:
+                    indexes = [0, limit - 1]
+                drivers.setdefault(control.name, indexes)
+            else:
+                drivers.setdefault(control.name, list(range(limit)))
+    if not drivers:
+        return (dict(assignment),)
+
+    # Multiple independent table drivers form a product.  Keep the same
+    # deterministic solver safety bound used by the generation pipeline.
+    variants: list[dict[str, Any]] = [dict(assignment)]
+    for driver_name in sorted(drivers):
+        expanded: list[dict[str, Any]] = []
+        for current in variants:
+            for index in drivers[driver_name]:
+                trial = dict(current)
+                trial[driver_name] = index
+                _clear_derived_bindings(trial, ir, {driver_name})
+                env = _control_env(trial, ir)
+                try:
+                    reachable = branch_path_reachable(ir, branch, env)
+                    matches = evaluate_branch(branch, env) == obligation.outcome
+                except (KeyError, TypeError, ValueError):
+                    continue
+                if reachable is True and matches:
+                    expanded.append(trial)
+                if len(expanded) >= 4096:
+                    break
+            if len(expanded) >= 4096:
+                break
+        variants = expanded
+        if not variants:
+            return (dict(assignment),)
+    return tuple(variants)
+
+
 def _pointer_initial_value(selected: dict[str, Any], param) -> Any | None:
     """Read the caller-owned pointee value when the AST exposed a read path."""
     name = str(param.name)
@@ -1500,9 +1950,13 @@ def _scenario_intents(ir: FunctionIR, rule: Rule) -> list[TestIntent]:
     return out
 
 
-def _generic_inputs(ir: FunctionIR) -> tuple[dict[str, list[Any]], dict[str, Any]]:
-    candidates = control_candidates(ir)
+def _generic_inputs(ir: FunctionIR,
+                    baseline: Any | None = None
+                    ) -> tuple[dict[str, list[Any]], dict[str, Any]]:
+    boundary_policy = getattr(baseline, "boundary_policy", None)
+    candidates = control_candidates(ir, boundary_policy=boundary_policy)
     _remap_derived_candidates(ir, candidates)
+    _clip_index_candidates(ir, candidates)
     loop_locals = _loop_only_local_controls(ir)
     derivable_locals = {
         str(item.get("name"))
@@ -1569,17 +2023,12 @@ def _generic_inputs(ir: FunctionIR) -> tuple[dict[str, list[Any]], dict[str, Any
         fixed.setdefault(name, 0)
     for name in ir.globals_used:
         fixed.setdefault(name, 0)
-    known_call_counts: dict[str, int] = {}
+    # Call-count state is an execution pre-state.  Slot capacity belongs to
+    # the stub declaration/column shape, not to each testcase's input value.
     for call in ir.calls:
         if _is_memory_helper(call) or call.ptr_call:
             continue
-        capacity = call.max_occurrences
-        if isinstance(capacity, int) and capacity >= 1:
-            known_call_counts[call.callee] = (
-                known_call_counts.get(call.callee, 0) + capacity
-            )
-    for callee, count in known_call_counts.items():
-        fixed[call_count_key(callee)] = count
+        fixed[call_count_key(call.callee)] = 0
     stub_input_columns, stub_return_columns = _semantic_call_columns(ir)
     for column in (*stub_input_columns, *stub_return_columns):
         fixed[column] = 0

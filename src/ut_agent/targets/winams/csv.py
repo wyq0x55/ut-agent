@@ -636,14 +636,14 @@ def _winams_stub_pointee_columns(
 
 
 def _winams_stub_return_first(call) -> bool:
-    """Return whether a return slot precedes an unobservable pointer input."""
-    pointer_params = [param for param in call.params if param.is_ptr]
-    if not call.return_used or not pointer_params:
-        return False
-    return not any(
-        bool(call.caller_param_output.get(str(index), False))
-        for index, param in enumerate(call.params) if param.is_ptr
-    )
+    """Return whether a return slot precedes the declared call parameters.
+
+    The WinAMS call-slot contract follows the source declaration: ``ARG`` /
+    ``PTROUT`` fields come first and ``AMIN_return`` follows them.  Keeping
+    this as an explicit policy hook avoids deriving column order from whether
+    a pointer happens to be writable.
+    """
+    return False
 
 
 def _winams_return_fields(call) -> list[str]:
@@ -678,21 +678,29 @@ def _winams_stub_param_columns(ir: FunctionIR, call) -> list[str]:
 
 
 def _winams_stub_param_output_columns(ir: FunctionIR, call) -> list[str]:
-    """Expand only caller-observable stub argument write-back fields."""
-    raw_observable = call.caller_param_output
-    if not isinstance(raw_observable, dict):
-        raw_observable = {}
+    """Expand WinAMS ``PTROUT`` slots for direct pointer arguments.
+
+    A writable scalar pointee uses the slot as a write-back value when the
+    extractor proves that caller-visible relation.  A read-only/non-scalar
+    pointer still has a target-visible slot containing the passed address.
+    """
 
     capacity = _winams_stub_capacity(ir, call)
     columns: list[str] = []
+    semantic_outputs = semantic_call_output_columns(ir, call)
     for index, param in enumerate(call.params):
+        if not param.is_ptr:
+            slot_name = f"ARG{index:02d}_{call.callee}"
+            columns.extend(
+                f"{slot_name}[{slot}]" for slot in range(capacity)
+            )
+            continue
+        pointer_prefix = f"call:{call.callee}:param:{index}:"
+        if not any(str(key).startswith(pointer_prefix)
+                   for key in semantic_outputs):
+            continue
         slot_name = f"PTROUT{index:02d}_{call.callee}" if param.is_ptr \
             else f"ARG{index:02d}_{call.callee}"
-        raw_value = raw_observable.get(
-            str(index), raw_observable.get(index, False)
-        )
-        if param.is_ptr and not bool(raw_value):
-            continue
         pointee_columns = _winams_stub_pointee_columns(
             ir, call, index=index
         )
@@ -1232,12 +1240,12 @@ def _winams_columns(ir: FunctionIR) -> WinAMSProjection:
                     add_branch_input(
                         column, key,
                         column_line,
-                        # A read-only condition value is registered at the
-                        # source expression before a same-line stub ARG.  A
-                        # read/write static is a state value observed after
-                        # the call event, matching WinAMS's input/output
-                        # split for counter-like globals.
-                        priority=1 if obj.get("write") else 0,
+                        # A global that is read on the same source event as a
+                        # stub call is registered before that call's ARG
+                        # group.  Write-only state stays after the call.  The
+                        # distinction follows the extracted access direction,
+                        # not a function-specific ordering exception.
+                        priority=0 if obj.get("read") else 1,
                     )
 
     # A legacy IR may not have the Clang global_objects extension.  Keep its
@@ -1480,7 +1488,12 @@ def _branch_rows(branch, rows: list[dict], ir: FunctionIR,
 
 
 def _mcdc_label(branch, intent: TestIntent, ir: FunctionIR) -> str:
-    """Render the extractor-backed MC/DC truth vector as a WinAMS label."""
+    """Render the extractor-backed MC/DC truth vector as a base label.
+
+    The renderer adds one ``組合せ(...)`` wrapper only when a second row has
+    the same truth vector.  Keeping that distinction here reproduces the
+    Golden convention without ever using the Golden text as a rule input.
+    """
     try:
         env = _control_env(intent.inputs, ir)
         atom_values = [evaluate_atom(atom, env) for atom in branch.atoms]
@@ -1489,10 +1502,72 @@ def _mcdc_label(branch, intent: TestIntent, ir: FunctionIR) -> str:
         # A validated MC/DC intent should always have enough typed facts for
         # this projection.  Keep a reviewable label if an older IR cannot
         # replay the truth vector instead of inventing a data value.
-        return "組合せ(MC/DC)"
+        return "MC/DC"
     connective = branch.connective or "?"
     vector = connective.join("T" if value else "F" for value in atom_values)
-    return f"組合せ({vector}=>{'T' if decision else 'F'})"
+    return f"{vector}=>{'T' if decision else 'F'}"
+
+
+def _intent_truth_key(intent: TestIntent) -> tuple[tuple[bool, ...], bool] | None:
+    """Read the evaluator's truth vector without re-parsing condition text."""
+    semantic = intent.semantic if isinstance(intent.semantic, dict) else {}
+    vector = semantic.get("truth_vector")
+    if not isinstance(vector, dict):
+        return None
+    conditions = vector.get("conditions")
+    decision = vector.get("decision")
+    if not isinstance(conditions, (list, tuple)) or not isinstance(decision, bool):
+        return None
+    return tuple(bool(value) for value in conditions), decision
+
+
+def _ordered_logical_intents(branch, items: list[TestIntent], ir: FunctionIR) -> list[TestIntent]:
+    """Deduplicate MC/DC witnesses while keeping WinAMS combination order."""
+    unique: list[TestIntent] = []
+    seen: set[tuple] = set()
+    for item in items:
+        truth = _intent_truth_key(item)
+        if truth is None:
+            continue
+        signature = (truth, tuple(sorted(
+            (str(key), repr(value)) for key, value in item.inputs.items()
+        )))
+        if signature in seen:
+            continue
+        seen.add(signature)
+        unique.append(item)
+
+    def key(item: TestIntent) -> tuple:
+        truth = _intent_truth_key(item)
+        if truth is None:
+            return (2, 2, 0, 0, item.case_id)
+        conditions, decision = truth
+        # The canonical MC/DC pair members establish the Golden sequence.
+        # Extra typed representatives carry a detached ``:variant:``
+        # obligation and follow all canonical members, even when they share
+        # the same truth vector.
+        variant_rank = 1 if ":variant:" in str(item.obligation.oid) else 0
+        if branch.connective == "||":
+            if decision:
+                true_index = next(
+                    (index for index, value in enumerate(conditions) if value),
+                    len(conditions),
+                )
+                return (variant_rank, 0, true_index, 0, item.case_id)
+            return (variant_rank, 1, 0, 0, item.case_id)
+        if branch.connective == "&&":
+            if decision:
+                return (variant_rank, 0, 0, 0, item.case_id)
+            changed = next(
+                (index for index, value in enumerate(conditions) if not value),
+                len(conditions),
+            )
+            # WinAMS emits the last condition's FALSE combination before the
+            # preceding one for a left-to-right AND chain.
+            return (variant_rank, 1, -changed, 0, item.case_id)
+        return (variant_rank, 2, 0, 0, item.case_id)
+
+    return sorted(unique, key=key)
 
 
 def _pointer_address_value(key: str | None, ir: FunctionIR) -> int | None:
@@ -1837,29 +1912,116 @@ def render_intents_csv(ir: FunctionIR, result: GenerationResult, *,
                             out.append(f";$L$,{label_text}")
                             out.extend(data_line(item) for item in matching)
             else:
-                for outcome, label_text in ((True, "TRUE"), (False, "FALSE")):
-                    dead = branch.constant_value is not None and branch.constant_value != outcome
-                    suffix = f" {_DEAD_BRANCH_COMMENT}" if dead else ""
-                    out.append(f";$L$,{label_text}{suffix}")
-                    if not dead:
-                        out.extend(data_line(item) for item in grouped.get(
+                logical = (
+                    len(branch.atoms) >= 2
+                    and branch.connective in {"&&", "||"}
+                )
+                if logical:
+                    # For a logical branch, branch/condition/boundary rows are
+                    # intermediate obligations.  The WinAMS viewpoint is the
+                    # solved combination itself; retaining all of those
+                    # intermediate rows would duplicate the Golden sequence.
+                    logical_items = _ordered_logical_intents(
+                        branch,
+                        [item for item in intents
+                         if item.obligation.branch_id == branch.bid
+                         and item.obligation.kind == "mcdc"],
+                        ir,
+                    )
+                    emitted_truth: set[tuple[tuple[bool, ...], bool]] = set()
+                    for item in logical_items:
+                        truth = _intent_truth_key(item)
+                        label_text = _mcdc_label(branch, item, ir)
+                        # The first witness for a truth vector gets the base
+                        # combination label; additional representative values
+                        # remain explicit but are marked as combinations.
+                        if truth in emitted_truth:
+                            label_text = f"組合せ({label_text})"
+                        emitted_truth.add(truth)
+                        out.append(f";$L$,{label_text}")
+                        out.append(data_line(item))
+                else:
+                    branch_items = {
+                        outcome: [item for item in grouped.get(
                             (branch.bid, outcome), []
-                        ) if item.obligation.kind != "mcdc")
+                        ) if item.obligation.kind == "branch"]
+                        for outcome in (True, False)
+                    }
+                    boundary_items = [
+                        item for item in intents
+                        if item.obligation.branch_id == branch.bid
+                        and item.obligation.kind == "boundary"
+                    ]
 
-                # MC/DC vectors are first-class combination viewpoints.  Do
-                # not hide them under TRUE/FALSE: the label is derived from
-                # the solved FunctionIR witness and the rows remain the same
-                # validated intents.
-                combinations: dict[str, list[TestIntent]] = {}
-                for item in intents:
-                    if (item.obligation.branch_id == branch.bid
-                            and item.obligation.kind == "mcdc"):
-                        combinations.setdefault(
-                            _mcdc_label(branch, item, ir), []
-                        ).append(item)
-                for label_text, group in combinations.items():
-                    out.append(f";$L$,{label_text}")
-                    out.extend(data_line(item) for item in group)
+                    def projected_signature(item: TestIntent) -> tuple:
+                        values = []
+                        for comment, key in input_columns:
+                            values.append((
+                                "in", comment, key,
+                                repr(_intent_value(item.inputs, comment, key)),
+                            ))
+                        for comment, key in output_columns:
+                            values.append((
+                                "out", comment, key,
+                                repr(_intent_value(item.expected, comment, key)),
+                            ))
+                        return tuple(values)
+
+                    def unique_items(items: list[TestIntent]) -> list[TestIntent]:
+                        result: list[TestIntent] = []
+                        seen: set[tuple] = set()
+                        for item in items:
+                            signature = projected_signature(item)
+                            if signature in seen:
+                                continue
+                            seen.add(signature)
+                            result.append(item)
+                        return result
+
+                    # A boundary obligation is a projected executable row as
+                    # well.  Attach it to the branch outcome observed by the
+                    # evaluator, so exact/adjacent/max representatives are
+                    # retained without inventing values in the renderer.
+                    for item in boundary_items:
+                        truth = _intent_truth_key(item)
+                        if truth is None:
+                            continue
+                        branch_items[truth[1]].append(item)
+                    branch_items = {
+                        outcome: unique_items(items)
+                        for outcome, items in branch_items.items()
+                    }
+                    # Explicitly approved replay scenarios use a distinct
+                    # obligation kind and may intentionally keep the default
+                    # description.  Preserve that target-neutral exception
+                    # when no generic branch obligations exist.
+                    if not any(branch_items.values()):
+                        branch_items = {
+                            outcome: [item for item in grouped.get(
+                                (branch.bid, outcome), []
+                            ) if item.obligation.kind not in {"mcdc", "case"}]
+                            for outcome in (True, False)
+                        }
+                    dead_outcomes = {
+                        outcome for outcome in (True, False)
+                        if branch.constant_value is not None
+                        and branch.constant_value != outcome
+                    }
+                    for outcome, label_text in ((True, "TRUE"), (False, "FALSE")):
+                        suffix = f" {_DEAD_BRANCH_COMMENT}" if outcome in dead_outcomes else ""
+                        out.append(f";$L$,{label_text}{suffix}")
+                        if outcome not in dead_outcomes and branch_items[outcome]:
+                            out.append(data_line(branch_items[outcome][0]))
+                    # The ordering baseline is base TRUE, base FALSE, then
+                    # remaining values in ascending driver order.  These
+                    # labels make the extra table-index viewpoints visible
+                    # instead of silently placing them in the base bucket.
+                    for outcome, label_text in ((True, "TRUE"), (False, "FALSE")):
+                        if outcome in dead_outcomes:
+                            continue
+                        for index, item in enumerate(branch_items[outcome][1:], 1):
+                            out.append(f";$L$,組合せ({label_text}({index}))")
+                            out.append(data_line(item))
 
             # Non-switch children are still kept under their parent branch.
             # Without a dedicated then/else range in the v3 schema, the
@@ -1878,15 +2040,17 @@ def render_intents_csv(ir: FunctionIR, result: GenerationResult, *,
 def render_suite_csv(ir: FunctionIR, suite, *,
                      source_label: str | None = None,
                      title: str | None = None) -> str:
-    """Render only a fully validated Baseline-driven ``TestSuite``.
+    """Render proof-backed intents from a Baseline-driven ``TestSuite``.
 
-    The older ``render_intents_csv`` API remains useful for direct adapter
-    tests, but project generation should use this gate so SAT/UNKNOWN or
-    missing Oracle evidence can never be silently projected to WinAMS.
+    A suite-level ``NEEDS_REVIEW`` status does not prevent comparison output.
+    Only intents whose own validation is complete are rendered; unresolved
+    obligations remain in ``test-intents.json`` and are never filled with a
+    default value.  Callers must retain the suite status and treat this as a
+    partial candidate until the suite is fully validated.
     """
-    intents = suite.require_winams()
+    intents = tuple(item for item in suite.intents if item.validation.valid)
     result = GenerationResult(
-        function=ir.name, status="VALIDATED", intents=tuple(intents),
+        function=ir.name, status=suite.status, intents=intents,
         rule_pack=suite.baseline_ref,
     )
     rendered = render_intents_csv(

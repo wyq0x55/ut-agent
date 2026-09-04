@@ -17,6 +17,7 @@ class Rule:
     priority: int = 100
     evidence: tuple[str, ...] = ()
     approval: dict[str, str] = field(default_factory=dict)
+    validation: dict[str, Any] = field(default_factory=dict)
 
     def matches(self, function: str, kind: str | None = None) -> bool:
         scoped = self.scope.get("function", "*")
@@ -90,7 +91,55 @@ def _parse_rule(raw: dict[str, Any]) -> Rule:
         priority=int(raw.get("priority", 100)),
         evidence=tuple(str(item) for item in raw.get("evidence", [])),
         approval={str(k): str(v) for k, v in dict(raw.get("approval", {})).items()},
+        validation=dict(raw.get("validation", {})),
     )
+
+
+_GENERIC_RULE_KINDS = frozenset({"semantic_family", "semantic_pattern"})
+
+
+def _generic_approval_errors(rule: Rule) -> tuple[str, ...]:
+    """Validate evidence required before a generic rule can be approved.
+
+    Function-scoped scenario matrices are replay evidence and are intentionally
+    outside this check.  Rules that claim to generalize a semantic situation
+    must be function-independent and carry an explicit leave-one-project-out
+    result.  The result is evidence metadata, not a value that generation can
+    fabricate.
+    """
+    kind = str(rule.match.get("kind", ""))
+    if kind not in _GENERIC_RULE_KINDS:
+        return ()
+    errors: list[str] = []
+    if rule.scope.get("function", "*") != "*":
+        errors.append("generic semantic rule 的 scope.function 必须为 *")
+    validation = rule.validation
+    if not isinstance(validation, dict):
+        errors.append("generic semantic rule 缺少 validation")
+        return tuple(errors)
+    if validation.get("strategy") != "leave-one-project-out":
+        errors.append("generic semantic rule 必须使用 leave-one-project-out 验证")
+    if validation.get("status") != "PASS":
+        errors.append("generic semantic rule 尚未通过跨项目留出验证")
+    try:
+        project_count = int(validation.get("project_count", 0))
+    except (TypeError, ValueError):
+        project_count = 0
+    if project_count < 2:
+        errors.append("generic semantic rule 至少需要两个项目证据")
+    folds = validation.get("folds")
+    if not isinstance(folds, list) or not folds:
+        errors.append("generic semantic rule 缺少留出验证 folds")
+    elif any(not isinstance(fold, dict) or fold.get("status") != "PASS"
+             for fold in folds):
+        errors.append("generic semantic rule 存在未通过的留出 fold")
+    return tuple(errors)
+
+
+def _validate_approved_rule(rule: Rule) -> None:
+    errors = _generic_approval_errors(rule)
+    if errors:
+        raise ValueError(f"规则 {rule.rule_id} 不满足批准条件: {'; '.join(errors)}")
 
 
 def validate_pack(pack: RulePack) -> RulePack:
@@ -102,6 +151,7 @@ def validate_pack(pack: RulePack) -> RulePack:
         seen.add(rule.rule_id)
         if rule.status != "approved":
             continue
+        _validate_approved_rule(rule)
         # Different semantic families/profile strategies may share a kind and
         # priority; only the same selector is ambiguous.
         selector = str(
@@ -178,6 +228,7 @@ def review_rule_pack(path: Path) -> dict[str, Any]:
                 "priority": rule.priority,
                 "evidence_count": len(rule.evidence),
                 "approval": bool(rule.approval),
+                "validation": rule.validation,
             }
             for rule in pack.rules
             if rule.rule_id not in {item.rule_id for item in BUILTIN_PACK.rules}
@@ -205,6 +256,7 @@ def approve_rule_pack(path: Path, output: Path, *, authority: str,
                 and (rule_ids is None or copy.get("id") in rule_ids)):
             copy["status"] = "approved"
             copy["approval"] = {"authority": authority, "reason": reason}
+            _validate_approved_rule(_parse_rule(copy))
             changed += 1
         rules.append(copy)
     if changed == 0:

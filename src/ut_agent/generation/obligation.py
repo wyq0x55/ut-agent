@@ -18,13 +18,6 @@ def _case_label(case) -> str:
     return f"case {case.label}:"
 
 
-def _policy_bool(section: dict, names: tuple[str, ...], default: bool) -> bool:
-    for name in names:
-        if name in section:
-            return bool(section[name])
-    return default
-
-
 def _obligation(baseline: TestBaseline, *, source_fact: str,
                 rule_id: str, project_rule_ref: str = "", **kwargs) -> TestObligation:
     return TestObligation(
@@ -56,32 +49,31 @@ def derive_obligations(ir: FunctionIR, baseline: TestBaseline,
             pack_version = payload.get("version")
             if pack_id and pack_version is not None:
                 project_rule_ref = f"{pack_id}@{pack_version}"
-    branch_enabled = _policy_bool(
-        baseline.coverage, ("branch_outcome", "branch"), True,
+    # These are the executable fields of the approved baseline contract.
+    # Keep the rule IDs tied to the approved source mapping instead of a
+    # Python implementation path such as ``baseline.boundary_policy.points``.
+    branch_enabled = bool(baseline.coverage.get("branch_outcome", False))
+    condition_enabled = bool(
+        baseline.condition_policy.get("condition_outcome", False)
     )
-    condition_enabled = _policy_bool(
-        baseline.condition_policy, ("condition_outcome", "condition"), False,
+    logical_connectives = set(
+        str(item) for item in baseline.condition_policy.get(
+            "logical_connectives", ()
+        )
     )
-    boundary_enabled = _policy_bool(
-        baseline.boundary_policy, ("obligations", "points"), False,
+    boundary_enabled = bool(baseline.boundary_policy.get("typed", False))
+    loop_enabled = bool(
+        baseline.loop_policy.get("iteration_count", False)
+        or baseline.loop_policy.get("boundary_state", False)
     )
-    loop_enabled = _policy_bool(
-        baseline.loop_policy, ("iteration_count", "boundary_state"), False,
-    )
-    switch_enabled = _policy_bool(
-        baseline.switch_policy, ("preserve_cases", "cases"), True,
-    )
+    switch_enabled = bool(baseline.switch_policy.get("preserve_cases", False))
+    include_default = bool(baseline.switch_policy.get("include_default", False))
     for branch in ir.branches:
         if branch.kind == "for":
             if loop_enabled:
-                rule_name = (
-                    "iteration_count"
-                    if baseline.loop_policy.get("iteration_count", False)
-                    else "boundary_state"
-                )
                 obligations.append(_obligation(
                     baseline, source_fact=f"branch:{branch.bid}",
-                    rule_id=f"baseline.loop_policy.{rule_name}",
+                    rule_id="psd.6.control",
                     oid=f"{branch.bid}:loop-entry", kind="loop",
                     branch_id=branch.bid, outcome=True,
                     boundary_class="loop-entry",
@@ -90,10 +82,12 @@ def derive_obligations(ir: FunctionIR, baseline: TestBaseline,
             continue
         if branch.kind == "switch" and branch.cases and switch_enabled:
             for index, case in enumerate(branch.cases):
+                if case.is_default and not include_default:
+                    continue
                 label = _case_label(case)
                 obligations.append(_obligation(
                     baseline, source_fact=f"branch:{branch.bid}",
-                    rule_id="baseline.switch_policy.preserve_cases",
+                    rule_id="psd.6.control",
                     oid=f"{branch.bid}:case:{index}", kind="case",
                     branch_id=branch.bid, description=label, case_label=label,
                 ))
@@ -106,17 +100,22 @@ def derive_obligations(ir: FunctionIR, baseline: TestBaseline,
             for outcome in outcomes:
                 obligations.append(_obligation(
                     baseline, source_fact=f"branch:{branch.bid}",
-                    rule_id="baseline.coverage.branch_outcome",
+                    rule_id="psd.4.compare",
                     oid=f"{branch.bid}:{'T' if outcome else 'F'}", kind="branch",
                     branch_id=branch.bid, outcome=outcome,
                     description=branch.cond_text or branch.cond_text_expanded,
                 ))
-        if condition_enabled:
+        condition_branch_enabled = condition_enabled and (
+            len(branch.atoms) <= 1
+            or not logical_connectives
+            or (branch.connective or "") in logical_connectives
+        )
+        if condition_branch_enabled:
             for index, _atom in enumerate(branch.atoms):
                 for desired in (True, False):
                     obligations.append(_obligation(
                         baseline, source_fact=f"branch:{branch.bid}:atom:{index}",
-                        rule_id="baseline.condition_policy.condition_outcome",
+                        rule_id="psd.4.compare",
                         oid=f"{branch.bid}:condition:{index}:"
                             f"{'T' if desired else 'F'}",
                         kind="condition", branch_id=branch.bid,
@@ -129,13 +128,14 @@ def derive_obligations(ir: FunctionIR, baseline: TestBaseline,
                     control = next((item for item in ir.control_vars
                                     if item.var == atom.var or item.name == atom.var), None)
                     type_info = control.type_info if control else None
-                for point in typed_boundary_points(atom.boundary, type_info):
+                for point in typed_boundary_points(
+                        atom.boundary, type_info, baseline.boundary_policy):
                     label = "exact" if point == atom.boundary else (
                         "below" if point < atom.boundary else "above"
                     )
                     obligations.append(_obligation(
                         baseline, source_fact=f"branch:{branch.bid}:atom:{index}",
-                        rule_id="baseline.boundary_policy.points",
+                        rule_id="psd.4.compare",
                         oid=f"{branch.bid}:boundary:{index}:{label}:{point}",
                         kind="boundary", branch_id=branch.bid,
                         boundary_class=label, condition_index=index,
@@ -146,7 +146,9 @@ def derive_obligations(ir: FunctionIR, baseline: TestBaseline,
         # project context, so it is deliberately disabled unless the caller
         # supplies the explicit switch.
         enabled = bool(mcdc_enabled)
-        if not enabled or len(branch.atoms) < 2:
+        if (not enabled or len(branch.atoms) < 2
+                or (logical_connectives
+                    and (branch.connective or "") not in logical_connectives)):
             continue
         if (branch.connective or "") not in {"&&", "||"}:
             continue
@@ -155,7 +157,7 @@ def derive_obligations(ir: FunctionIR, baseline: TestBaseline,
             for desired in (True, False):
                 obligations.append(_obligation(
                     baseline, source_fact=f"branch:{branch.bid}:atom:{index}",
-                    rule_id="baseline.condition_policy.mcdc",
+                    rule_id="psd.4.mcdc",
                     oid=f"{pair_id}:{'T' if desired else 'F'}",
                     kind="mcdc", branch_id=branch.bid,
                     outcome=desired, description=f"MC/DC atom {index}={'T' if desired else 'F'}",
@@ -164,10 +166,14 @@ def derive_obligations(ir: FunctionIR, baseline: TestBaseline,
     if not obligations:
         obligations.append(_obligation(
             baseline, source_fact=f"function:{ir.name}",
-            rule_id="baseline.coverage.function_entry",
+            rule_id="psd.6.control",
             oid="ENTRY", kind="execution", description="function entry",
         ))
     if project_rule_ref:
         obligations = [replace(item, project_rule_ref=project_rule_ref)
                        for item in obligations]
+    if mcdc_enabled is not None:
+        obligations = [replace(
+            item, project_mcdc_enabled=bool(mcdc_enabled)
+        ) for item in obligations]
     return tuple(obligations)

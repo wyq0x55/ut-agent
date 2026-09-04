@@ -35,5 +35,23 @@ def validate_baseline(baseline: TestBaseline) -> TestBaseline:
         raise ValueError(
             f"正式生成只接受 approved TestBaseline: {baseline.ref} ({baseline.status})"
         )
+    approved_rules = {
+        str(item.get("rule_id")) for item in baseline.rules
+        if isinstance(item, dict) and item.get("status") == "approved"
+    }
+    for section_name in (
+        "coverage", "condition_policy", "boundary_policy", "switch_policy",
+        "loop_policy", "array_policy", "stub_policy", "ordering_policy",
+    ):
+        section = getattr(baseline, section_name)
+        source_rules = section.get("source_rules", [])
+        if any(str(rule) not in approved_rules for rule in source_rules):
+            unknown = sorted(
+                str(rule) for rule in source_rules
+                if str(rule) not in approved_rules
+            )
+            raise ValueError(
+                f"{section_name}.source_rules 必须引用 approved rule: {unknown}"
+            )
     validate_baseline_mapping(baseline.to_dict())
     return baseline

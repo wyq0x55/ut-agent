@@ -82,7 +82,7 @@ def test_project_profile_can_disable_mcdc_without_changing_baseline_version():
     assert not any(item.obligation.pair_id for item in suite.intents)
 
 
-def test_unsat_obligation_is_not_projected_to_winams():
+def test_unsat_obligation_writes_partial_candidate_without_default_values():
     info = TypeInfo(
         canonical_type="unsigned char", kind="integer", bit_width=8,
         signed=False, min_value=0, max_value=3,
@@ -101,8 +101,13 @@ def test_unsat_obligation_is_not_projected_to_winams():
     assert solve_obligation(ir, obligations[0], _context().baseline).status == UNSAT
     suite = generate_suite(ir, _context())
     assert suite.status != "VALIDATED"
-    with pytest.raises(ValueError, match="未通过"):
-        render_suite_csv(ir, suite)
+    csv_text = render_suite_csv(ir, suite)
+    assert "#COMMENT" in csv_text
+    data_lines = [line for line in csv_text.splitlines()
+                  if line.startswith(",")]
+    assert data_lines
+    assert any(not intent.validation.valid for intent in suite.intents)
+    assert len(data_lines) < len(suite.intents)
 
 
 def test_missing_return_oracle_stays_needs_review():
@@ -169,7 +174,11 @@ def test_baseline_policy_can_request_condition_and_boundary_obligations():
     baseline = replace(
         context.baseline,
         condition_policy={"condition_outcome": True},
-        boundary_policy={"points": True},
+        boundary_policy={
+            "typed": True,
+            "representative_values": ["min", "median", "max"],
+            "adjacent_constant_values": True,
+        },
     )
     context = replace(context, baseline=baseline)
     suite = generate_suite(_branch_ir(), context)

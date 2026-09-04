@@ -2,20 +2,25 @@
 from __future__ import annotations
 
 from pathlib import Path
+from dataclasses import replace
 from types import SimpleNamespace
 
 from ut_agent.baseline import load_baseline
 from ut_agent.learning.compare import compare_testcsv
 from ut_agent.learning import label_kind, normalize_golden_csv, normalize_label
-from ut_agent.generation.boundary import control_candidates
+from ut_agent.generation.boundary import control_candidates, typed_boundary_points
 from ut_agent.generation.obligation import derive_obligations
 from ut_agent.generation.solver import solve_obligation
 from ut_agent.ir import Atom, Branch, ControlVar, FunctionIR, Param, TypeInfo, ValueOrigin
 from ut_agent.project import load_manifest
 from ut_agent.reporting import (
     STANDARD_GAP_CATEGORIES,
+    EQUIVALENT_REPRESENTATIVE,
+    PARTIAL_MATCH,
     compare_function_semantics,
+    match_semantic_cases,
     load_corpus_manifest,
+    preflight_corpus,
     validate_corpus_paths,
 )
 from ut_agent.targets.winams.csv import _pointer_column_key
@@ -41,6 +46,16 @@ def test_issue6_corpus_manifest_locks_all_indexed_functions():
     assert "baseline" not in manifest.to_dict()["project"]
 
 
+def test_issue6_missing_indexed_source_is_reported_as_blocked_fixture():
+    manifest = load_corpus_manifest(CORPUS)
+    blocked = preflight_corpus(
+        replace(manifest, product_root=ROOT / ".tmp" / "missing-issue6-product")
+    )
+    assert len(blocked) == 6
+    assert {item["status"] for item in blocked} == {"BLOCKED"}
+    assert {item["reason"] for item in blocked} == {"FIXTURE_MISSING"}
+
+
 def test_issue6_baseline_keeps_source_mapped_approved_rules():
     baseline = load_baseline(ROOT / "config" / "baselines" / "psd-rebuild" / "1.0.yaml")
     assert len(baseline.rules) == 8
@@ -48,6 +63,88 @@ def test_issue6_baseline_keeps_source_mapped_approved_rules():
     assert {item["rule_id"] for item in baseline.rules} >= {
         "psd.0-2.typed-domain", "psd.4.mcdc", "psd.6.order",
     }
+
+
+def test_issue6_boundary_policy_uses_formal_representative_fields():
+    info = TypeInfo(
+        canonical_type="unsigned char", kind="integer", bit_width=8,
+        signed=False, min_value=0, max_value=10,
+    )
+    assert typed_boundary_points(
+        4, info,
+        {"typed": True, "representative_values": ["min"],
+         "adjacent_constant_values": False},
+    ) == (0, 4)
+    assert typed_boundary_points(
+        4, info,
+        {"typed": True, "representative_values": ["median", "max"],
+         "adjacent_constant_values": True},
+    ) == (3, 4, 5, 10)
+
+
+def test_issue6_case_matching_separates_free_values_from_required_values():
+    generated = [{
+        "case_id": "U001", "kind": "branch_outcome", "label": "TRUE",
+        "outcome": True, "truth_vector": None, "identity": {},
+        "inputs": {"x": 7}, "expected": {"return": 0},
+        "required_input_values": {}, "required_expected_values": {},
+        "stub": {"columns": [], "values": {}},
+        "oracle": {"columns": ["return"], "values": {"return": 0}},
+    }]
+    golden = [{
+        "case_id": "U017", "kind": "branch_outcome", "label": "TRUE",
+        "outcome": True, "truth_vector": None, "identity": {},
+        "inputs": {"x": 9}, "expected": {"return": 0},
+        "required_input_values": {}, "required_expected_values": {},
+        "stub": {"columns": [], "values": {}},
+        "oracle": {"columns": ["return"], "values": {"return": 0}},
+    }]
+    equivalent = match_semantic_cases(generated, golden)
+    assert equivalent["counts"] == {EQUIVALENT_REPRESENTATIVE: 1}
+    golden[0]["required_input_values"] = {"x": 1}
+    partial = match_semantic_cases(generated, golden)
+    assert partial["counts"] == {PARTIAL_MATCH: 1}
+
+
+def test_issue6_case_matching_reports_golden_row_order():
+    def case(case_id: str, value: int) -> dict:
+        return {
+            "case_id": case_id, "kind": "branch_outcome", "label": "TRUE",
+            "outcome": True, "truth_vector": None, "identity": {},
+            "inputs": {"x": value}, "expected": {"return": value},
+            "required_input_values": {"x": value},
+            "required_expected_values": {"return": value},
+            "stub": {"columns": [], "values": {}},
+            "oracle": {"columns": ["return"], "values": {"return": value}},
+        }
+
+    result = match_semantic_cases(
+        [case("generated-1", 1), case("generated-2", 2)],
+        [case("golden-2", 2), case("golden-1", 1)],
+    )
+    assert result["row_count_equal"] is True
+    assert result["row_order_equal"] is False
+    assert result["row_order"]["mismatches"]
+
+
+def test_issue6_case_matching_reports_structural_row_order_separately():
+    def case(case_id: str, label: str) -> dict:
+        return {
+            "case_id": case_id, "kind": "branch", "label": label,
+            "outcome": True, "truth_vector": None, "identity": {},
+            "inputs": {"x": label}, "expected": {"return": 0},
+            "required_input_values": {}, "required_expected_values": {},
+            "stub": {"columns": [], "values": {}},
+            "oracle": {"columns": ["return"], "values": {"return": 0}},
+        }
+
+    result = match_semantic_cases(
+        [case("generated-1", "if (x == 0)"), case("generated-2", "if (x == 1)")],
+        [case("golden-2", "if (x == 1)"), case("golden-1", "if (x == 0)")],
+    )
+    assert result["row_order_equal"] is False
+    assert result["structural_row_order_equal"] is False
+    assert result["structural_row_order"]["mismatches"]
 
 
 def test_issue6_free_representative_values_are_not_exact_value_matches(tmp_path: Path):

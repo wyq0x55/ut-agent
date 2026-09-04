@@ -1,5 +1,7 @@
 import json
 
+import pytest
+
 from ut_agent.ir import Atom, Branch, ControlVar, FunctionIR, Param
 from ut_agent.generation import generate_intents
 from ut_agent.learning.compress import _branch_family, _digest, compress_corpus, compress_corpora
@@ -44,6 +46,10 @@ def test_two_projects_promote_same_family():
     )
     assert result["counts"]["cross_project"] == 1
     assert result["families"][0]["project_count"] == 2
+    rule = result["candidate_pack"]["rules"][0]
+    assert rule["validation"]["strategy"] == "leave-one-project-out"
+    assert rule["validation"]["status"] == "PASS"
+    assert all(fold["status"] == "PASS" for fold in rule["validation"]["folds"])
 
 
 def test_approved_semantic_family_is_traced_during_generation():
@@ -85,6 +91,14 @@ def test_compressed_candidate_pack_can_be_approved_and_loaded(tmp_path):
                 "match": {"kind": "semantic_family", "family_id": "family.x"},
                 "action": {"strategy": "instantiate-from-ast"},
                 "priority": 40, "evidence": ["projects:2"],
+                "validation": {
+                    "strategy": "leave-one-project-out", "status": "PASS",
+                    "project_count": 2,
+                    "folds": [
+                        {"held_out_project": "N-O2504", "status": "PASS"},
+                        {"held_out_project": "N-O2605", "status": "PASS"},
+                    ],
+                },
             }],
         },
     }), encoding="utf-8")
@@ -95,3 +109,22 @@ def test_compressed_candidate_pack_can_be_approved_and_loaded(tmp_path):
         "candidate": 0, "approved": 1, "rejected": 0,
     }
     assert load_rule_pack(output).approved("any", "semantic_family")[0].rule_id == "semantic.example"
+
+
+def test_generic_rule_cannot_be_approved_without_cross_project_holdout(tmp_path):
+    source = tmp_path / "candidate.json"
+    source.write_text(json.dumps({
+        "name": "candidate",
+        "version": 1,
+        "rules": [{
+            "id": "semantic.example", "status": "candidate",
+            "scope": {"function": "*"},
+            "match": {"kind": "semantic_family", "family_id": "family.x"},
+            "action": {"strategy": "instantiate-from-ast"},
+            "priority": 40, "evidence": ["projects:1"],
+        }],
+    }), encoding="utf-8")
+    with pytest.raises(ValueError, match="跨项目留出验证"):
+        approve_rule_pack(
+            source, tmp_path / "approved.json", authority="test", reason="evidence"
+        )

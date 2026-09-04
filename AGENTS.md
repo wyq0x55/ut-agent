@@ -54,6 +54,6 @@ C++ extractor → Typed FunctionIR → project context → generation
 
 ## 工具偏好
 
-- Shell 优先使用 Git Bash：`C:\Program Files\Git\bin\bash.exe --login -i`。
+- Shell 优先使用 pwsh。
 - 文件发现使用 `fd`，文本搜索使用 `rg`/`git grep`，JSON 使用 `jq`，压缩包使用 `7z`；避免把一次性实验命令散落成仓库文件。
 - Office/PDF/WinAMS 工作遵循对应技能和现有 artifact workflow；读写边界、编码、换行和 provenance 必须可复核。

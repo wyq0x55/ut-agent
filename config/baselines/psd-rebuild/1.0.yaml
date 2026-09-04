@@ -43,6 +43,8 @@ baseline:
       status: approved
   coverage:
     criterion: "PSD再構築"
+    branch_outcome: true
+    source_rules: ["psd.4.compare"]
   condition_policy:
     logical_connectives: ["&&", "||"]
     condition_outcome: true

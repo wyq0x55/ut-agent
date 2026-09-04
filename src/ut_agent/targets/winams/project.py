@@ -345,10 +345,12 @@ def generate_project(
             suite = generate_suite(ir, project_context)
             generation_document = suite.to_dict()
             generation_status = suite.status
-            if suite.status == "VALIDATED":
-                _write_cp932(testcsv, csv_render.render_suite_csv(
-                    ir, suite, title=f"{item.name} 単体テスト",
-                ))
+            _write_cp932(testcsv, csv_render.render_suite_csv(
+                ir, suite, title=f"{item.name} 単体テスト",
+            ))
+            csv_intent_count = sum(
+                intent.validation.valid for intent in suite.intents
+            )
         else:
             generation = generate_intents(ir, rule_pack)
             generation_document = generation.to_dict()
@@ -357,6 +359,15 @@ def generate_project(
                 ir, generation,
                 title=f"{item.name} 単体テスト",
             ))
+            csv_intent_count = len(generation.validated_intents)
+        generation_document.update({
+            "csv_written": True,
+            "csv_kind": (
+                "validated" if generation_status == "VALIDATED"
+                else "partial_candidate"
+            ),
+            "csv_intent_count": csv_intent_count,
+        })
         intent_manifest = unit_dir / "test-intents.json"
         intent_manifest.parent.mkdir(parents=True, exist_ok=True)
         intent_manifest.write_text(

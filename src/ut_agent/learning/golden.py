@@ -179,6 +179,35 @@ def semantic_csv_signature(path: Path) -> dict[str, Any]:
     }
 
 
+def ordered_semantic_csv_signature(path: Path) -> dict[str, Any]:
+    """Return a semantic signature that preserves CSV row order.
+
+    ``semantic_csv_signature`` remains useful for comparing semantic coverage
+    sets.  The WinAMS delivery contract also has an ordering requirement, so
+    callers that validate a replayable CSV must use this stricter signature.
+    Numeric formatting remains normalized, while the declared column order
+    and testcase row order are retained.
+    """
+    parsed = parse_golden_csv(path)
+    cases = []
+    for item in parsed["scenarios"]:
+        values = {**item["inputs"], **item["expected"]}
+        typed = tuple(sorted(
+            (comment, _value_class(value), value)
+            for comment, value in values.items()
+        ))
+        cases.append((
+            item["label"] or item["case_label"] or "ENTRY",
+            "TRUE" if item["outcome"] is not False else "FALSE",
+            typed,
+        ))
+    return {
+        "input_columns": tuple(parsed["input_columns"]),
+        "output_columns": tuple(parsed["output_columns"]),
+        "cases": tuple(cases),
+    }
+
+
 def normalize_label(label: str | None) -> str:
     """Normalize presentation-only label noise without changing its meaning."""
     value = "".join(str(label or "").split())
@@ -202,6 +231,33 @@ def label_kind(label: str | None, case_label: str | None = None) -> str:
     if value:
         return "branch"
     return "unlabelled"
+
+
+def truth_vector(label: str | None) -> dict[str, Any] | None:
+    """Decode an already-present Golden condition label.
+
+    This is presentation normalization for the offline comparator.  It does
+    not evaluate C expressions or invent a condition order; the order is the
+    order explicitly written in the reviewed label.
+    """
+    value = normalize_label(label)
+    if not value:
+        return None
+    if "=>" not in value:
+        if value.upper() in {"TRUE", "FALSE"}:
+            return {"conditions": None, "decision": value.upper() == "TRUE"}
+        return None
+    left, right = value.split("=>", 1)
+    tokens = re.findall(r"TRUE|FALSE|T|F", left.upper())
+    if not tokens:
+        return None
+    decision_tokens = re.findall(r"TRUE|FALSE|T|F", right.upper())
+    if len(decision_tokens) != 1:
+        return None
+    return {
+        "conditions": [token in {"TRUE", "T"} for token in tokens],
+        "decision": decision_tokens[0] in {"TRUE", "T"},
+    }
 
 
 def _counts(values: list[str]) -> dict[str, int]:
@@ -239,6 +295,7 @@ def normalize_golden_csv(path: Path) -> dict[str, Any]:
     """
     parsed = parse_golden_csv(Path(path))
     all_columns = parsed["input_columns"] + parsed["output_columns"]
+    stub_columns = _stub_columns(all_columns)
     cases = []
     viewpoint_labels: list[str] = []
     for item in parsed["scenarios"]:
@@ -252,10 +309,25 @@ def normalize_golden_csv(path: Path) -> dict[str, Any]:
             if kind == "switch_case"
             or item["value_classes"].get(key) not in {"literal", "pointer-address"}
         }
+        vector = truth_vector(label)
+        stub_values = {
+            key: item["inputs"].get(key) for key in stub_columns
+        }
+        pre_state = {
+            key: value for key, value in item["inputs"].items()
+            if key not in stub_columns
+        }
         cases.append({
+            "case_id": item["case_id"],
+            "branch_index": item["branch_index"],
             "kind": kind,
             "label": label,
             "outcome": item["outcome"],
+            "truth_vector": vector,
+            "inputs": dict(item["inputs"]),
+            "expected": dict(item["expected"]),
+            "raw_inputs": dict(item["raw_inputs"]),
+            "raw_expected": dict(item["raw_expected"]),
             "input_value_classes": {
                 key: item["value_classes"].get(key, "unknown")
                 for key in parsed["input_columns"]
@@ -268,6 +340,19 @@ def normalize_golden_csv(path: Path) -> dict[str, Any]:
             "required_expected_values": {
                 key: item["expected"].get(key)
                 for key in parsed["output_columns"]
+            },
+            "stub": {
+                "columns": list(stub_columns),
+                "values": stub_values,
+            },
+            "pre_state": pre_state,
+            "oracle": {
+                "columns": list(parsed["output_columns"]),
+                "values": dict(item["expected"]),
+            },
+            "provenance": {
+                "source": "reviewed Golden",
+                "path": str(Path(path).resolve()),
             },
         })
     return {
@@ -332,5 +417,6 @@ def normalize_golden_csv(path: Path) -> dict[str, Any]:
 
 __all__ = [
     "label_kind", "normalize_golden_csv", "normalize_label",
-    "parse_golden_csv", "semantic_csv_signature",
+    "ordered_semantic_csv_signature", "parse_golden_csv",
+    "semantic_csv_signature", "truth_vector",
 ]

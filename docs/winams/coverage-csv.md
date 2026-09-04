@@ -21,19 +21,19 @@ mod,"source.c/function","function test",2,1,,,,CPP,,,"",0
 ,0x0,0x0,0x0
 ```
 
-正式 CSV 只允许包含状态为 `VALIDATED` 的语义用例。需要人工补齐的输入、oracle 或环境事实必须留在 draft/diagnostic 产物中，并标记 `NEEDS_REVIEW` 或 `UNSUPPORTED`。
+`VALIDATED` Suite 会生成完整 CSV；`NEEDS_REVIEW` Suite 也会生成 `partial_candidate` CSV，便于与 Golden 做列结构和已证明 testcase 对比。候选 CSV 只包含 intent-level 已验证的语义用例；需要人工补齐的输入、oracle 或环境事实继续留在 `test-intents.json` 中，不能用默认值填充，也不能把候选 CSV 当作 WinAMS 执行完成的证据。
 
 ## 列角色与顺序
 
 - 被测函数标量参数使用参数名；指针地址使用 `@param`；可写指针的 caller-visible 值使用 `*param`。
-- Stub 参数、返回值和调用计数使用 WinAMS 约定的 `AMSTB_...@ARGnn`、`AMSTB_...@AMIN_return[0]` 和 `CALLCNT_...` 角色。
+- Stub 参数、返回值和调用计数使用 WinAMS 约定的 `AMSTB_...@ARGnn`、`AMSTB_...@AMIN_return[0]` 和 `CALLCNT_...` 角色。直接调用的指针参数还会在输出侧保留 `PTROUTnn`：可写标量指针是 AST 证明的写回值，只读或非标量指针是传入地址记录。
 - 全局、memory-mapped IO 和被调函数输出只能来自 FunctionIR 已证明的对象和 effect。
 - 被测函数返回值存在时位于输出侧最后一列。
 - 列顺序由 typed Suite/target adapter 的确定性规则决定，不能按临时变量名或历史 CSV 行猜测。
 
 ## Stub contract
 
-每个被隔离的外部调用生成 `AMSTB_<callee>`。stub 只负责调用计数、按序记录参数、写回 AST 证明的可写指针、返回预设值：
+每个被隔离的外部调用生成 `AMSTB_<callee>`。stub 只负责调用计数、按序记录参数、写回 AST 证明的可写指针、记录只读/非标量指针地址、返回预设值：
 
 ```text
 CALLCNT_<callee>

@@ -1,7 +1,8 @@
 """规则引擎的语义模型。
 
 这些 dataclass 是 FunctionIR 与目标输出适配器之间的确定性契约。生成器只把
-``VALIDATED`` 的 TestIntent 交给渲染层；不能证明的用例保留在 manifest 中。
+已证明的 TestIntent 交给渲染层；不能证明的用例保留在 manifest 中，并由
+调用方将部分 CSV 标记为 candidate，不能用默认值填充未知证据。
 """
 from __future__ import annotations
 
@@ -79,6 +80,7 @@ class TestObligation:
     source_fact: str = ""
     boundary_value: Any = None
     project_rule_ref: str = ""
+    project_mcdc_enabled: bool | None = None
 
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)
@@ -111,6 +113,10 @@ class TestIntent:
     raw_inputs: dict[str, str] = field(default_factory=dict)
     raw_expected: dict[str, str] = field(default_factory=dict)
     stub_behavior: dict[str, Any] = field(default_factory=dict)
+    # Target-neutral semantic observables used by downstream validation.  The
+    # WinAMS adapter may render a label from this record, but this field never
+    # contains target syntax or Golden-derived values.
+    semantic: dict[str, Any] = field(default_factory=dict)
     constraints: tuple[Constraint, ...] = ()
     trace: tuple[RuleTrace, ...] = ()
     validation: ValidationResult = field(

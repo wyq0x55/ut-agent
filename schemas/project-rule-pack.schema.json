@@ -14,7 +14,25 @@
         "id": {"type": "string", "minLength": 1},
         "version": {"type": "string", "minLength": 1},
         "status": {"const": "approved"},
-        "rules": {"type": "array", "items": {"type": "object"}}
+        "rules": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "required": ["id", "status", "scope", "match", "action", "approval"],
+            "properties": {
+              "id": {"type": "string", "minLength": 1},
+              "status": {"const": "approved"},
+              "scope": {"type": "object"},
+              "match": {"type": "object"},
+              "action": {"type": "object"},
+              "priority": {"type": "integer"},
+              "evidence": {"type": "array", "items": {"type": "string"}},
+              "validation": {"type": "object"},
+              "approval": {"type": "object", "minProperties": 1}
+            },
+            "additionalProperties": true
+          }
+        }
       }
     }
   }

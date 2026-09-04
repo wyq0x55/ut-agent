@@ -29,15 +29,92 @@
             }
           }
         },
-        "coverage": {"type": "object"},
-        "condition_policy": {"type": "object"},
-        "boundary_policy": {"type": "object"},
-        "switch_policy": {"type": "object"},
-        "loop_policy": {"type": "object"},
-        "array_policy": {"type": "object"},
-        "stub_policy": {"type": "object"},
-        "ordering_policy": {"type": "object"}
+        "coverage": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "criterion": {"type": "string"},
+            "branch_outcome": {"type": "boolean"},
+            "source_rules": {"$ref": "#/$defs/string_array"}
+          }
+        },
+        "condition_policy": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "logical_connectives": {"$ref": "#/$defs/string_array"},
+            "condition_outcome": {"type": "boolean"},
+            "source_rules": {"$ref": "#/$defs/string_array"}
+          }
+        },
+        "boundary_policy": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "typed": {"type": "boolean"},
+            "representative_values": {
+              "type": "array",
+              "items": {"enum": ["min", "median", "max"]}
+            },
+            "adjacent_constant_values": {"type": "boolean"},
+            "source_rules": {"$ref": "#/$defs/string_array"}
+          }
+        },
+        "switch_policy": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "preserve_cases": {"type": "boolean"},
+            "include_default": {"type": "boolean"},
+            "source_rules": {"$ref": "#/$defs/string_array"}
+          }
+        },
+        "loop_policy": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "iteration_count": {"type": "boolean"},
+            "boundary_state": {"type": "boolean"},
+            "source_rules": {"$ref": "#/$defs/string_array"}
+          }
+        },
+        "array_policy": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "fixed_index": {"type": "boolean"},
+            "preserve_other_elements": {"type": "boolean"},
+            "source_rules": {"$ref": "#/$defs/string_array"}
+          }
+        },
+        "stub_policy": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "external_calls_are_environment": {"type": "boolean"},
+            "call_count": {"type": "boolean"},
+            "return_value": {"type": "boolean"},
+            "arguments": {"type": "boolean"},
+            "source_rules": {"$ref": "#/$defs/string_array"}
+          }
+        },
+        "ordering_policy": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "deterministic": {"type": "boolean"},
+            "case_order": {"type": "string"},
+            "remaining_values": {"type": "string"},
+            "source_rules": {"$ref": "#/$defs/string_array"}
+          }
+        }
       }
+    }
+  },
+  "$defs": {
+    "string_array": {
+      "type": "array",
+      "items": {"type": "string", "minLength": 1}
     }
   }
 }

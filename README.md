@@ -43,23 +43,32 @@ TestCsv / Stub / DefineVar / Harness
 
 以下命令均来自当前 argparse CLI；生成结果放在本地 `.tmp/`，不会覆盖参考语料。
 
+先用 uv 创建并锁定项目环境：
+
+```bash
+uv sync --extra dev
+```
+
+如果要使用本机 Scoop 中的解释器，可显式指定：
+`uv sync --python "C:\Users\1068970-z461\scoop\apps\python\3.14.7\python.exe" --extra dev`。
+
 ```bash
 # 解析源码并输出 FunctionIR JSON
-ut-agent parse <source.c> -f <function> -o .tmp/<function>.ir.json
+uv run ut-agent parse <source.c> -f <function> -o .tmp/<function>.ir.json
 
-# 使用项目 manifest 生成已通过门禁的 WinAMS 产物
-ut-agent gen <source.c> -f <function> \
+# 使用项目 manifest 生成 WinAMS CSV（含 NEEDS_REVIEW 的部分候选）
+uv run ut-agent gen <source.c> -f <function> \
   --manifest config/projects/N-O2608-PSD-087.json \
   --config-root config \
   --out .tmp/<function>
 
 # 对项目索引中的全部函数生成并执行 Golden 语义校验
-ut-agent validate-corpus \
+uv run ut-agent validate-corpus \
   --manifest config/projects/N-O2608-PSD-087.corpus.json \
   --out .tmp/N-O2608-PSD-087
 ```
 
-`parse` 只产生 FunctionIR；`gen` 只有在 Suite 为 `VALIDATED` 时写出正式 CSV；`validate-corpus` 通过 corpus manifest 间接解析项目 baseline，不在 corpus manifest 中复制 baseline。
+`parse` 只产生 FunctionIR；`gen` 和 `validate-corpus` 会写出 CSV。Suite 为 `NEEDS_REVIEW` 时，CSV 只包含 intent-level 已验证的部分，未解决 obligation/oracle 仍保留在 `test-intents.json`，并在 manifest 中标记 `csv_kind=partial_candidate`。这类 CSV 用于 Golden/列结构对比，不代表可以直接执行。`validate-corpus` 通过 corpus manifest 间接解析项目 baseline，不在 corpus manifest 中复制 baseline；项目校验同时写出 `project-validation.json`、`project-validation.md` 和兼容用的 `corpus-validation-report.json`。
 
 ## 事实源与状态
 
@@ -85,7 +94,8 @@ Human Golden → normalize → semantic compare → gap taxonomy
 
 ## 依赖
 
-- Python >= 3.10
+- uv（负责 Python 环境、依赖解析和 `uv.lock`）
+- Python >= 3.10（本地可用 `uv sync --python <path>` 指定解释器）
 - LLVM/Clang 16+（构建 C++ `ut-clang-extract`）
 - Arm GNU Toolchain（`arm-none-eabi-gcc`，仅用于独立 ARM 示例）
 

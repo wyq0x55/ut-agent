@@ -6,6 +6,7 @@ members, and switch selectors must already be present in FunctionIR.
 from __future__ import annotations
 
 from itertools import product
+from typing import Mapping
 
 from ut_agent.ir import FunctionIR, TypeInfo, ValueOrigin
 
@@ -42,20 +43,84 @@ def _maximum(domain):
     return max(domain[1]) if domain[0] == "set" else domain[2]
 
 
-def _five_points(boundary, domain) -> set:
-    """Return {boundary-1, boundary, boundary+1, min, max} when proven."""
+def _median(domain):
+    values = (sorted(domain[1]) if domain[0] == "set"
+              else [domain[1], domain[2]])
+    if domain[0] == "set":
+        return values[(len(values) - 1) // 2]
+    return domain[1] + (domain[2] - domain[1]) // 2
+
+
+def _selected_representatives(domain,
+                              policy: Mapping[str, object] | None = None) -> set:
+    if domain is None:
+        return set()
+    selected = (("min", "max") if policy is None else tuple(
+        policy.get("representative_values", ())))
+    representatives = {
+        "min": _minimum(domain),
+        "median": _median(domain),
+        "max": _maximum(domain),
+    }
+    unknown = sorted({str(name) for name in selected}
+                     - set(representatives))
+    if unknown:
+        raise ValueError(
+            "boundary_policy.representative_values 含未知代表值: "
+            + ", ".join(unknown)
+        )
+    return {representatives[name] for name in selected}
+
+
+def _policy_points(boundary, domain,
+                   policy: Mapping[str, object] | None = None) -> set:
+    """Return typed representatives selected by the approved policy.
+
+    ``policy=None`` is retained for the legacy, target-neutral helper used by
+    standalone enumeration tests.  A resolved baseline always passes its
+    formal ``representative_values`` and ``adjacent_constant_values`` fields;
+    no alternate policy spelling is interpreted here.
+    """
     if boundary is None:
         return set()
-    points = {value for value in (boundary - 1, boundary, boundary + 1)
-              if _in(value, domain)}
-    if domain is not None:
-        points.update({_minimum(domain), _maximum(domain)})
+    adjacent = (True if policy is None else
+                bool(policy.get("adjacent_constant_values", False)))
+    points = {boundary} if _in(boundary, domain) else set()
+    if adjacent:
+        points.update(value for value in (boundary - 1, boundary + 1)
+                      if _in(value, domain))
+    points.update(_selected_representatives(domain, policy))
     return points
 
 
-def typed_boundary_points(boundary, type_info: TypeInfo | None) -> tuple:
+def typed_status_points(boundary, type_info: TypeInfo | None,
+                        policy: Mapping[str, object] | None = None) -> tuple:
+    """Return status-like representatives for a typed scalar result.
+
+    Stub return values and similar result codes are categorical even when the
+    ABI type is an unsigned byte.  Their executable representatives are the
+    boundary, its adjacent values, and the typed endpoints; the numeric
+    midpoint is not a distinct status category.  This is intentionally an
+    explicit extractor/baseline projection, not a type-name heuristic.
+    """
+    if policy is not None and not bool(policy.get("typed", False)):
+        return ()
+    domain = _domain(type_info)
+    if boundary is None or domain is None:
+        return ()
+    points = {value for value in (
+        boundary, boundary - 1, boundary + 1,
+        _minimum(domain), _maximum(domain),
+    ) if _in(value, domain)}
+    return tuple(sorted(points))
+
+
+def typed_boundary_points(boundary, type_info: TypeInfo | None,
+                          policy: Mapping[str, object] | None = None) -> tuple:
     """Return stable, type-clipped boundary representatives."""
-    return tuple(sorted(_five_points(boundary, _domain(type_info))))
+    if policy is not None and not bool(policy.get("typed", False)):
+        return ()
+    return tuple(sorted(_policy_points(boundary, _domain(type_info), policy)))
 
 
 def _selector_control(branch, controls):
@@ -89,7 +154,8 @@ def _atom_type_info(ir: FunctionIR, atom, control) -> TypeInfo | None:
     return type_info
 
 
-def control_candidates(ir: FunctionIR) -> dict:
+def control_candidates(ir: FunctionIR,
+                       boundary_policy: Mapping[str, object] | None = None) -> dict:
     """Build candidates from typed atoms and the extractor's selector fact."""
     controls = {control.var: control for control in ir.control_vars}
     candidates: dict = {}
@@ -115,7 +181,12 @@ def control_candidates(ir: FunctionIR) -> dict:
                     add(control, {0, 1})
                 continue
             typed_domain = _domain(type_info)
-            add(control, _five_points(atom.boundary, typed_domain))
+            points = (typed_status_points(atom.boundary, type_info,
+                                          boundary_policy)
+                      if control.source == "stub"
+                      else _policy_points(atom.boundary, typed_domain,
+                                          boundary_policy))
+            add(control, points)
 
         if branch.kind != "switch":
             continue
@@ -151,7 +222,11 @@ def control_candidates(ir: FunctionIR) -> dict:
                 }
                 add(control, default_values)
             if typed_domain is not None:
-                add(control, {_minimum(typed_domain), _maximum(typed_domain)})
+                if boundary_policy is None or bool(
+                        boundary_policy.get("typed", False)):
+                    add(control, _selected_representatives(
+                        typed_domain, boundary_policy,
+                    ))
 
     return candidates
 

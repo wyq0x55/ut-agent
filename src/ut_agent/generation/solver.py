@@ -114,10 +114,13 @@ def solve_obligation(ir: FunctionIR, obligation: TestObligation,
     if baseline.status != "approved":
         return SolveResult(UNKNOWN, obligation, reason="baseline is not approved")
     try:
-        domains, fixed = engine._generic_inputs(ir)
+        domains, fixed = engine._generic_inputs(ir, baseline)
     except (KeyError, TypeError, ValueError) as exc:
         return SolveResult(UNKNOWN, obligation, reason=str(exc))
-    limit = baseline.boundary_policy.get("max_combinations", 4096)
+    # Solver cardinality is an engine safety guard, not a second baseline
+    # strategy field.  The semantic policy controls which typed candidates
+    # enter this finite search; the guard remains fixed and deterministic.
+    limit = 4096
     try:
         limit = max(1, int(limit))
     except (TypeError, ValueError):

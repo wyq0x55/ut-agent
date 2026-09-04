@@ -13,6 +13,7 @@ from .model import ResolvedProjectContext
 
 
 _SAFE_COMPONENT = re.compile(r"^[A-Za-z0-9_.-]+$")
+_GENERIC_RULE_KINDS = frozenset({"semantic_family", "semantic_pattern"})
 
 
 def _safe_component(value: str, label: str) -> str:
@@ -25,6 +26,37 @@ def _contract_path(root: Path, directory: str, identifier: str, version: str) ->
     _safe_component(identifier, "contract id")
     _safe_component(version, "contract version")
     return root / directory / identifier / f"{version}.yaml"
+
+
+def _validate_generic_rule(rule: dict[str, Any]) -> None:
+    """Keep approved generic rules independent from any one function."""
+    kind = str(rule.get("match", {}).get("kind", ""))
+    if kind not in _GENERIC_RULE_KINDS:
+        return
+    if rule.get("scope", {}).get("function") != "*":
+        raise ValueError(
+            f"generic semantic rule 必须使用 scope.function=*: {rule.get('id')}"
+        )
+    validation = rule.get("validation")
+    if not isinstance(validation, dict):
+        raise ValueError(f"generic semantic rule 缺少 validation: {rule.get('id')}")
+    if validation.get("strategy") != "leave-one-project-out":
+        raise ValueError(
+            f"generic semantic rule 缺少 leave-one-project-out 验证: {rule.get('id')}"
+        )
+    if validation.get("status") != "PASS":
+        raise ValueError(f"generic semantic rule 未通过留出验证: {rule.get('id')}")
+    try:
+        project_count = int(validation.get("project_count", 0))
+    except (TypeError, ValueError):
+        project_count = 0
+    if project_count < 2:
+        raise ValueError(f"generic semantic rule 项目证据不足: {rule.get('id')}")
+    folds = validation.get("folds")
+    if not isinstance(folds, list) or not folds or any(
+            not isinstance(fold, dict) or fold.get("status") != "PASS"
+            for fold in folds):
+        raise ValueError(f"generic semantic rule folds 未全部通过: {rule.get('id')}")
 
 
 def _load_project_rule_pack(path: Path, expected_id: str, expected_version: str) -> dict[str, Any]:

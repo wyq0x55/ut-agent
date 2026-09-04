@@ -40,16 +40,16 @@ def run(args) -> int:
         )
         suite = generate_suite(ir, context)
         generation_document = suite.to_dict()
-        if suite.status == "VALIDATED":
-            csv_text = csv_adapter.render_suite_csv(
-                ir, suite, source_label=args.winams_source_label or None,
-                title=args.winams_title or None,
-            )
-            csv_path.write_bytes(csv_text.encode("cp932"))
-        else:
-            generation_document = {**generation_document, "csv_written": False}
+        csv_text = csv_adapter.render_suite_csv(
+            ir, suite, source_label=args.winams_source_label or None,
+            title=args.winams_title or None,
+        )
+        csv_path.write_bytes(csv_text.encode("cp932"))
         generation_status = suite.status
         intent_count = len(suite.intents)
+        csv_intent_count = sum(
+            item.validation.valid for item in suite.intents
+        )
     else:
         generation = generate_intents(ir, load_rule_pack(Path(args.rules) if args.rules else None))
         csv_text = csv_adapter.render_intents_csv(
@@ -60,6 +60,16 @@ def run(args) -> int:
         generation_document = generation.to_dict()
         generation_status = generation.status
         intent_count = len(generation.validated_intents)
+        csv_intent_count = len(generation.validated_intents)
+    generation_document = {
+        **generation_document,
+        "csv_written": True,
+        "csv_kind": (
+            "validated" if generation_status == "VALIDATED"
+            else "partial_candidate"
+        ),
+        "csv_intent_count": csv_intent_count,
+    }
     manifest_path = (Path(args.intent_manifest) if args.intent_manifest
                      else out_dir / f"{args.function}_test-intents.json")
     manifest_path.parent.mkdir(parents=True, exist_ok=True)

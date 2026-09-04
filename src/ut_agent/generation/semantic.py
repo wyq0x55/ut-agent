@@ -90,6 +90,11 @@ def visible_calls(ir) -> list:
     return calls
 
 
+def _is_receive_stub(call) -> bool:
+    """Return whether an RTE receive call owns the pointed-to input value."""
+    return str(getattr(call, "callee", "") or "").startswith("Rte_Read_")
+
+
 def call_capacity(ir, call) -> int:
     if getattr(call, "via_macro", None):
         return 1
@@ -152,27 +157,45 @@ def return_columns(ir, call) -> list[str]:
 
 
 def output_columns(ir, call) -> list[str]:
+    """Return the WinAMS-observable output side of one stub call.
+
+    The target adapter records every direct pointer argument on the output
+    side.  For a caller-visible scalar pointee the slot is the AST-proven
+    write-back; for a read-only or non-scalar pointer the slot records the
+    passed address.
+    The FunctionIR metadata still decides whether a pointee write-back is
+    possible; this is not inferred from a function name or a Golden row.
+    """
     columns: list[str] = []
     for index, param in enumerate(call.params):
         names = param_columns(ir, call, index)
         if not param.is_ptr:
             columns.extend(names)
             continue
-        observable = call.caller_param_output.get(
-            str(index), call.caller_param_output.get(index, False)
-        ) if isinstance(call.caller_param_output, dict) else False
-        if observable:
-            info = call.pointer_arguments.get(str(index), {}) \
-                if isinstance(call.pointer_arguments, dict) else {}
-            if (isinstance(info, dict) and info.get("address_used", info.get("is_address"))
-                    and not info.get("nullable", info.get("is_null"))
-                    and info.get("pointee_write")):
-                columns.extend(
-                    call_param_key(str(call.callee), index, slot, "pointee")
-                    for slot in range(call_capacity(ir, call))
-                )
-            else:
-                columns.extend(names)
+        if _is_receive_stub(call):
+            # Rte_Read's pointer is the receive buffer.  It is a settable
+            # input to the isolated call, not a post-call pointer observation.
+            continue
+        info = call.pointer_arguments.get(str(index), {}) \
+            if isinstance(call.pointer_arguments, dict) else {}
+        caller_output = (
+            call.caller_param_output.get(
+                str(index), call.caller_param_output.get(index, False)
+            ) if isinstance(call.caller_param_output, dict) else False
+        )
+        if (isinstance(info, dict)
+                and info.get("address_used", info.get("is_address"))
+                and not info.get("nullable", info.get("is_null"))
+                and info.get("pointee_write")
+                and caller_output):
+            columns.extend(
+                call_param_key(str(call.callee), index, slot, "pointee")
+                for slot in range(call_capacity(ir, call))
+            )
+        else:
+            # The direct stub stores the pointer slot even when the callee
+            # cannot write the pointee; the target observes the passed address.
+            columns.extend(names)
     return columns
 
 

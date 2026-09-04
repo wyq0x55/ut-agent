@@ -92,51 +92,80 @@ def run_validate_corpus(args) -> int:
     from ut_agent.reporting import (
         build_corpus_validation_report,
         load_corpus_manifest,
+        preflight_corpus,
         validate_corpus_paths,
         write_corpus_validation_report,
+        write_project_validation_markdown,
     )
     from ut_agent.targets.winams.index import generate_project_from_index
     from ut_agent import __version__
 
     corpus_manifest = load_corpus_manifest(Path(args.manifest))
-    validate_corpus_paths(corpus_manifest)
-    context = resolve_project_context(
-        corpus_manifest.context_manifest,
-        config_root=Path(args.config_root) if args.config_root else None,
-    )
-    if context.project_id != corpus_manifest.project_id:
+    blocked: tuple[dict, ...] = ()
+    try:
+        validate_corpus_paths(corpus_manifest)
+    except FileNotFoundError as exc:
+        blocked = ({
+            "row": None, "function": None, "source_path": None,
+            "target_rel": None, "status": "BLOCKED",
+            "reason": "FIXTURE_MISSING", "detail": str(exc),
+        },)
+    context = None
+    if not blocked:
+        context = resolve_project_context(
+            corpus_manifest.context_manifest,
+            config_root=Path(args.config_root) if args.config_root else None,
+        )
+    if context is not None and context.project_id != corpus_manifest.project_id:
         raise ValueError(
             f"语料项目与 context manifest 不一致: "
             f"{corpus_manifest.project_id} != {context.project_id}"
         )
     output_root = Path(args.out).resolve()
-    units = generate_project_from_index(
-        corpus_manifest.index_csv,
-        corpus_manifest.product_root,
-        output_root,
-        clang_extractor=(Path(args.clang_extractor)
-                         if args.clang_extractor else None),
-        rules_path=Path(args.rules) if args.rules else None,
-        defines=parse_defines(args.define),
-        call_max=args.call_max,
-        extractor_timeout=args.extract_timeout,
-        check_golden=False,
-        project_context=context,
-    )
+    if not blocked:
+        blocked = preflight_corpus(corpus_manifest)
+    if blocked:
+        units = ()
+        print(
+            f"[validate-corpus] BLOCKED fixtures={len(blocked)}",
+            file=sys.stderr,
+        )
+    else:
+        units = generate_project_from_index(
+            corpus_manifest.index_csv,
+            corpus_manifest.product_root,
+            output_root,
+            clang_extractor=(Path(args.clang_extractor)
+                             if args.clang_extractor else None),
+            rules_path=Path(args.rules) if args.rules else None,
+            defines=parse_defines(args.define),
+            call_max=args.call_max,
+            extractor_timeout=args.extract_timeout,
+            check_golden=False,
+            project_context=context,
+        )
     report = build_corpus_validation_report(
         corpus_manifest, context, units,
         output_root=output_root,
         generator_commit=_local_git_commit(Path(__file__).resolve().parents[3]),
         generator_version=__version__,
+        blocked=blocked,
     )
     report_path = write_corpus_validation_report(
         report, output_root / "corpus-validation-report.json"
+    )
+    project_report_path = write_corpus_validation_report(
+        report, output_root / "project-validation.json"
+    )
+    project_markdown_path = write_project_validation_markdown(
+        report, output_root / "project-validation.md"
     )
     totals = report["totals"]
     print(
         f"[validate-corpus] {report['status']} "
         f"functions={totals['functions']} gaps={totals['gap_count']} "
-        f"report={report_path}",
+        f"report={project_report_path} markdown={project_markdown_path} "
+        f"legacy_report={report_path}",
         file=sys.stderr,
     )
     return 0 if report["status"] == "PASS" else 1

@@ -230,15 +230,17 @@ def generate_project_from_index(
             suite = generate_suite(ir, project_context)
             generation_document = suite.to_dict()
             generation_status = suite.status
-            if suite.status == "VALIDATED":
-                _write_cp932(
-                    testcsv,
-                    csv_render.render_suite_csv(
-                        ir, suite,
-                        source_label=f"{row.source_name}/{row.function}",
-                        title=f"{row.function} 単体テスト",
-                    ),
-                )
+            _write_cp932(
+                testcsv,
+                csv_render.render_suite_csv(
+                    ir, suite,
+                    source_label=f"{row.source_name}/{row.function}",
+                    title=f"{row.function} 単体テスト",
+                ),
+            )
+            csv_intent_count = sum(
+                item.validation.valid for item in suite.intents
+            )
         else:
             generation = generate_intents(ir, rule_pack)
             generation_document = generation.to_dict()
@@ -252,6 +254,15 @@ def generate_project_from_index(
                     title=f"{row.function} 単体テスト",
                 ),
             )
+            csv_intent_count = len(generation.validated_intents)
+        generation_document.update({
+            "csv_written": True,
+            "csv_kind": (
+                "validated" if generation_status == "VALIDATED"
+                else "partial_candidate"
+            ),
+            "csv_intent_count": csv_intent_count,
+        })
         stub.parent.mkdir(parents=True, exist_ok=True)
         stub.write_text(
             stub_generate.render_stub_c(

@@ -11,7 +11,7 @@ from typing import TYPE_CHECKING
 if TYPE_CHECKING:
     from ut_agent.targets.winams.project import GeneratedProject
 
-from .golden import semantic_csv_signature
+from .golden import ordered_semantic_csv_signature
 
 
 def compare_testcsv(project: GeneratedProject) -> list[tuple[str, bool]]:
@@ -26,8 +26,8 @@ def compare_testcsv(project: GeneratedProject) -> list[tuple[str, bool]]:
         # against a path that did not exist for reviewed WinAMS packages.
         golden = unit.expected
         try:
-            actual = semantic_csv_signature(unit.testcsv)
-            expected = semantic_csv_signature(golden)
+            actual = ordered_semantic_csv_signature(unit.testcsv)
+            expected = ordered_semantic_csv_signature(golden)
             result.append((unit.name, actual == expected))
         except (OSError, UnicodeError, ValueError):
             result.append((unit.name, False))

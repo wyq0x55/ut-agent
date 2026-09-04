@@ -10,15 +10,18 @@ from dataclasses import asdict, dataclass
 from pathlib import Path
 from typing import Any
 
-from .golden import semantic_csv_signature
 
 BASELINE_GAP = "BASELINE_GAP"
-BASELINE_CONVERSION_MISS = "BASELINE_CONVERSION_MISS"
-BASELINE_IMPLICIT_REQUIREMENT = "BASELINE_IMPLICIT_REQUIREMENT"
-STABLE_HUMAN_CONVENTION = "STABLE_HUMAN_CONVENTION"
-PROJECT_SPECIFIC_ADDITION = "PROJECT_SPECIFIC_ADDITION"
+PROJECT_RULE_GAP = "PROJECT_RULE_GAP"
+FUNCTION_IR_GAP = "FUNCTION_IR_GAP"
+OBLIGATION_GAP = "OBLIGATION_GAP"
+SOLVER_GAP = "SOLVER_GAP"
+EVALUATOR_GAP = "EVALUATOR_GAP"
+ORACLE_GAP = "ORACLE_GAP"
+SUITE_GAP = "SUITE_GAP"
+HARNESS_GAP = "HARNESS_GAP"
+PROJECTION_GAP = "PROJECTION_GAP"
 GOLDEN_ERROR = "GOLDEN_ERROR"
-GENERATOR_BUG = "GENERATOR_BUG"
 
 
 @dataclass(frozen=True)
@@ -35,32 +38,39 @@ class BaselineGap:
 
 def compare_semantic_csv(actual: Path, golden: Path, *, baseline_ref: str,
                         function: str = "") -> dict[str, Any]:
-    """Compare semantic signatures and retain an explicit review category.
-
-    The comparison does not infer that the reviewed case is redundant.  A
-    human or a later baseline-conversion step must classify the gap.
-    """
+    """Compare semantic cases without inferring a cause from count direction."""
     try:
-        actual_signature = semantic_csv_signature(Path(actual))
-        golden_signature = semantic_csv_signature(Path(golden))
+        from ut_agent.reporting.cases import (
+            normalize_golden_cases, match_semantic_cases,
+        )
+        from .golden import normalize_golden_csv
+        actual_normalized = normalize_golden_csv(Path(actual))
+        golden_normalized = normalize_golden_csv(Path(golden))
+        matching = match_semantic_cases(
+            normalize_golden_cases(actual_normalized, source_path=Path(actual)),
+            normalize_golden_cases(golden_normalized, source_path=Path(golden)),
+        )
     except (OSError, UnicodeError, ValueError) as exc:
         gap = BaselineGap(
-            GENERATOR_BUG if Path(actual).is_file() else BASELINE_CONVERSION_MISS,
+            PROJECTION_GAP if Path(actual).is_file() else GOLDEN_ERROR,
             baseline_ref, function, f"无法读取或解析语义 CSV: {exc}",
         )
         return {"equal": False, "gap": gap.to_dict()}
-    if actual_signature == golden_signature:
+    counts = matching.get("counts", {})
+    if not any(counts.get(name) for name in (
+            "PARTIAL_MATCH", "MISSING_GENERATED", "EXTRA_GENERATED",
+            "AMBIGUOUS_MATCH")):
         return {"equal": True, "gap": None}
-    actual_cases = len(actual_signature.get("cases", ()))
-    golden_cases = len(golden_signature.get("cases", ()))
     category = (
-        BASELINE_IMPLICIT_REQUIREMENT if golden_cases > actual_cases
-        else BASELINE_CONVERSION_MISS
+        ORACLE_GAP if counts.get("PARTIAL_MATCH") else
+        SUITE_GAP if counts.get("MISSING_GENERATED") else
+        GOLDEN_ERROR if counts.get("EXTRA_GENERATED") else
+        SUITE_GAP
     )
     gap = BaselineGap(
         category, baseline_ref, function,
-        f"semantic signature differs: generated_cases={actual_cases}, "
-        f"golden_cases={golden_cases}",
+        "semantic testcase matching differs: "
+        + ", ".join(f"{key}={counts[key]}" for key in sorted(counts)),
     )
     return {"equal": False, "gap": gap.to_dict()}
 
@@ -80,8 +90,8 @@ def compare_project_with_gaps(project, *, baseline_ref: str) -> list[dict[str, A
 
 
 __all__ = [
-    "BASELINE_CONVERSION_MISS", "BASELINE_GAP", "BASELINE_IMPLICIT_REQUIREMENT",
-    "GENERATOR_BUG", "GOLDEN_ERROR", "PROJECT_SPECIFIC_ADDITION",
-    "STABLE_HUMAN_CONVENTION", "BaselineGap", "compare_project_with_gaps",
-    "compare_semantic_csv",
+    "BASELINE_GAP", "PROJECT_RULE_GAP", "FUNCTION_IR_GAP", "OBLIGATION_GAP",
+    "SOLVER_GAP", "EVALUATOR_GAP", "ORACLE_GAP", "SUITE_GAP",
+    "HARNESS_GAP", "PROJECTION_GAP", "GOLDEN_ERROR", "BaselineGap",
+    "compare_project_with_gaps", "compare_semantic_csv",
 ]

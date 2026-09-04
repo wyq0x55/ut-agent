@@ -893,6 +893,7 @@ struct GlobalFieldAccess {
     bool IsUnion = false;
     std::string SourceFile;
     std::vector<uint64_t> ArraySizes;
+    std::set<std::string> IndexDrivers;
     std::vector<std::string> FieldPaths;
     std::vector<RecordLayoutFieldFact> RecordLayout;
     std::map<std::string, GlobalFieldAccess> FieldAccesses;
@@ -1270,6 +1271,9 @@ public:
       llvm::json::Array ArraySizes;
       for (uint64_t Size : Fact.ArraySizes)
         ArraySizes.push_back(static_cast<int64_t>(Size));
+      llvm::json::Array IndexDrivers;
+      for (const std::string &Driver : Fact.IndexDrivers)
+        IndexDrivers.push_back(jsonText(Driver));
       llvm::json::Array FieldPaths;
       for (const std::string &Path : Fact.FieldPaths)
         FieldPaths.push_back(jsonText(Path));
@@ -1321,6 +1325,7 @@ public:
           {"is_union", Fact.IsUnion},
           {"source_file", jsonText(Fact.SourceFile)},
           {"array_sizes", std::move(ArraySizes)},
+          {"index_drivers", std::move(IndexDrivers)},
           {"field_paths", std::move(FieldPaths)},
           {"field_accesses", std::move(FieldAccesses)},
           {"record_layout", std::move(RecordLayout)},
@@ -1722,8 +1727,16 @@ private:
     }
     std::vector<std::string> Qualifiers;
     std::string Type;
+    QualType VariableType;
     if (Variable) {
-      QualType VarType = Variable->getType();
+      // ``Variable`` is the storage root used for control identity.  The
+      // comparison operand itself may be a record member or array element;
+      // retain that leaf QualType for the value-domain contract so a
+      // predicate over ``table[i].field`` is not misclassified as the whole
+      // table record.
+      VariableType = View.Variable ? View.Variable->getType()
+                                   : Variable->getType();
+      QualType VarType = VariableType;
       Type = jsonText(VarType.getAsString());
       if (VarType.isConstQualified())
         Qualifiers.push_back("const");
@@ -1762,12 +1775,12 @@ private:
         {"type_spelling", Variable ? llvm::json::Value(Type)
                                      : llvm::json::Value(nullptr)},
           {"canonical_type", Variable ? llvm::json::Value(
-                                            jsonText(Variable->getType()
+                                            jsonText(VariableType
                                                          .getCanonicalType()
                                                          .getAsString()))
                                      : llvm::json::Value(nullptr)},
           {"qualifiers", std::move(QualifierArray)},
-          {"type_info", typeInfo(Variable ? Variable->getType() : QualType(),
+          {"type_info", typeInfo(Variable ? VariableType : QualType(),
                                   &Context)},
           {"provenance", provenance(SM, Comparison->getSourceRange(),
                                    "BinaryOperator", &LangOpts)},
@@ -2192,6 +2205,7 @@ private:
     ensureGlobalObjectFact(Variable, Write, Expression->getSourceRange(),
                            Expression->getBeginLoc());
     const std::string Name = jsonText(Variable->getNameAsString());
+    recordIndexDrivers(Expression, GlobalObjects[Name].IndexDrivers);
     const std::string FullPath = memberPath(Expression);
     const std::string Prefix = Name + ".";
     std::string Relative;
@@ -2385,6 +2399,29 @@ private:
       Cursor = MaybeParent;
     }
     return Parent;
+  }
+
+  void recordIndexDrivers(const Expr *Expression,
+                          std::set<std::string> &Drivers) const {
+    const Expr *Current = Expression;
+    while (Current) {
+      Current = Current->IgnoreParenImpCasts();
+      if (const auto *Subscript = dyn_cast<ArraySubscriptExpr>(Current)) {
+        if (const VarDecl *Index = referencedVar(Subscript->getIdx()))
+          Drivers.insert(jsonText(Index->getNameAsString()));
+        Current = Subscript->getBase();
+        continue;
+      }
+      if (const auto *Member = dyn_cast<MemberExpr>(Current)) {
+        Current = Member->getBase();
+        continue;
+      }
+      if (const auto *Unary = dyn_cast<UnaryOperator>(Current)) {
+        Current = Unary->getSubExpr();
+        continue;
+      }
+      break;
+    }
   }
 
   std::optional<std::pair<std::string, std::optional<bool>>>
@@ -2697,7 +2734,24 @@ public:
     for (unsigned Index = 0; Index < Call->getNumArgs(); ++Index) {
       if (!Call->getArg(Index)->getType()->isPointerType())
         continue;
-      if (Direct && argumentFieldPaths(Call->getArg(Index)).empty())
+      // Scalar pointee writes (for example ``copy(..., &local)``) have no
+      // member path, but they are still caller-visible output slots.  Keep
+      // read-only receive pointers out by requiring the extractor's
+      // definition-backed pointee_write fact.
+      bool PointeeWrite = false;
+      if (Direct && Index < Direct->parameters().size()) {
+        const FunctionDecl *Definition = Direct->getDefinition();
+        if (!Definition)
+          Definition = Direct;
+        const ParmVarDecl *DefinitionParam = Definition->getParamDecl(Index);
+        if (DefinitionParam && Definition->getBody()) {
+          PointeeUseVisitor Use(Context, DefinitionParam);
+          Use.TraverseStmt(const_cast<Stmt *>(Definition->getBody()));
+          PointeeWrite = Use.write();
+        }
+      }
+      if (Direct && argumentFieldPaths(Call->getArg(Index)).empty()
+          && !PointeeWrite)
         continue;
       const VarDecl *Root = referencedVar(Call->getArg(Index));
       if (!Root)
@@ -3227,7 +3281,7 @@ private:
   std::map<const IfStmt *, std::string> BranchIds;
   std::map<const Stmt *, std::string> BranchStmtIds;
   std::map<std::string, ControlFact> Controls;
-  std::map<std::string, GlobalFact> GlobalObjects;
+    std::map<std::string, GlobalFact> GlobalObjects;
   std::map<std::string, std::map<std::string, GlobalFieldAccess>>
       GlobalFieldAccesses;
   std::map<const VarDecl *, std::vector<ValueOrigin>> LocalOrigins;

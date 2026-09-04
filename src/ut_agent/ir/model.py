@@ -123,6 +123,11 @@ class GlobalObject:
     is_union: bool = False
     source_file: str = ""
     array_sizes: list[int] = field(default_factory=list)
+    # Extractor-proven variables used as dynamic array subscripts.  This is
+    # intentionally a relation on the object, not a Python guess from the
+    # source spelling; consumers can intersect the bounds of objects accessed
+    # through the same driver.
+    index_drivers: list[str] = field(default_factory=list)
     field_paths: list[str] = field(default_factory=list)
     field_accesses: list[FieldAccess] = field(default_factory=list)
     record_layout: list[RecordLayoutField] = field(default_factory=list)
