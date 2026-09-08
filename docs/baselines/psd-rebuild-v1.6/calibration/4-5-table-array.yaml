@@ -8,7 +8,7 @@ observed_mismatch:
   evidence_status: reviewed
 golden_semantic_behavior:
   status: assessed_with_generation_and_matching_limits
-  reason: "N-O2608 table-array functions are generation-validated but their Golden files remain NOT_INSPECTED under the report matching budget; N-O2606 table-array functions parse and compare as AMBIGUOUS_MATCH with suite/oracle/projection gaps."
+  reason: "A bounded direct recheck inspected all six table-array Golden files: N-O2606 has three exact semantic matches; N-O2608 has one exact match and two remaining suite/representative-value differences."
 function_ir_facts:
   status: cross_project_confirmed
   projects:
@@ -55,15 +55,15 @@ proposed_highest_layer_correction:
   prohibited: "Do not alter psd-rebuild@1.0 or add a project/function/Golden-specific engine condition."
 cross_project_evidence:
   status: recorded_review_required
-  run: .tmp/issue12-observability-20260908/issue12-table-array-calibration.json
+  run: .tmp/issue12-observability-20260908/issue12-table-array-evidence-v1.json
   reports:
     - .tmp/issue12-observability-20260908/N-O2608-PSD-087-global-io-v9/project-validation.json
     - .tmp/issue12-observability-20260908/N-O2606-PSD-049-global-io-v20/project-validation.json
-  conclusion: "Runtime mapping correction is supported; no isolated table-array behavior fix or normative rule is proven."
+  conclusion: "Runtime mapping correction is supported and the current generator expands the extractor-proven table indexes. N-O2606 table-array cases match exactly; N-O2608 remaining differences are retained as NEEDS_REVIEW and are not attributed to the array-policy field."
 counterexamples:
   - "A dynamic array without FunctionIR const_table_field keeps fixed selected-index coverage."
 regression:
   synthetic: passed
-  current_project: generation_validated_golden_not_inspected
-  historical_project: parsed_ambiguous_match
+  current_project: "N-O2608: 3/3 VALIDATED; 1 exact, 2 NEEDS_REVIEW"
+  historical_project: "N-O2606: 3/3 VALIDATED; 3 exact"
   behavior_fix: not_confirmed

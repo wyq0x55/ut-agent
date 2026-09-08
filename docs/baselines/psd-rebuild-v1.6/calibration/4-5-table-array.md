@@ -15,8 +15,8 @@ unchanged.
 | Docs interpretation | `4-5-array-compare.yaml` retains “覆盖表数组索引” in `purpose` and `mapping_note`. |
 | Runtime `psd-rebuild@1.0` | `array_policy` only has `fixed_index` and `preserve_other_elements`; it has no table-array index-coverage semantic. |
 | Generic implementation | `_coverage_variants` expands every extractor-proven `const_table_field` index, but the behavior is enabled indirectly by `array_policy.fixed_index`. |
-| N-O2608-PSD-087 FunctionIR | Final run contains three `const_table_field` families with 77 table indexes. All three are `VALIDATED`; their Golden files are present but `NOT_INSPECTED` because the report matching budget was exhausted. |
-| N-O2606-PSD-049 FunctionIR | Current run contains three `const_table_field` families with 73 table indexes. All three are `VALIDATED`, their Golden files parse, and all three comparisons remain `AMBIGUOUS_MATCH`. |
+| N-O2608-PSD-087 FunctionIR | Direct recheck contains three `const_table_field` families with 77 table indexes. All three are `VALIDATED`; `p_vol_mem_job_write_ramdf` is exact, while the read and write-data families remain `NEEDS_REVIEW` because of suite/representative-value differences. |
+| N-O2606-PSD-049 FunctionIR | Direct recheck contains three `const_table_field` families with 73 table indexes. All three are `VALIDATED` and all three compare as `EXACT_SEMANTIC_MATCH` against their Golden cases. |
 
 ## Decision
 
@@ -33,18 +33,17 @@ the established legacy interpretation only for 1.0.
 ## Evidence limits and next checks
 
 The final reports cover both projects: N-O2608 has 6/6 indexed functions
-processed and 6/6 generation-validated, while its three table-array Golden
-files remain `NOT_INSPECTED` under the report matching budget. N-O2606 has
-48/48 indexed functions processed, 48/48 generation-validated, and all three
-table-array Golden files parsed; their comparisons remain `AMBIGUOUS_MATCH`
-with suite/oracle/projection differences. The report does not attribute those
-differences to the array-policy field.
+processed and 6/6 generation-validated; its direct table-array recheck has
+one exact family and two unresolved families. N-O2606 has 48/48 indexed
+functions processed and 48/48 generation-validated; its three direct
+table-array rechecks are exact. The remaining N-O2608 differences are not
+attributed to the array-policy field.
 The cross-project FunctionIR facts establish applicability, not a new
 normative rule.
 
 The counterexample is an ordinary dynamic array comparison that is not an
 extractor-proven `const_table_field`: it must keep fixed selected-index
 coverage, not expand every possible array index. The synthetic table/non-table
-regression passes. Current and historical PSD corpus evidence is recorded in
-`.tmp/issue12-observability-20260908/issue12-table-array-calibration.json`;
-unresolved semantic comparisons remain `NEEDS_REVIEW`.
+regression passes. The direct cross-project evidence is recorded in
+`.tmp/issue12-observability-20260908/issue12-table-array-evidence-v1.json`;
+unresolved N-O2608 semantic comparisons remain `NEEDS_REVIEW`.
