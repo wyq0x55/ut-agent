@@ -585,8 +585,19 @@ def _control_env(values: dict[str, Any], ir: FunctionIR) -> dict[str, Any]:
                 break
             except KeyError:
                 continue
+        origin = _origin_record(control.value_origin)
+        if isinstance(origin, dict) and origin.get("kind") == "local_from_global":
+            # The automatic local is only an alias for the external global
+            # recorded by Clang.  Always resolve the alias from that driver
+            # when it is present so a stale local value cannot hide the
+            # actual testcase input selected by the solver.
+            driver = str(origin.get("driver", ""))
+            if driver:
+                try:
+                    value = _lookup(env, driver)
+                except KeyError:
+                    value = None
         if value is None:
-            origin = _origin_record(control.value_origin)
             if origin is not None:
                 kind = origin.get("kind")
                 if kind == "stub_return":
@@ -657,8 +668,15 @@ def _control_env(values: dict[str, Any], ir: FunctionIR) -> dict[str, Any]:
                     )
                 if value is None:
                     continue
-        env.setdefault(_norm(control.var), value)
-        env.setdefault(control.name, value)
+        if (isinstance(origin, dict)
+                and origin.get("kind") == "local_from_global"):
+            # Replace any stale automatic-local spelling with the value
+            # resolved from the external driver above.
+            env[_norm(control.var)] = value
+            env[control.name] = value
+        else:
+            env.setdefault(_norm(control.var), value)
+            env.setdefault(control.name, value)
         origin = _origin_record(control.value_origin)
         if origin is not None and origin.get("kind") == "stub_return":
             callee = str(origin.get("callee", ""))
@@ -890,22 +908,40 @@ def _loop_only_local_controls(ir: FunctionIR) -> set[str]:
 
 
 def _remap_derived_candidates(ir: FunctionIR, candidates: dict) -> None:
-    """Move const-table branch values onto the controllable index.
+    """Move derived branch values onto their controllable source.
 
-    A local such as ``table[index].field`` is not a target column.  When the
-    extractor supplied constant initializer facts, invert the finite table
-    relation so the input domain contains ``index`` values instead.
+    Automatic locals such as ``table[index].field`` or a local copied from a
+    global are not target columns.  When the extractor supplied the typed
+    source relation, move the finite candidate domain to the external driver
+    instead of enumerating values that disappear during target projection.
     """
     by_name = {cv.name: cv for cv in ir.control_vars}
     by_var = {_norm(cv.var): cv for cv in ir.control_vars}
     for control in ir.control_vars:
         origin = _origin_record(control.value_origin)
-        if origin is None or origin.get("kind") != "const_table_field":
+        if origin is None:
+            continue
+        if origin.get("kind") == "local_from_global":
+            driver_name = str(origin.get("driver", "")).strip()
+            source = candidates.get(control.name) or candidates.get(control.var)
+            if not driver_name or not source:
+                candidates.pop(control.name, None)
+                candidates.pop(control.var, None)
+                continue
+            target = candidates.setdefault(
+                driver_name,
+                {"cv": control, "values": set(), "enum": {}},
+            )
+            target["values"].update(source.get("values", set()))
+            candidates.pop(control.name, None)
+            candidates.pop(control.var, None)
+            continue
+        if origin.get("kind") != "const_table_field":
             continue
         table_values = origin.get("table_values", {})
         driver_name = str(origin.get("driver", ""))
         driver = by_name.get(driver_name) or by_var.get(_norm(driver_name))
-        source = candidates.get(control.name)
+        source = candidates.get(control.name) or candidates.get(control.var)
         if driver is None or not source or not isinstance(table_values, dict):
             candidates.pop(control.name, None)
             continue
@@ -1164,7 +1200,7 @@ def _clear_derived_bindings(values: dict[str, Any], ir: FunctionIR,
         origin = _origin_record(control.value_origin)
         if not isinstance(origin, dict):
             continue
-        if origin.get("kind") != "const_table_field":
+        if origin.get("kind") not in {"const_table_field", "local_from_global"}:
             continue
         driver = _norm(str(origin.get("driver", "")))
         if driver not in normalized:
@@ -2143,6 +2179,17 @@ def _generic_inputs(ir: FunctionIR,
         if key and cv.constant_value is None
         and cv.source in ("param", "global", "local_from_global", "stub")
     }
+    # A local_from_global control is evaluated through its extractor-proven
+    # external driver.  The driver may be a GlobalObject rather than a
+    # ControlVar, so add it explicitly to the solver domain allow-list.
+    for control in ir.control_vars:
+        origin = _origin_record(control.value_origin)
+        if (control.source == "local_from_global"
+                and isinstance(origin, dict)
+                and origin.get("kind") == "local_from_global"):
+            driver = str(origin.get("driver", "")).strip()
+            if driver:
+                allowed.add(driver)
     unresolved = [
         cv.name for cv in ir.control_vars
         if cv.constant_value is None
@@ -2385,6 +2432,11 @@ def _domain_key_for(ir: FunctionIR, expression: str,
                     if driver in {_norm(candidate.name), _norm(candidate.var)} \
                             and candidate.name in domains:
                         return candidate.name
+            if isinstance(origin, dict) and origin.get("kind") == "local_from_global":
+                driver = _norm(str(origin.get("driver", "")))
+                for candidate in domains:
+                    if _norm(candidate) == driver:
+                        return candidate
             if isinstance(origin, dict) and origin.get("kind") == "stub_param":
                 callee = str(origin.get("callee", ""))
                 try:

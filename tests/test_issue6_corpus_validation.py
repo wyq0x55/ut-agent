@@ -1007,6 +1007,35 @@ def test_issue6_const_table_branch_uses_driver_indexes_as_proof_domain():
     assert domains["index"] == [0, 1]
 
 
+def test_local_from_global_candidates_follow_external_driver():
+    info = TypeInfo(
+        canonical_type="unsigned char", kind="integer", bit_width=8,
+        signed=False, min_value=0, max_value=255,
+    )
+    ir = FunctionIR(
+        name="global_alias_target", file="target.c", line=1, ret_type="void",
+        globals_used=["source"],
+        global_objects=[GlobalObject(name="source", read=True)],
+        branches=[Branch(
+            bid="b0", kind="if", line=2,
+            atoms=[Atom("derived", "unsigned char", "==", 1,
+                        None, "derived == 1", type_info=info)],
+        )],
+        control_vars=[ControlVar(
+            "derived", "derived", "local_from_global", type_info=info,
+            value_origin=ValueOrigin(kind="local_from_global", driver="source"),
+        )],
+    )
+    from ut_agent.generation import engine
+
+    domains, fixed = engine._generic_inputs(ir)
+    assert "source" in domains
+    assert "derived" not in domains
+    assert engine._control_env({**fixed, "source": 7, "derived": 1}, ir)[
+        "derived"
+    ] == 7
+
+
 def test_issue12_table_index_coverage_comes_from_explicit_runtime_class():
     info = TypeInfo(
         canonical_type="unsigned char", kind="integer", bit_width=8,
