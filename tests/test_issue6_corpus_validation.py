@@ -1036,6 +1036,45 @@ def test_local_from_global_candidates_follow_external_driver():
     ] == 7
 
 
+def test_local_from_global_resolves_before_dependent_local_evaluations():
+    info = TypeInfo(
+        canonical_type="unsigned char", kind="integer", bit_width=8,
+        signed=False, min_value=0, max_value=255,
+    )
+    # Put dependent_local BEFORE derived_global in control_vars
+    ir = FunctionIR(
+        name="order_dependent_target", file="target.c", line=1, ret_type="void",
+        globals_used=["source"],
+        global_objects=[GlobalObject(name="source", read=True)],
+        branches=[
+            Branch(
+                bid="b0", kind="if", line=2,
+                atoms=[Atom("derived_global", "unsigned char", "==", 1,
+                            None, "derived_global == 1", type_info=info)],
+            ),
+            Branch(
+                bid="b1", kind="if", line=4,
+                atoms=[Atom("dependent_local", "unsigned char", "!=", 0,
+                            None, "dependent_local != 0", type_info=info)],
+            ),
+        ],
+        control_vars=[
+            ControlVar(
+                "dependent_local", "dependent_local", "local", type_info=info,
+                value_origin=ValueOrigin(kind="constant", expression="0"),
+            ),
+            ControlVar(
+                "derived_global", "derived_global", "local_from_global", type_info=info,
+                value_origin=ValueOrigin(kind="local_from_global", driver="source"),
+            ),
+        ],
+    )
+    from ut_agent.generation import engine
+
+    env = engine._control_env({"source": 42}, ir)
+    assert env["derived_global"] == 42
+
+
 def test_exact_dynamic_global_path_precedes_normalized_alias():
     info = TypeInfo(
         canonical_type="unsigned char", kind="integer", bit_width=8,

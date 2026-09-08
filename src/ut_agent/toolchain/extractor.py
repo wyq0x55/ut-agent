@@ -7,6 +7,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 import json
+import os
 from pathlib import Path
 import subprocess
 import tempfile
@@ -30,8 +31,17 @@ def default_clang_extractor() -> Path:
     configuration/build error; callers must not silently switch to a Python
     parser or a token/regular-expression approximation.
     """
+    override = os.environ.get("UT_CLANG_EXTRACT")
+    if override:
+        path = Path(override).expanduser().resolve()
+        if path.is_file():
+            return path
+        raise ClangExtractorError(
+            f"UT_CLANG_EXTRACT set but not found: {override}"
+        )
     root = Path(__file__).resolve().parents[3]
     candidates = (
+        root / ".build" / "ut-clang-extract-issue12-global-io" / "bin" / "ut-clang-extract.exe",
         root / ".build" / "ut-clang-extract-nmake2" / "bin" / "ut-clang-extract.exe",
         root / ".build" / "ut-clang-extract" / "bin" / "ut-clang-extract.exe",
         root / "tooling" / "ut-clang-extract.exe",

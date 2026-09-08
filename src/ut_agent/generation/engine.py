@@ -580,6 +580,17 @@ def _control_env(values: dict[str, Any], ir: FunctionIR) -> dict[str, Any]:
     """
     env = _expanded_env(values)
     for control in ir.control_vars:
+        origin = _origin_record(control.value_origin)
+        if isinstance(origin, dict) and origin.get("kind") == "local_from_global":
+            driver = str(origin.get("driver", "")).strip()
+            if driver:
+                try:
+                    val = _lookup(env, driver)
+                    env[_norm(control.var)] = val
+                    env[control.name] = val
+                except KeyError:
+                    pass
+    for control in ir.control_vars:
         value = None
         for key in (control.var, control.name):
             if not key:
