@@ -37,7 +37,7 @@ from ut_agent.reporting import (
     preflight_corpus,
     validate_corpus_paths,
 )
-from ut_agent.targets.winams.csv import _pointer_column_key
+from ut_agent.targets.winams.csv import _intent_value, _pointer_column_key
 from ut_agent.targets.winams.index import load_index
 
 
@@ -1034,6 +1034,58 @@ def test_local_from_global_candidates_follow_external_driver():
     assert engine._control_env({**fixed, "source": 7, "derived": 1}, ir)[
         "derived"
     ] == 7
+
+
+def test_exact_dynamic_global_path_precedes_normalized_alias():
+    info = TypeInfo(
+        canonical_type="unsigned char", kind="integer", bit_width=8,
+        signed=False, min_value=0, max_value=255,
+    )
+    ir = FunctionIR(
+        name="dynamic_global_target", file="target.c", line=1, ret_type="void",
+        globals_used=["array"],
+        global_objects=[GlobalObject(
+            name="array", read=True, array_sizes=[2],
+            index_drivers=["index"], field_paths=["field"],
+        )],
+        branches=[Branch(
+            bid="b0", kind="if", line=2,
+            atoms=[Atom("array[ index ].field", "unsigned char", "!=", 3,
+                        None, "array[index].field != 3", type_info=info)],
+        )],
+        control_vars=[ControlVar(
+            "field", "array[ index ].field", "global", type_info=info,
+        )],
+    )
+    from ut_agent.generation import engine
+
+    values = {
+        "global:array[0].field": 0,
+        "global:array[1].field": 0,
+        "array[ index ].field": 3,
+        "array[index].field": 0,
+    }
+    env = engine._control_env(values, ir)
+    assert engine.evaluate_atom(ir.branches[0].atoms[0], env) is False
+
+
+def test_dynamic_global_value_projects_to_selected_winams_cell():
+    ir = FunctionIR(
+        name="dynamic_projection_target", file="target.c", line=1, ret_type="void",
+        global_objects=[GlobalObject(
+            name="array", read=True, array_sizes=[2],
+            index_drivers=["index"], field_paths=["field"],
+        )],
+    )
+    values = {
+        "index": 1,
+        "global:array[0].field": 0,
+        "global:array[1].field": 0,
+        "array[ index ].field": 7,
+    }
+    assert _intent_value(
+        values, "target.c/array[1].field", "global:array[1].field", ir=ir,
+    ) == 7
 
 
 def test_issue12_table_index_coverage_comes_from_explicit_runtime_class():

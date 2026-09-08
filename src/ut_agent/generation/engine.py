@@ -367,7 +367,11 @@ def _norm(value: str) -> str:
 def _lookup(env: dict[str, Any], name: str) -> Any:
     compact = _norm(name)
     aliases = [compact, compact.lstrip("@*"), compact.split("/")[-1]]
-    for alias in reversed(aliases):
+    # Exact typed paths take precedence over short/tail aliases.  Dynamic
+    # array members can have both spaced and compact spellings in one
+    # environment; resolving the tail first lets an unrelated fixed column
+    # mask the selected member value.
+    for alias in aliases:
         for candidate in (alias, alias.rstrip("]")):
             if candidate in env:
                 return env[candidate]
@@ -580,6 +584,13 @@ def _control_env(values: dict[str, Any], ir: FunctionIR) -> dict[str, Any]:
         for key in (control.var, control.name):
             if not key:
                 continue
+            # Prefer the extractor's exact semantic path before consulting
+            # normalized aliases.  Dynamic array-member paths can coexist
+            # with their space-normalized spelling; a fixed global column
+            # must not mask the candidate value selected for this control.
+            if key in values:
+                value = values[key]
+                break
             try:
                 value = _lookup(env, key)
                 break
@@ -672,6 +683,12 @@ def _control_env(values: dict[str, Any], ir: FunctionIR) -> dict[str, Any]:
                 and origin.get("kind") == "local_from_global"):
             # Replace any stale automatic-local spelling with the value
             # resolved from the external driver above.
+            env[_norm(control.var)] = value
+            env[control.name] = value
+        elif control.var in values or control.name in values:
+            # Preserve the exact extractor path selected by the testcase even
+            # when _expanded_env already contains a normalized alias from a
+            # different spelling of the same dynamic member.
             env[_norm(control.var)] = value
             env[control.name] = value
         else:

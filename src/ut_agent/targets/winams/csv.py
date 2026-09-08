@@ -1602,8 +1602,78 @@ def _winams_value(
     return "0x0"
 
 
-def _intent_value(values: dict, comment: str, key: str | None) -> object:
+def _dynamic_global_value(
+    values: dict, key: str | None, ir: FunctionIR | None,
+) -> tuple[bool, object]:
+    """Project one extractor dynamic-member value to its static target cell.
+
+    FunctionIR keeps the array index drivers as typed object facts while the
+    WinAMS adapter expands the target array into concrete cells.  When a
+    testcase varies ``array[driver].field``, select that value for the
+    statically rendered ``global:array[index].field`` cell.  No C spelling is
+    interpreted here; the relation is limited to the extractor-owned global
+    object name, field and index-driver facts.
+    """
+    if ir is None or not isinstance(key, str) or not key.startswith("global:"):
+        return False, None
+    path = key[len("global:"):]
+    open_index = path.find("[")
+    close_index = path.find("]", open_index + 1)
+    if open_index <= 0 or close_index <= open_index + 1:
+        return False, None
+    name = path[:open_index]
+    raw_index = path[open_index + 1:close_index]
+    try:
+        target_index = int(raw_index)
+    except (TypeError, ValueError):
+        return False, None
+    field = path[close_index + 1:]
+    if field.startswith("."):
+        field = field[1:]
+    if not field:
+        return False, None
+    record = next(
+        (item for item in ir.global_objects
+         if str(getattr(item, "name", "")) == name),
+        None,
+    )
+    if record is None:
+        return False, None
+    drivers = {
+        _compact_path(str(item))
+        for item in getattr(record, "index_drivers", ())
+    }
+    if not drivers:
+        return False, None
+    wanted_prefix = _compact_path(name) + "["
+    wanted_suffix = "]." + _compact_path(field)
+    for raw_key, value in values.items():
+        compact = _compact_path(str(raw_key))
+        if compact.startswith("global:"):
+            continue
+        if not compact.startswith(wanted_prefix) or not compact.endswith(wanted_suffix):
+            continue
+        expression = compact[len(wanted_prefix):-len(wanted_suffix)]
+        if expression not in drivers:
+            continue
+        driver_value = values.get(expression)
+        if isinstance(driver_value, int) and driver_value == target_index:
+            return True, value
+    return False, None
+
+
+def _compact_path(value: str) -> str:
+    return "".join(str(value or "").split())
+
+
+def _intent_value(
+    values: dict, comment: str, key: str | None,
+    *, ir: FunctionIR | None = None,
+) -> object:
     """按精确列名或语义别名取值；绝不生成默认测试值。"""
+    dynamic_found, dynamic_value = _dynamic_global_value(values, key, ir)
+    if dynamic_found:
+        return dynamic_value
     candidates = [comment]
     if key:
         candidates.append(key)
@@ -1776,12 +1846,12 @@ def render_intents_csv(ir: FunctionIR, result: GenerationResult, *,
         for comment, key in input_columns:
             raw = intent.raw_inputs.get(comment)
             values.append(raw if raw is not None else _render_intent_value(
-                _intent_value(intent.inputs, comment, key),
+                _intent_value(intent.inputs, comment, key, ir=ir),
                 comment=comment, key=key, ir=ir))
         for comment, key in output_columns:
             raw = intent.raw_expected.get(comment)
             values.append(raw if raw is not None else _render_intent_value(
-                _intent_value(intent.expected, comment, key),
+                _intent_value(intent.expected, comment, key, ir=ir),
                 comment=comment, key=key, ir=ir))
         return ",".join([""] + values)
 
