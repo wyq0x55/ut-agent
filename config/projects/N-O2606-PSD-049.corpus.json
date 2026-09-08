@@ -1,0 +1,18 @@
+{
+  "schema_version": 1,
+  "project": {
+    "id": "N-O2606-PSD-049",
+    "context_manifest": "N-O2606-PSD-049.json",
+    "scope": "all-indexed-functions"
+  },
+  "corpus": {
+    "index_csv": "../../examples/N-O2606-PSD-049/HOYU/N-O2606-PSD-049.csv",
+    "product_root": "../../examples/N-O2606-PSD-049/744D788D_PSD_100003/Product",
+    "golden_root": "../../examples/N-O2606-PSD-049/WinAMS"
+  },
+  "evidence": {
+    "baseline_document": "../../docs/単体テスト項目基準書_Ver.1.6.xlsx",
+    "baseline_sheet": "PSD再構築",
+    "baseline_revision": "Ver.1.6"
+  }
+}

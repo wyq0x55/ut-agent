@@ -206,8 +206,8 @@ def test_project_manifest_is_the_single_strategy_source():
 
     manifest = load_manifest("config/projects/N-O2608-PSD-087.json")
     context = resolve_project_context("config/projects/N-O2608-PSD-087.json")
-    assert manifest.baseline_ref == "psd-rebuild@1.0"
-    assert context.provenance["baseline_version"] == "1.0"
+    assert manifest.baseline_ref == "psd-rebuild@1.1"
+    assert context.provenance["baseline_version"] == "1.1"
     assert context.provenance["mcdc_enabled"] is True
     assert "base_profile" not in manifest.profile
     assert "profile_version" not in manifest.profile

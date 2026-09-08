@@ -1,0 +1,69 @@
+format_version: 1
+kind: baseline-calibration-record
+id: psd-rebuild-4-5-table-array-runtime-mapping
+status: review_required_cross_project_evidence_recorded
+observed_mismatch:
+  family: table-array-index-coverage
+  behavior: "Docs require every index for extractor-proven table arrays; runtime only names fixed-index coverage."
+  evidence_status: reviewed
+golden_semantic_behavior:
+  status: assessed_with_generation_and_matching_limits
+  reason: "N-O2608 table-array functions are present but blocked by generation gate; N-O2606 table-array functions parse and compare as AMBIGUOUS_MATCH with suite/oracle/projection gaps."
+function_ir_facts:
+  status: cross_project_confirmed
+  projects:
+    - project: N-O2608-PSD-087
+      artifacts:
+        - function: p_vol_mem_job_write_ramdf
+        - function: p_u1l_mem_req_read_ramdf
+        - function: p_u1l_mem_req_write_data_ramdf
+      fact: "const_table_field"
+    - project: N-O2606-PSD-049
+      artifacts:
+        - function: p_vol_spiic_pi_set_snddat_ini
+        - function: p_vol_spiic_pi_set_snddat_icslp
+        - function: p_vol_spiic_pi_set_snddat_cyc
+      fact: "const_table_field"
+raw_source_evidence:
+  document: docs/単体テスト項目基準書_Ver.1.6.xlsx
+  sheet: PSD再構築
+  revision: Ver.1.6
+  cells: [D211, D212]
+  source_range: PSD再構築!C210:J221
+  immutable: true
+docs_interpretation:
+  path: docs/baselines/psd-rebuild-v1.6/4-5-array-compare.yaml
+  fields: [purpose, mapping_note]
+  behavior: "Fixed selected index, false-side other elements, and all indexes for table arrays."
+runtime_mapping:
+  baseline: psd-rebuild@1.0
+  path: config/baselines/psd-rebuild/1.0.yaml
+  field: array_policy
+  behavior: "fixed_index and preserve_other_elements only"
+implementation_behavior:
+  path: src/ut_agent/generation/engine.py
+  symbol: _coverage_variants
+  behavior: "Expands all const_table_field indexes through the fixed_index gate."
+classification:
+  value: RUNTIME_MAPPING_DRIFT
+  first_divergence_layer: runtime_mapping
+  confidence: high
+proposed_highest_layer_correction:
+  target: config/baselines/psd-rebuild/1.1.yaml
+  behavior: "Represent table-array index coverage as an explicit semantic class with index_coverage: all."
+  approval: approved
+  prohibited: "Do not alter psd-rebuild@1.0 or add a project/function/Golden-specific engine condition."
+cross_project_evidence:
+  status: recorded_review_required
+  run: .tmp/issue12-observability-20260908/issue12-table-array-calibration.json
+  reports:
+    - .tmp/issue12-observability-20260908/N-O2608-PSD-087-final/project-validation.json
+    - .tmp/issue12-observability-20260908/N-O2606-PSD-049-final/project-validation.json
+  conclusion: "Runtime mapping correction is supported; no isolated table-array behavior fix or normative rule is proven."
+counterexamples:
+  - "A dynamic array without FunctionIR const_table_field keeps fixed selected-index coverage."
+regression:
+  synthetic: passed
+  current_project: generation_gate_partial
+  historical_project: parsed_ambiguous_match
+  behavior_fix: not_confirmed

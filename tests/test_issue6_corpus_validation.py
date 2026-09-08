@@ -1,6 +1,7 @@
 """Issue #6 project-corpus manifest and semantic comparison gates."""
 from __future__ import annotations
 
+import json
 from pathlib import Path
 from dataclasses import replace
 from types import SimpleNamespace
@@ -11,19 +12,30 @@ from ut_agent.learning import label_kind, normalize_golden_csv, normalize_label
 from ut_agent.generation.boundary import control_candidates, typed_boundary_points
 from ut_agent.generation.obligation import derive_obligations
 from ut_agent.generation.solver import solve_obligation
-from ut_agent.ir import Atom, Branch, ControlVar, FunctionIR, Param, TypeInfo, ValueOrigin
+from ut_agent.generation.model import TestObligation as GenerationObligation
+from ut_agent.ir import (
+    Atom, Branch, CallSite, ControlVar, Effect, FunctionIR, GlobalObject,
+    Param, TypeInfo,
+    ValueOrigin,
+)
 from ut_agent.project import load_manifest
 from ut_agent.reporting import (
+    AMBIGUOUS_MATCH,
+    CALIBRATION_CLASSIFICATIONS,
     STANDARD_GAP_CATEGORIES,
     EQUIVALENT_REPRESENTATIVE,
+    EXTRA_GENERATED,
     PARTIAL_MATCH,
+    build_corpus_validation_report,
     compare_function_semantics,
+    golden_for_unit,
     match_semantic_cases,
     load_corpus_manifest,
     preflight_corpus,
     validate_corpus_paths,
 )
 from ut_agent.targets.winams.csv import _pointer_column_key
+from ut_agent.targets.winams.index import load_index
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -42,7 +54,7 @@ def test_issue6_corpus_manifest_locks_all_indexed_functions():
     context = load_manifest(manifest.context_manifest)
     assert manifest.project_id == "N-O2608-PSD-087"
     assert manifest.scope == "all-indexed-functions"
-    assert context.baseline_ref == "psd-rebuild@1.0"
+    assert context.baseline_ref == "psd-rebuild@1.1"
     assert "baseline" not in manifest.to_dict()["project"]
 
 
@@ -56,12 +68,522 @@ def test_issue6_missing_indexed_source_is_reported_as_blocked_fixture():
     assert {item["reason"] for item in blocked} == {"FIXTURE_MISSING"}
 
 
+def test_issue12_project_report_exposes_calibration_contract(tmp_path: Path):
+    manifest = load_corpus_manifest(CORPUS)
+    report = build_corpus_validation_report(
+        manifest, load_manifest(manifest.context_manifest), (),
+        output_root=tmp_path,
+    )
+    assert report["calibration"]["golden_role"] == "detector_only"
+    assert report["calibration"]["source_evidence"] == {
+        "baseline_document": str(manifest.baseline_document),
+        "baseline_sheet": manifest.baseline_sheet,
+        "baseline_revision": manifest.baseline_revision,
+    }
+    assert report["totals"]["indexed_functions"] == 6
+    assert report["totals"]["missing_functions"] == 6
+    assert report["totals"]["root_gap_count"] == 6
+    assert report["totals"]["gap_categories"] == {"RUN_INCOMPLETE": 6}
+    assert report["taxonomy"]["calibration_classifications"] == list(
+        CALIBRATION_CLASSIFICATIONS
+    )
+
+
+def test_issue12_present_golden_is_distinct_from_not_inspected(tmp_path: Path):
+    manifest = load_corpus_manifest(CORPUS)
+    context = load_manifest(manifest.context_manifest)
+    row = next(
+        item for item in load_index(manifest.index_csv, manifest.product_root)
+        if item.function == "p_u1l_mem_req_read_ramdf"
+    )
+    output_dir = tmp_path / row.target_rel
+    output_dir.mkdir(parents=True)
+    summary = {
+        "schema_version": 1, "status": "VALIDATED", "intent_count": 1000,
+        "csv_intent_count": 1000, "validated_intent_count": 1000,
+        "obligation_kinds": {"branch": 1000}, "solve_statuses": {"SAT": 1000},
+        "evaluation_count": 1000, "evaluation_complete_count": 1000,
+        "issues": [], "input_keys": [], "expected_keys": [], "stub_keys": [],
+    }
+    (output_dir / "test-intents-summary.json").write_text(
+        json.dumps(summary), encoding="utf-8"
+    )
+    unit = SimpleNamespace(
+        row=row,
+        status="VALIDATED",
+        testcsv=output_dir / "TestCsv" / f"{row.function}.csv",
+        intent_manifest=output_dir / "test-intents.json",
+    )
+    report = build_corpus_validation_report(
+        manifest, context, (unit,), output_root=tmp_path,
+    )
+    item = next(item for item in report["functions"] if item["function"] == row.function)
+    assert item["golden"]["file_status"] == "PRESENT"
+    assert item["golden"]["inspection_status"] == "NOT_INSPECTED"
+    assert item["golden"]["status"] == "PRESENT_NOT_INSPECTED"
+    assert report["totals"]["golden_not_inspected"] >= 1
+
+
+def test_issue12_missing_generation_summary_is_unknown_not_zero(tmp_path: Path):
+    manifest = load_corpus_manifest(CORPUS)
+    context = load_manifest(manifest.context_manifest)
+    row = load_index(manifest.index_csv, manifest.product_root)[0]
+    unit = SimpleNamespace(
+        row=row,
+        status="NEEDS_REVIEW",
+        testcsv=tmp_path / "missing.csv",
+        intent_manifest=tmp_path / "missing-test-intents.json",
+    )
+    report = build_corpus_validation_report(
+        manifest, context, (unit,), output_root=tmp_path,
+    )
+    assert report["totals"]["generated_intents"] is None
+    assert report["totals"]["generated_intents_unknown_functions"] == 6
+    processed = next(item for item in report["functions"] if item["row"] == row.row_number)
+    assert processed["generated"]["semantics"]["intent_count"] is None
+
+
+def test_issue12_golden_mapping_keeps_src_below_n_o2606_root():
+    manifest = load_corpus_manifest(
+        ROOT / "config" / "projects" / "N-O2606-PSD-049.corpus.json"
+    )
+    row = load_index(manifest.index_csv, manifest.product_root)[0]
+    golden = golden_for_unit(manifest, SimpleNamespace(row=row))
+    assert golden is not None
+    assert golden.is_file()
+    assert golden.parts[-4:] == (
+        "p_blm.c", "p_vol_blm_job_out", "TestCsv", "p_vol_blm_job_out.csv"
+    )
+
+
+def test_issue12_boundary_solver_uses_single_typed_representative():
+    info = TypeInfo(
+        canonical_type="unsigned char", kind="integer", bit_width=8,
+        signed=False, min_value=0, max_value=255,
+    )
+    names = [f"g{index}" for index in range(8)]
+    ir = FunctionIR(
+        name="synthetic_boundary_product", file="target.c", line=1,
+        ret_type="void",
+        branches=[Branch(
+            bid="b0", kind="if", line=2, connective="&&",
+            atoms=[Atom(name, "unsigned char", "==", 1, None,
+                        f"{name} == 1", type_info=info) for name in names],
+        )],
+        control_vars=[
+            ControlVar(name, name, "global", type_info=info) for name in names
+        ],
+    )
+    baseline = load_baseline(ROOT / "config" / "baselines" / "psd-rebuild" / "1.1.yaml")
+    result = solve_obligation(
+        ir,
+        GenerationObligation(
+            oid="b0:boundary:0:below:0", kind="boundary", branch_id="b0",
+            condition_index=0, boundary_value=0, boundary_class="below",
+        ),
+        baseline,
+    )
+    assert result.status == "SAT"
+    assert result.checked == 1
+
+
+def test_issue12_boundary_solver_uses_representative_under_product_guard():
+    info = TypeInfo(
+        canonical_type="unsigned char", kind="integer", bit_width=8,
+        signed=False, min_value=0, max_value=255,
+    )
+    names = ["g0", "g1"]
+    ir = FunctionIR(
+        name="synthetic_small_boundary_product", file="target.c", line=1,
+        ret_type="void",
+        branches=[Branch(
+            bid="b0", kind="if", line=2, connective="&&",
+            atoms=[Atom(name, "unsigned char", "==", 1, None,
+                        f"{name} == 1", type_info=info) for name in names],
+        )],
+        control_vars=[
+            ControlVar(name, name, "global", type_info=info) for name in names
+        ],
+    )
+    baseline = load_baseline(ROOT / "config" / "baselines" / "psd-rebuild" / "1.1.yaml")
+    result = solve_obligation(
+        ir,
+        GenerationObligation(
+            oid="b0:boundary:0:exact:1", kind="boundary", branch_id="b0",
+            condition_index=0, boundary_value=1, boundary_class="exact",
+        ),
+        baseline,
+    )
+    assert result.status == "SAT"
+    assert result.checked == 1
+
+
+def test_issue12_targeted_solver_honors_nested_parent_outcome():
+    info = TypeInfo(
+        canonical_type="unsigned char", kind="integer", bit_width=8,
+        signed=False, min_value=0, max_value=255,
+    )
+    ir = FunctionIR(
+        name="synthetic_nested_parent_path", file="target.c", line=1,
+        ret_type="void",
+        branches=[
+            Branch(
+                bid="parent", kind="if", line=2,
+                atoms=[Atom("mode", "unsigned char", "==", 2, None,
+                             "mode == 2", type_info=info)],
+            ),
+            Branch(
+                bid="child", kind="if", line=3, parent_bid="parent",
+                parent_outcome=True,
+                atoms=[Atom("polarity", "unsigned char", "==", 1, None,
+                             "polarity == 1", type_info=info)],
+            ),
+        ],
+        control_vars=[
+            ControlVar("mode", "mode", "global", type_info=info),
+            ControlVar("polarity", "polarity", "global", type_info=info),
+        ],
+    )
+    baseline = load_baseline(ROOT / "config" / "baselines" / "psd-rebuild" / "1.1.yaml")
+    result = solve_obligation(
+        ir,
+        GenerationObligation(
+            oid="child:T", kind="branch", branch_id="child", outcome=True,
+        ),
+        baseline,
+    )
+    assert result.status == "SAT"
+    assert result.assignment["mode"] == 2
+
+
+def test_issue12_mcdc_uses_branch_slice_over_large_global_product():
+    info = TypeInfo(
+        canonical_type="unsigned char", kind="integer", bit_width=8,
+        signed=False, min_value=0, max_value=255,
+    )
+    names = ["left", "right"] + [f"unrelated{index}" for index in range(6)]
+    branches = [Branch(
+        bid="mcdc", kind="if", line=2, connective="&&",
+        atoms=[
+            Atom("left", "unsigned char", "==", 1, None,
+                 "left == 1", type_info=info),
+            Atom("right", "unsigned char", "==", 1, None,
+                 "right == 1", type_info=info),
+        ],
+    )]
+    branches.extend(
+        Branch(
+            bid=f"noise{index}", kind="if", line=3 + index,
+            atoms=[Atom(name, "unsigned char", "==", 1, None,
+                        f"{name} == 1", type_info=info)],
+        )
+        for index, name in enumerate(names[2:])
+    )
+    ir = FunctionIR(
+        name="synthetic_mcdc_slice", file="target.c", line=1,
+        ret_type="void", branches=branches,
+        control_vars=[ControlVar(name, name, "global", type_info=info)
+                      for name in names],
+    )
+    baseline = load_baseline(ROOT / "config" / "baselines" / "psd-rebuild" / "1.1.yaml")
+    result = solve_obligation(
+        ir,
+        GenerationObligation(
+            oid="mcdc:mcdc:0:T", kind="mcdc", branch_id="mcdc",
+            condition_index=0, outcome=True,
+        ),
+        baseline,
+    )
+    assert result.status == "SAT"
+    assert result.assignment["left"] == 1
+    assert result.assignment["right"] == 1
+
+
+def test_issue12_mcdc_honors_nested_condition_tree():
+    info = TypeInfo(
+        canonical_type="unsigned char", kind="integer", bit_width=8,
+        signed=False, min_value=0, max_value=255,
+    )
+    branch = Branch(
+        bid="nested", kind="if", line=2, connective="&&",
+        atoms=[
+            Atom("can", "unsigned char", "==", 1, None,
+                 "can == 1", type_info=info),
+            Atom("open", "unsigned char", "==", 1, None,
+                 "open == 1", type_info=info),
+            Atom("close", "unsigned char", "==", 2, None,
+                 "close == 2", type_info=info),
+        ],
+        condition_tree={
+            "kind": "logical", "op": "&&", "children": [
+                {"kind": "atom", "index": 0},
+                {"kind": "logical", "op": "||", "children": [
+                    {"kind": "atom", "index": 1},
+                    {"kind": "atom", "index": 2},
+                ]},
+            ],
+        },
+    )
+    ir = FunctionIR(
+        name="synthetic_nested_mcdc", file="target.c", line=1,
+        ret_type="void", branches=[branch],
+        control_vars=[ControlVar(name, name, "global", type_info=info)
+                      for name in ("can", "open", "close")],
+    )
+    baseline = load_baseline(ROOT / "config" / "baselines" /
+                             "psd-rebuild" / "1.1.yaml")
+    obligations = [
+        item for item in derive_obligations(ir, baseline, mcdc_enabled=True)
+        if item.kind == "mcdc"
+    ]
+    assert len(obligations) == 6
+    results = [solve_obligation(ir, item, baseline) for item in obligations]
+    assert all(item.status == "SAT" for item in results)
+    middle_true = next(item for item in results
+                       if item.obligation.condition_index == 1
+                       and item.obligation.outcome is True)
+    assert middle_true.assignment["can"] == 1
+    assert middle_true.assignment["open"] == 1
+    assert middle_true.assignment["close"] != 2
+
+
+def test_issue12_mcdc_keeps_duplicate_leaf_paths_as_separate_inputs():
+    info = TypeInfo(
+        canonical_type="unsigned char", kind="integer", bit_width=8,
+        signed=False, min_value=0, max_value=255,
+    )
+    ir = FunctionIR(
+        name="synthetic_indexed_field_mcdc", file="target.c", line=1,
+        ret_type="void", branches=[Branch(
+            bid="fields", kind="if", line=2, connective="&&",
+            atoms=[
+                Atom("table[0].field", "unsigned char", "==", 0, None,
+                     "table[0].field == 0", type_info=info),
+                Atom("table[1].field", "unsigned char", "==", 0, None,
+                     "table[1].field == 0", type_info=info),
+            ],
+        )],
+        control_vars=[
+            ControlVar("field", "table[0].field", "global", type_info=info),
+            ControlVar("field", "table[1].field", "global", type_info=info),
+        ],
+    )
+    baseline = load_baseline(ROOT / "config" / "baselines" /
+                             "psd-rebuild" / "1.1.yaml")
+    obligation = GenerationObligation(
+        oid="fields:mcdc:0:F", kind="mcdc", branch_id="fields",
+        condition_index=0, outcome=False,
+    )
+    result = solve_obligation(ir, obligation, baseline)
+    assert result.status == "SAT"
+    assert result.assignment["table[0].field"] != result.assignment["table[1].field"]
+
+
+def test_issue12_boundary_uses_alternate_nested_path_witness():
+    info = TypeInfo(
+        canonical_type="unsigned char", kind="integer", bit_width=8,
+        signed=False, min_value=0, max_value=255,
+    )
+    ir = FunctionIR(
+        name="synthetic_nested_boundary_path", file="target.c", line=1,
+        ret_type="void",
+        branches=[
+            Branch(
+                bid="b0", kind="if", line=2,
+                atoms=[Atom("rr", "unsigned char", "==", 2, None,
+                             "rr == 2", type_info=info)],
+            ),
+            Branch(
+                bid="b1", kind="if", line=3, parent_bid="b0",
+                parent_outcome=False, atoms=[
+                    Atom("otsw", "unsigned char", "==", 1, None,
+                         "otsw == 1", type_info=info),
+                    Atom("rr", "unsigned char", "==", 1, None,
+                         "rr == 1", type_info=info),
+                ], connective="&&",
+            ),
+            Branch(
+                bid="b2", kind="elseif", line=4, parent_bid="b1",
+                parent_outcome=False, chain_index=1, atoms=[
+                    Atom("otsw", "unsigned char", "==", 0, None,
+                         "otsw == 0", type_info=info),
+                    Atom("rr", "unsigned char", "==", 1, None,
+                         "rr == 1", type_info=info),
+                ], connective="&&",
+            ),
+            Branch(
+                bid="b3", kind="elseif", line=5, parent_bid="b2",
+                parent_outcome=False, chain_index=2, atoms=[
+                    Atom("otsw", "unsigned char", "==", 0, None,
+                         "otsw == 0", type_info=info),
+                    Atom("rr", "unsigned char", "==", 0, None,
+                         "rr == 0", type_info=info),
+                ], connective="&&",
+            ),
+        ],
+        control_vars=[
+            ControlVar("rr", "rr", "global", type_info=info),
+            ControlVar("otsw", "otsw", "global", type_info=info),
+        ],
+    )
+    baseline = load_baseline(ROOT / "config" / "baselines" / "psd-rebuild" / "1.1.yaml")
+    result = solve_obligation(
+        ir,
+        GenerationObligation(
+            oid="b3:boundary:1:above:1", kind="boundary", branch_id="b3",
+            condition_index=1, boundary_value=1, boundary_class="above",
+        ),
+        baseline,
+    )
+    assert result.status == "SAT"
+    assert result.assignment["rr"] == 1
+    assert result.assignment["otsw"] not in {0, 1}
+
+
+def test_issue12_local_boundary_uses_pre_assignment_guard():
+    info = TypeInfo(
+        canonical_type="unsigned char", kind="integer", bit_width=8,
+        signed=False, min_value=0, max_value=255,
+    )
+    ir = FunctionIR(
+        name="synthetic_local_assignment_path", file="target.c", line=1,
+        ret_type="void",
+        branches=[
+            Branch(
+                bid="b0", kind="if", line=2,
+                atoms=[Atom("gate", "unsigned char", "==", 1, None,
+                             "gate == 1", type_info=info)],
+            ),
+            Branch(
+                bid="b1", kind="if", line=3,
+                atoms=[Atom("local_flag", "unsigned char", "==", 0, None,
+                             "local_flag == 0", type_info=info)],
+            ),
+        ],
+        control_vars=[
+            ControlVar("gate", "gate", "global", type_info=info),
+            ControlVar(
+                "local_flag", "local_flag", "local", type_info=info,
+                value_origin=ValueOrigin(kind="constant"),
+            ),
+        ],
+        local_value_effects=[
+            Effect(name="local_flag", constant_value=1, source_offset=10),
+            Effect(
+                name="local_flag", constant_value=0, source_offset=20,
+                guards=[{"bid": "b0", "then": True}],
+            ),
+        ],
+    )
+    baseline = load_baseline(ROOT / "config" / "baselines" /
+                             "psd-rebuild" / "1.1.yaml")
+    result = solve_obligation(
+        ir,
+        GenerationObligation(
+            oid="b1:boundary:0:above:1", kind="boundary", branch_id="b1",
+            condition_index=0, boundary_value=1, boundary_class="above",
+        ),
+        baseline,
+    )
+    assert result.status == "SAT"
+    assert result.assignment["gate"] != 1
+
+
+def test_issue12_stub_param_field_binds_local_control_to_call_slot():
+    info = TypeInfo(
+        canonical_type="unsigned char", kind="integer", bit_width=8,
+        signed=False, min_value=0, max_value=255,
+    )
+    ir = FunctionIR(
+        name="synthetic_structured_stub_output", file="target.c", line=1,
+        ret_type="void",
+        calls=[CallSite(order=0, callee="pal_get_record", line=2)],
+        branches=[Branch(
+            bid="b0", kind="if", line=3,
+            atoms=[Atom("status", "unsigned char", "==", 1, None,
+                        "status == 1", type_info=info)],
+        )],
+        control_vars=[ControlVar(
+            "status", "status", "local", type_info=info,
+            value_origin=ValueOrigin(
+                kind="stub_param", callee="pal_get_record", index="0",
+                call_order=0, field="status",
+            ),
+        )],
+        local_value_effects=[Effect(
+            name="status", value="record.status",
+            origin=ValueOrigin(
+                kind="stub_param", callee="pal_get_record", index="0",
+                call_order=0, field="status",
+            ),
+        )],
+    )
+    baseline = load_baseline(ROOT / "config" / "baselines" /
+                             "psd-rebuild" / "1.1.yaml")
+    result = solve_obligation(
+        ir,
+        GenerationObligation(
+            oid="b0:T", kind="branch", branch_id="b0", outcome=True,
+        ),
+        baseline,
+    )
+    assert result.status == "SAT"
+    assert result.assignment[
+        "call:pal_get_record:param:0:0.status"
+    ] == 1
+
+
+def test_issue12_boundary_skips_const_table_parent_conflict():
+    info = TypeInfo(
+        canonical_type="unsigned char", kind="integer", bit_width=8,
+        signed=False, min_value=0, max_value=255,
+    )
+    ir = FunctionIR(
+        name="synthetic_table_parent_path", file="target.c", line=1,
+        ret_type="void",
+        branches=[
+            Branch(
+                bid="parent", kind="if", line=2,
+                atoms=[Atom("derived", "unsigned char", "!=", 255, None,
+                             "derived != 255", type_info=info)],
+            ),
+            Branch(
+                bid="child", kind="if", line=3, parent_bid="parent",
+                parent_outcome=False,
+                atoms=[Atom("index", "unsigned char", "==", 56, None,
+                             "index == 56", type_info=info)],
+            ),
+        ],
+        control_vars=[
+            ControlVar("index", "index", "param", type_info=info),
+            ControlVar(
+                "derived", "derived", "derived", type_info=info,
+                value_origin=ValueOrigin(
+                    kind="const_table_field", driver="index",
+                    table_values={"0": 0, "56": 255},
+                ),
+            ),
+        ],
+    )
+    baseline = load_baseline(ROOT / "config" / "baselines" / "psd-rebuild" / "1.1.yaml")
+    obligations = derive_obligations(ir, baseline)
+    child_points = {
+        item.boundary_value for item in obligations
+        if item.branch_id == "child" and item.kind == "boundary"
+    }
+    assert 0 not in child_points
+
+
 def test_issue6_baseline_keeps_source_mapped_approved_rules():
-    baseline = load_baseline(ROOT / "config" / "baselines" / "psd-rebuild" / "1.0.yaml")
+    baseline = load_baseline(ROOT / "config" / "baselines" / "psd-rebuild" / "1.1.yaml")
+    assert baseline.ref == "psd-rebuild@1.1"
     assert len(baseline.rules) == 8
     assert {item["status"] for item in baseline.rules} == {"approved"}
     assert {item["rule_id"] for item in baseline.rules} >= {
         "psd.0-2.typed-domain", "psd.4.mcdc", "psd.6.order",
+    }
+    assert baseline.array_policy["comparison_classes"]["table_array"] == {
+        "index_coverage": "all"
     }
 
 
@@ -80,6 +602,60 @@ def test_issue6_boundary_policy_uses_formal_representative_fields():
         {"typed": True, "representative_values": ["median", "max"],
          "adjacent_constant_values": True},
     ) == (3, 4, 5, 10)
+
+
+def test_issue12_typed_boundary_clips_u8_endpoint_adjacency():
+    info = TypeInfo(
+        canonical_type="unsigned char", kind="integer", bit_width=8,
+        signed=False, min_value=0, max_value=255,
+    )
+    policy = {
+        "typed": True, "representative_values": ["min", "median", "max"],
+        "adjacent_constant_values": True,
+    }
+    assert typed_boundary_points(255, info, policy) == (0, 127, 254, 255)
+    assert typed_boundary_points(0, info, policy) == (0, 1, 127, 255)
+
+
+def test_issue12_obligations_use_stub_status_and_proven_index_domains():
+    info = TypeInfo(
+        canonical_type="unsigned char", kind="integer", bit_width=8,
+        signed=False, min_value=0, max_value=255,
+    )
+    ir = FunctionIR(
+        name="synthetic_index_and_stub_domains", file="target.c", line=1,
+        ret_type="void",
+        branches=[Branch(
+            bid="b0", kind="if", line=2, connective="&&",
+            atoms=[
+                Atom("index", "unsigned char", "==", 3, None,
+                     "index == 3", type_info=info),
+                Atom("stub_status", "unsigned char", "==", 1, None,
+                     "stub_status == 1", type_info=info),
+            ],
+        )],
+        control_vars=[
+            ControlVar("index", "index", "global", type_info=info),
+            ControlVar("stub_status", "stub_status", "stub", type_info=info),
+        ],
+        global_objects=[GlobalObject(
+            name="table", read=True, array_sizes=[3],
+            index_drivers=["index"],
+        )],
+    )
+    baseline = load_baseline(ROOT / "config" / "baselines" / "psd-rebuild" / "1.1.yaml")
+    obligations = derive_obligations(ir, baseline)
+    index_points = {
+        item.boundary_value for item in obligations
+        if item.kind == "boundary" and item.condition_index == 0
+    }
+    stub_points = {
+        item.boundary_value for item in obligations
+        if item.kind == "boundary" and item.condition_index == 1
+    }
+    assert index_points == {0, 2}
+    assert stub_points == {0, 1, 2, 255}
+    assert 127 not in stub_points
 
 
 def test_issue6_case_matching_separates_free_values_from_required_values():
@@ -106,6 +682,69 @@ def test_issue6_case_matching_separates_free_values_from_required_values():
     assert partial["counts"] == {PARTIAL_MATCH: 1}
 
 
+def test_issue12_gate_failure_skips_unadjudicable_case_differences():
+    def case(case_id: str, value: int) -> dict:
+        return {
+            "case_id": case_id, "kind": "branch_outcome", "label": "TRUE",
+            "outcome": True, "truth_vector": None, "identity": {},
+            "inputs": {"x": value}, "expected": {"return": 0},
+            "required_input_values": {"x": value},
+            "required_expected_values": {},
+            "stub": {"columns": [], "values": {}},
+            "oracle": {"columns": ["return"], "values": {"return": 0}},
+        }
+
+    golden = {
+        "testcase_count": 1, "viewpoints": {}, "condition_combinations": [],
+        "boundary_domain": {}, "stub": {}, "oracle": {},
+        "required_values": {}, "projection": {},
+    }
+    result = compare_function_semantics(
+        function="synthetic_u8", generated_manifest={
+            "status": "NEEDS_REVIEW", "intent_count": 1,
+            "issues": ["solver UNSAT for out-of-domain value"],
+            "solve_statuses": {"UNSAT": 1}, "expected_keys": [],
+            "input_keys": [], "obligation_kinds": {}, "boundary_classes": {},
+            "stub_keys": [],
+        },
+        generated_csv=None, golden=golden,
+        actual_csv_path=ROOT / ".tmp" / "synthetic.csv",
+        golden_csv_path=ROOT / ".tmp" / "golden.csv",
+        generated_cases=[case("generated", 254)],
+        golden_cases=[case("golden", 255)],
+    )
+    (root,) = result["gaps"]
+    assert root["category"] == "SOLVER_GAP"
+    assert root["root_cause_status"] == "CANDIDATE_ROOT"
+    assert result["case_matching"]["status"] == "SKIPPED_GENERATION_GATE"
+    assert root["calibration"]["classification"] == "NEEDS_REVIEW"
+    assert "IMPLEMENTATION_DRIFT" in CALIBRATION_CLASSIFICATIONS
+
+
+def test_issue12_match_budget_preserves_needs_review_without_case_replay():
+    golden = normalize_golden_csv(_golden())
+    result = compare_function_semantics(
+        function="budgeted_function",
+        generated_manifest={
+            "status": "VALIDATED", "intent_count": 195,
+            "issues": [], "solve_statuses": {}, "expected_keys": [],
+            "input_keys": [], "obligation_kinds": {}, "boundary_classes": {},
+            "stub_keys": [],
+        },
+        generated_csv=None,
+        golden=golden,
+        actual_csv_path=ROOT / ".tmp" / "generated.csv",
+        golden_csv_path=_golden(),
+        matching_budget={
+            "status": "MATCHING_BUDGET_EXCEEDED", "pair_budget": 4096,
+            "candidate_pairs": 20_865,
+        },
+    )
+    assert result["equivalence"] == "MATCHING_BUDGET_EXCEEDED"
+    assert result["case_matching"]["candidate_pairs"] == 20_865
+    assert result["gaps"][0]["dimension"] == "semantic_match_budget"
+
+
 def test_issue6_case_matching_reports_golden_row_order():
     def case(case_id: str, value: int) -> dict:
         return {
@@ -125,6 +764,24 @@ def test_issue6_case_matching_reports_golden_row_order():
     assert result["row_count_equal"] is True
     assert result["row_order_equal"] is False
     assert result["row_order"]["mismatches"]
+
+
+def test_issue12_case_matching_keeps_cross_viewpoint_ambiguity():
+    def case(case_id: str, kind: str) -> dict:
+        return {
+            "case_id": case_id, "kind": kind, "label": "",
+            "outcome": None, "truth_vector": None, "identity": {},
+            "inputs": {}, "expected": {},
+            "required_input_values": {}, "required_expected_values": {},
+            "stub": {"columns": [], "values": {}},
+            "oracle": {"columns": [], "values": {}},
+        }
+
+    result = match_semantic_cases(
+        [case("generated-execution", "execution"), case("generated-loop", "loop")],
+        [case("golden", "unlabelled")],
+    )
+    assert result["counts"] == {AMBIGUOUS_MATCH: 1, EXTRA_GENERATED: 2}
 
 
 def test_issue6_case_matching_reports_structural_row_order_separately():
@@ -283,6 +940,45 @@ def test_issue6_const_table_branch_uses_driver_indexes_as_proof_domain():
     from ut_agent.generation import engine
     domains, _fixed = engine._generic_inputs(ir)
     assert domains["index"] == [0, 1]
+
+
+def test_issue12_table_index_coverage_comes_from_explicit_runtime_class():
+    info = TypeInfo(
+        canonical_type="unsigned char", kind="integer", bit_width=8,
+        signed=False, min_value=0, max_value=255,
+    )
+    derived = ValueOrigin(
+        kind="const_table_field", driver="index",
+        table_values={"0": 255, "1": 46},
+    )
+    ir = FunctionIR(
+        name="table_policy_target", file="target.c", line=1, ret_type="void",
+        params=[Param("index", "unsigned char", type_info=info)],
+        branches=[Branch(
+            bid="b0", kind="if", line=2,
+            atoms=[Atom("derived", "unsigned char", "<", 300,
+                        None, "derived < 300", type_info=info)],
+        )],
+        control_vars=[
+            ControlVar("index", "index", "param", type_info=info),
+            ControlVar("derived", "derived", "derived", type_info=info,
+                       value_origin=derived),
+        ],
+    )
+    from ut_agent.generation import engine
+    obligation = SimpleNamespace(kind="branch", outcome=True, branch_id="b0")
+    all_indexes = load_baseline(
+        ROOT / "config" / "baselines" / "psd-rebuild" / "1.1.yaml"
+    )
+    selected_only = SimpleNamespace(array_policy={
+        "comparison_classes": {"table_array": {"index_coverage": "selected"}},
+    })
+    assert {item["index"] for item in engine._coverage_variants(
+        ir, all_indexes, obligation, {"index": 0},
+    )} == {0, 1}
+    assert engine._coverage_variants(
+        ir, selected_only, obligation, {"index": 0},
+    ) == ({"index": 0},)
 
 
 def test_issue6_loop_policy_emits_internal_loop_entry_obligations():

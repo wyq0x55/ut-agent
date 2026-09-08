@@ -33,7 +33,11 @@ config/projects/<project>.corpus.json
 
 ## Gap 分类
 
-差异必须归入真实 owner 层：`BASELINE_GAP`、`PROJECT_RULE_GAP`、`FUNCTION_IR_GAP`、`OBLIGATION_GAP`、`SOLVER_GAP`、`EVALUATOR_GAP`、`ORACLE_GAP`、`SUITE_GAP`、`HARNESS_GAP`、`PROJECTION_GAP` 或 `GOLDEN_ERROR`。不允许用总括性的“生成不一致”掩盖根因，也不允许把 Golden 直接复制进生成结果。
+差异必须先归入可观察的 pipeline owner：`BASELINE_GAP`、`PROJECT_RULE_GAP`、`FUNCTION_IR_GAP`、`OBLIGATION_GAP`、`SOLVER_GAP`、`EVALUATOR_GAP`、`ORACLE_GAP`、`SUITE_GAP`、`HARNESS_GAP`、`PROJECTION_GAP` 或 `GOLDEN_ERROR`。这不是最终校准结论：报告中的每个 gap 还会记录 `calibration`，以 `NEEDS_REVIEW` 起始，按 FunctionIR → implementation → runtime mapping → baseline interpretation → project rule → reviewed Golden → normative rule 的顺序调查。最终可归为 `IMPLEMENTATION_DRIFT`、`RUNTIME_MAPPING_DRIFT`、`BASELINE_INTERPRETATION_DRIFT`、`NORMATIVE_RULE_GAP` 等分类。
+
+Golden 是 detector，不是规范输入；不允许用总括性的“生成不一致”掩盖根因，也不允许把 Golden 直接复制进生成结果。当 generation gate 已失败时，报告只保留最上游 `CANDIDATE_ROOT`，并将逐案 Golden matching 记为 `SKIPPED_GENERATION_GATE`；先解决该根因后才比较 case、行数和行序。
+
+完整 case matching 仅在单函数 `generated_intent_count × golden_case_count ≤ 4096` 时运行。超过该确定性上限，报告写出 `MATCHING_BUDGET_EXCEEDED`、实际候选对数和上限，并保持 `NEEDS_REVIEW`；它不是匹配成功、也不是 Golden 对生成规则的反向输入。
 
 候选规则必须先按语义场景聚类。单函数样例只能形成 candidate；只有跨项目且通过 leave-one-project-out 留出验证的 `semantic_family`/`semantic_pattern` 才能批准。函数名、项目名、固定下标和 Golden 具体输入行不能成为通用规则条件。
 
@@ -48,4 +52,4 @@ uv run ut-agent validate-corpus \
 
 缺失的真实客户 corpus 是输入缺口，应在报告中标记为 `BLOCKED`/`FIXTURE_MISSING`；synthetic fixture 继续提交到测试目录。`NEEDS_REVIEW` 也会写出 `csv_kind=partial_candidate` 的 CSV，方便与 Golden 做列结构和已证明 testcase 对比，但不会填充未知值。生成状态 `VALIDATED` 只说明 generation/target validation gate 通过，不等于 WinAMS GUI 或实际执行已经完成。
 
-报告文件为 `.tmp/<project>/project-validation.json` 和 `.tmp/<project>/project-validation.md`。报告中的 gap 只能使用 approved baseline、project switch、FunctionIR、obligation、solver、evaluator、oracle、suite、harness、projection 或 Golden 的实际证据分类；不能按 Golden 与生成数量的大小直接推断根因。
+报告文件为 `.tmp/<project>/project-validation.json` 和 `.tmp/<project>/project-validation.md`。JSON 的顶层 `calibration` 固定记录来源工作簿/sheet/revision、调查顺序、跨项目证据状态；每个 gap 的 `calibration` 记录暂定分类和待验证层。报告中的 gap 只能使用 approved baseline、project switch、FunctionIR、obligation、solver、evaluator、oracle、suite、harness、projection 或 Golden 的实际证据分类；不能按 Golden 与生成数量的大小直接推断根因。

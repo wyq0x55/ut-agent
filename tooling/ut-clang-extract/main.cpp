@@ -1902,6 +1902,12 @@ private:
       return std::nullopt;
     Origin.DriverDecl = Variable;
     Origin.Driver = jsonText(Variable->getNameAsString());
+    if (const auto *Member = dyn_cast<MemberExpr>(Expression)) {
+      const std::string FullPath = memberPath(Member);
+      const std::string Prefix = Variable->getNameAsString() + ".";
+      if (FullPath.rfind(Prefix, 0) == 0)
+        Origin.Field = FullPath.substr(Prefix.size());
+    }
     if (isa<ParmVarDecl>(Variable))
       Origin.Kind = "param";
     else if (isExternalGlobal(Variable))
@@ -2027,8 +2033,15 @@ private:
       return Origin;
     if (Origin->Kind == "local") {
       auto Upstream = resolveOrigin(Origin->DriverDecl, UseLocation, Seen);
-      if (Upstream)
+      if (Upstream) {
+        // Preserve the field selected from a caller-visible structured stub
+        // parameter.  Without this link, a local field assigned from an
+        // externally filled record collapses to the record's scalar slot and
+        // loses its typed call:param:<index>:<slot>.<field> identity.
+        if (!Origin->Field.empty() && Upstream->Kind == "stub_param")
+          Upstream->Field = Origin->Field;
         return Upstream;
+      }
     }
     if (Origin->Kind == "global")
       Origin->Kind = "local_from_global";
@@ -2306,6 +2319,14 @@ private:
       }
       if (!comparisonOp(Binary->getOpcode()).empty()) {
         registerControlVariable(comparisonVariable(Binary), BranchId,
+                                Binary->getSourceRange());
+        // Keep a typed control fact for a variable on the other side of a
+        // comparison as well.  The evaluator already consumes atom.right,
+        // so dropping that operand makes a perfectly valid local/stub value
+        // look unresolvable to the finite generator.
+        registerControlVariable(Binary->getLHS(), BranchId,
+                                Binary->getSourceRange());
+        registerControlVariable(Binary->getRHS(), BranchId,
                                 Binary->getSourceRange());
         return;
       }
@@ -2706,12 +2727,32 @@ public:
           {"pointee_read", PointeeRead},
           {"pointee_write", PointeeWrite},
           {"pointee_known", PointeeKnown}};
-      if (IsAddress && (PointeeWrite || (!Direct && !TablePath.empty()))) {
-        const VarDecl *Root = referencedVar(Argument);
+      // An external RTE receive declaration has no definition in the
+      // translation unit, so definition-backed pointee_write is unavailable.
+      // Its typed pointer parameter is nevertheless the receive buffer by
+      // the generated RTE API contract; retain that provenance as a settable
+      // stub parameter instead of promoting the local to an unknown input.
+      const bool IsReceiveCall =
+          Direct && DirectName.rfind("Rte_Read_", 0) == 0;
+      const VarDecl *Root = referencedVar(Argument);
+      // A declaration-only direct stub can still fill an uninitialised local
+      // through an address argument.  There is no callee body from which
+      // PointeeUseVisitor can prove the write, so retain the fact only when
+      // the local has no earlier recorded value.  Initialized locals remain
+      // conservative unless Clang proves a write or the RTE contract names a
+      // receive buffer.
+      const bool ExternalLocalFill =
+          IsAddress && Direct && !Direct->getBody() && Root &&
+          Root->isLocalVarDecl() &&
+          !originAt(Root, Call->getExprLoc()).has_value();
+      if (IsAddress && (PointeeWrite || IsReceiveCall || ExternalLocalFill ||
+                        (!Direct && !TablePath.empty()))) {
         if (Root && Root->isLocalVarDecl())
           recordLocalStubOutputOrigin(
               Root, Call, Index,
-              PointeeWrite ? llvm::StringRef(DirectName) : llvm::StringRef());
+              (PointeeWrite || IsReceiveCall || ExternalLocalFill)
+                  ? llvm::StringRef(DirectName)
+                  : llvm::StringRef());
       }
     }
     if (!PointerArguments.empty())
@@ -3821,6 +3862,49 @@ initializerValue(const std::map<std::string, int64_t> &Initializers,
   return It->second;
 }
 
+// Unit-test harnesses execute the selected function in isolation.  External
+// globals are therefore test inputs, even when the production translation
+// unit provides a default initializer (including volatile const calibration
+// objects).  Keep initializer facts available for provenance/table facts,
+// but do not use them to fold an externally controllable branch or call
+// capacity into a constant FunctionIR fact.
+std::set<std::string>
+testInputGlobalPaths(const llvm::json::Object &Function) {
+  std::set<std::string> Paths;
+  const llvm::json::Array *Controls = Function.getArray("control_vars");
+  if (!Controls)
+    return Paths;
+  for (const llvm::json::Value &Raw : *Controls) {
+    const llvm::json::Object *Control = Raw.getAsObject();
+    if (!Control)
+      continue;
+    const auto Source = Control->getString("source");
+    if (!Source || *Source != "global")
+      continue;
+    if (const auto Var = Control->getString("var"))
+      Paths.insert(compactText(*Var));
+    if (const auto Name = Control->getString("name"))
+      Paths.insert(compactText(*Name));
+    if (const llvm::json::Object *Extensions =
+            Control->getObject("extensions"))
+      if (const auto Canonical = Extensions->getString("canonical_var"))
+        Paths.insert(compactText(*Canonical));
+  }
+  return Paths;
+}
+
+bool isTestInputGlobal(llvm::StringRef Expression,
+                       const std::set<std::string> &Paths) {
+  const std::string Key = compactText(Expression);
+  for (const std::string &Path : Paths) {
+    if (Key == Path ||
+        (Key.size() > Path.size() && Key.rfind(Path + "[", 0) == 0) ||
+        (Key.size() > Path.size() && Key.rfind(Path + ".", 0) == 0))
+      return true;
+  }
+  return false;
+}
+
 std::optional<bool> evaluateGuard(const llvm::json::Object &Guard,
                                   int64_t Actual) {
   const auto Op = Guard.getString("op");
@@ -3844,7 +3928,8 @@ std::optional<bool> evaluateGuard(const llvm::json::Object &Guard,
 
 std::optional<int64_t> guardedCallCapacity(
     const llvm::json::Object &Call,
-    const std::map<std::string, int64_t> &Initializers) {
+    const std::map<std::string, int64_t> &Initializers,
+    const std::set<std::string> &TestInputGlobals) {
   const auto Capacity = Call.getInteger("max_occurrences");
   const llvm::json::Array *Guards = Call.getArray("guards");
   if (!Capacity || !Guards || Guards->empty() || *Capacity <= 0)
@@ -3861,6 +3946,8 @@ std::optional<int64_t> guardedCallCapacity(
       const auto Field = Guard->getString("field");
       const auto Then = Guard->getBoolean("then");
       if (!Global || !Field || !Then)
+        return std::nullopt;
+      if (isTestInputGlobal(*Global, TestInputGlobals))
         return std::nullopt;
       const std::string Path = Global->str() + "[" +
                                std::to_string(Index) + "]." + Field->str();
@@ -3886,12 +3973,15 @@ void applyGuardedCallCapacities(llvm::json::Object &Function,
   auto *Calls = Function.getArray("calls");
   if (!Calls)
     return;
+  const std::set<std::string> TestInputGlobals =
+      testInputGlobalPaths(Function);
   for (llvm::json::Value &RawCall : *Calls) {
     llvm::json::Object *Call = RawCall.getAsObject();
     if (!Call)
       continue;
     if (const auto Capacity = guardedCallCapacity(*Call,
-                                                  State.GlobalInitializers))
+                                                  State.GlobalInitializers,
+                                                  TestInputGlobals))
       if (*Capacity > 0)
         (*Call)["max_occurrences"] = *Capacity;
   }
@@ -3899,6 +3989,8 @@ void applyGuardedCallCapacities(llvm::json::Object &Function,
 
 void applyGlobalInitializers(llvm::json::Object &Function,
                              const RunState &State) {
+  const std::set<std::string> TestInputGlobals =
+      testInputGlobalPaths(Function);
   auto *Controls = Function.getArray("control_vars");
   if (Controls) {
     for (llvm::json::Value &Raw : *Controls) {
@@ -3907,6 +3999,8 @@ void applyGlobalInitializers(llvm::json::Object &Function,
         continue;
       auto Var = Control->getString("var");
       if (!Var)
+        continue;
+      if (isTestInputGlobal(*Var, TestInputGlobals))
         continue;
       auto Value = initializerValue(State.GlobalInitializers, *Var);
       if (!Value) {
@@ -3954,6 +4048,10 @@ void applyGlobalInitializers(llvm::json::Object &Function,
       auto Boundary = Atom->getInteger("boundary");
       auto Op = Atom->getString("op");
       if (!Var || !Boundary || !Op) {
+        Known = false;
+        break;
+      }
+      if (isTestInputGlobal(*Var, TestInputGlobals)) {
         Known = false;
         break;
       }
@@ -4255,7 +4353,9 @@ void applyFunctionPointerTargets(llvm::json::Object &Function,
         [](const FunctionPointerParameterFact &Param) {
           return Param.IsPointer && Param.PointeeWrite;
         });
-    if (WritesPointee) {
+    const bool IsReceiveTarget =
+        StringRef(Target.Name).starts_with("Rte_Read_");
+    if (WritesPointee || IsReceiveTarget) {
       std::optional<int64_t> CallOffset;
       if (const llvm::json::Object *Provenance =
               Call->getObject("provenance")) {
@@ -4271,6 +4371,24 @@ void applyFunctionPointerTargets(llvm::json::Object &Function,
             if (!Effect)
               continue;
             llvm::json::Object *Origin = Effect->getObject("origin");
+            if (!Origin)
+              continue;
+            const auto Kind = Origin->getString("kind");
+            const auto OriginCallOffset = Origin->getInteger("call_offset");
+            if (!Kind || *Kind != "indirect_param" ||
+                !OriginCallOffset || *OriginCallOffset != *CallOffset)
+              continue;
+            (*Origin)["kind"] = "stub_param";
+            (*Origin)["callee"] = jsonText(Target.Name);
+          }
+        }
+        if (llvm::json::Array *Controls =
+                Function.getArray("control_vars")) {
+          for (llvm::json::Value &RawControl : *Controls) {
+            llvm::json::Object *Control = RawControl.getAsObject();
+            if (!Control)
+              continue;
+            llvm::json::Object *Origin = Control->getObject("value_origin");
             if (!Origin)
               continue;
             const auto Kind = Origin->getString("kind");

@@ -31,13 +31,13 @@ def test_issue9_current_docs_cli_and_config_gates_pass():
 
 
 def test_issue9_runtime_baseline_and_corpus_have_one_source():
-    baseline_path = ROOT / "config" / "baselines" / "psd-rebuild" / "1.0.yaml"
+    baseline_path = ROOT / "config" / "baselines" / "psd-rebuild" / "1.1.yaml"
     baseline = load_mapping(baseline_path)["baseline"]
     assert baseline["id"] == "psd-rebuild"
     approval = baseline["approval"]
     assert approval["authority"] == "repository-owner"
     assert approval["approved_by"] == "wyq0x55"
-    assert approval["approved_at"] == "2026-09-03"
+    assert approval["approved_at"] == "2026-09-04"
     assert approval["scope"] == "baseline-and-rules"
     assert approval["evidence"]
     assert (ROOT / "docs" / "baselines" / "psd-rebuild-v1.6" / "approval.md").is_file()

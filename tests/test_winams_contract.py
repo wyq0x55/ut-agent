@@ -469,7 +469,7 @@ void target(void) { p_vol_dma_orwrite_reg16(U4L_DMA_REG_ICDMA04, 1U); }
 
 
 
-def test_clang_propagates_const_array_member_and_marks_dead_branch(tmp_path):
+def test_clang_keeps_external_const_array_member_as_test_input(tmp_path):
     header = tmp_path / "cfg.h"
     header.write_text(
         """
@@ -499,11 +499,8 @@ extern const Cfg xnl_spi_unit_cfg[1];
     )
 
     assert len(ir.branches) == 1
-    assert ir.branches[0].constant_value is True
-    assert "AST values: 1 == 1" in (ir.branches[0].constant_reason or "")
+    assert ir.branches[0].constant_value is None
     control = next(cv for cv in ir.control_vars if "is_enable_dma" in cv.var)
-    assert control.constant_value == 1
+    assert control.constant_value is None
     csv_text = render_csv(ir)
-    assert "FALSE デッドコードがあった為、この分岐に入ることができません" in csv_text
-    assert ",FALSE デッドコードがあった為、この分岐に入ることができません" in csv_text
-    assert csv_text.count(";$L$,TRUE") == 1
+    assert "FALSE デッドコードがあった為、この分岐に入ることができません" not in csv_text

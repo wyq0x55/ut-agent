@@ -36,6 +36,10 @@
 - `5-1` `PSD再構築!C223:D228`：asm 文不能由 WinAMS 直接执行，原表要求使用 simulator。 处理：不进入 WinAMS CSV（`excluded_from_winams_csv`）。
 - `bookkeeping` `PSD再構築!A1:S28`：目录、封面和导航信息，不是测试输入基准。 处理：排除（`excluded`）。
 
+## 校准记录
+
+- [4-5 表数组 runtime mapping](calibration/4-5-table-array.md)：`RUNTIME_MAPPING_DRIFT`；原始单元格保持不变，等待版本化 runtime contract 的审批。
+
 ## 其他工作表（当前范围外）
 
 - `単体テスト項目基準書`：属于其他测试基准或产品；当前 Issue #6 只处理 PSD 重构。（仅保留来源范围，不参与当前映射）。

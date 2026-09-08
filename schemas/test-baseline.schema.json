@@ -101,6 +101,29 @@
           "properties": {
             "fixed_index": {"type": "boolean"},
             "preserve_other_elements": {"type": "boolean"},
+            "comparison_classes": {
+              "type": "object",
+              "additionalProperties": false,
+              "properties": {
+                "indexed_array": {
+                  "type": "object",
+                  "additionalProperties": false,
+                  "required": ["selected_index", "non_selected_elements"],
+                  "properties": {
+                    "selected_index": {"const": "fixed"},
+                    "non_selected_elements": {"const": "false_side"}
+                  }
+                },
+                "table_array": {
+                  "type": "object",
+                  "additionalProperties": false,
+                  "required": ["index_coverage"],
+                  "properties": {
+                    "index_coverage": {"enum": ["all", "selected"]}
+                  }
+                }
+              }
+            },
             "source_rules": {"$ref": "#/$defs/string_array"}
           }
         },

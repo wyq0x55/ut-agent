@@ -48,4 +48,4 @@ ProjectManifest
   → ResolvedProjectContext
 ```
 
-基础基准 identity 只表示基础测试规则，例如 `psd-rebuild@1.0`。MC/DC 是否启用由项目 manifest 决定。项目名和函数名不得成为通用 semantic patch 的分支条件。
+基础基准 identity 只表示基础测试规则，例如 `psd-rebuild@1.1`。MC/DC 是否启用由项目 manifest 决定。项目名和函数名不得成为通用 semantic patch 的分支条件。

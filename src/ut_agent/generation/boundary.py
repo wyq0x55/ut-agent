@@ -158,12 +158,28 @@ def control_candidates(ir: FunctionIR,
                        boundary_policy: Mapping[str, object] | None = None) -> dict:
     """Build candidates from typed atoms and the extractor's selector fact."""
     controls = {control.var: control for control in ir.control_vars}
+    name_counts: dict[str, int] = {}
+    for control in ir.control_vars:
+        name_counts[control.name] = name_counts.get(control.name, 0) + 1
     candidates: dict = {}
+
+    def candidate_key(control):
+        # A field path can have the same short leaf name at several array
+        # indexes.  Keep the extractor-proven path as the input dimension;
+        # collapsing these controls onto ``field`` makes independent MC/DC
+        # witnesses impossible (for example table[0].field == 0 and
+        # table[1].field == 1).
+        if control.var and (
+                control.var != control.name
+                or name_counts.get(control.name, 0) > 1):
+            return control.var
+        return control.name
 
     def add(control, values):
         if not values:
             return
-        entry = candidates.setdefault(control.name, {
+        key = candidate_key(control)
+        entry = candidates.setdefault(key, {
             "cv": control,
             "values": set(),
             "enum": _enum_names(control.type_info),
@@ -172,21 +188,29 @@ def control_candidates(ir: FunctionIR,
 
     for branch in ir.branches:
         for atom in branch.atoms:
-            control = controls.get(atom.var)
-            if control is None or control.constant_value is not None:
-                continue
-            type_info = _atom_type_info(ir, atom, control)
-            if atom.boundary is None and atom.boundary_name == "NULL":
-                if type_info is not None and type_info.kind == "pointer":
-                    add(control, {0, 1})
-                continue
-            typed_domain = _domain(type_info)
-            points = (typed_status_points(atom.boundary, type_info,
-                                          boundary_policy)
-                      if control.source == "stub"
-                      else _policy_points(atom.boundary, typed_domain,
-                                          boundary_policy))
-            add(control, points)
+            operands = [atom.var]
+            if atom.right:
+                operands.append(atom.right)
+            for operand in operands:
+                control = controls.get(operand)
+                if control is None or control.constant_value is not None:
+                    continue
+                type_info = (
+                    _atom_type_info(ir, atom, control)
+                    if operand == atom.var
+                    else control.type_info or atom.type_info
+                )
+                if atom.boundary is None and atom.boundary_name == "NULL":
+                    if type_info is not None and type_info.kind == "pointer":
+                        add(control, {0, 1})
+                    continue
+                typed_domain = _domain(type_info)
+                points = (typed_status_points(atom.boundary, type_info,
+                                               boundary_policy)
+                          if control.source == "stub"
+                          else _policy_points(atom.boundary, typed_domain,
+                                              boundary_policy))
+                add(control, points)
 
         if branch.kind != "switch":
             continue

@@ -405,6 +405,82 @@ def _truth_equal(left: Any, right: Any) -> bool | None:
 
 
 def _score(generated: Mapping[str, Any], golden: Mapping[str, Any]) -> int:
+    """Score one pair without requiring caller-side caches.
+
+    ``match_semantic_cases`` uses :func:`_score_with_indexes` so that the
+    generated aliases are constructed once per case.  Keep this small wrapper
+    for direct callers and to make the scoring contract independently
+    testable.
+    """
+    return _score_with_indexes(
+        generated, golden,
+        _alias_index(generated.get("inputs", {})),
+        _alias_index(generated.get("expected", {})),
+    )
+
+
+def _required_score_counts(
+    actual: Mapping[str, Any], required: Mapping[str, Any],
+    actual_index: Mapping[str, tuple[str, Any]],
+) -> tuple[int, int]:
+    """Return score-only required-evidence counts without materializing gaps."""
+    matches = 0
+    mismatches = 0
+    for key, value in required.items():
+        actual_key, actual_value = _lookup(actual, key, actual_index)
+        if actual_key is not None and actual_value == value:
+            matches += 1
+        else:
+            mismatches += 1
+    return matches, mismatches
+
+
+def _score_with_indexes(
+    generated: Mapping[str, Any], golden: Mapping[str, Any],
+    generated_input_index: Mapping[str, tuple[str, Any]],
+    generated_expected_index: Mapping[str, tuple[str, Any]],
+    *, identity_score: int | None = None,
+) -> int:
+    """Return the stable pair score using precomputed generated aliases.
+
+    Corpus reports can have many generated intents per Golden row.  Detailed
+    mismatch dictionaries belong only to the finally selected pair; creating
+    them for every rejected candidate makes an otherwise diagnostic-only pass
+    disproportionately expensive.
+    """
+    score = (_identity_score(generated, golden)
+             if identity_score is None else identity_score)
+    if score == -10_000:
+        return score
+    input_matches, input_mismatches = _required_score_counts(
+        generated.get("inputs", {}), golden.get("required_input_values", {}),
+        generated_input_index,
+    )
+    expected_matches, expected_mismatches = _required_score_counts(
+        generated.get("expected", {}),
+        golden.get("required_expected_values", {}), generated_expected_index,
+    )
+    score += min(20, input_matches + expected_matches)
+    score -= min(30, input_mismatches + expected_mismatches)
+    generated_stub = generated.get("stub", {})
+    golden_stub = golden.get("stub", {})
+    if generated_stub.get("columns") == golden_stub.get("columns"):
+        score += 10
+    elif golden_stub.get("columns"):
+        score -= 10
+    generated_oracle = generated.get("oracle", {})
+    golden_oracle = golden.get("oracle", {})
+    if generated_oracle.get("columns") == golden_oracle.get("columns"):
+        score += 10
+    elif golden_oracle.get("columns"):
+        score -= 10
+    return score
+
+
+def _identity_score(
+    generated: Mapping[str, Any], golden: Mapping[str, Any],
+) -> int:
+    """Return the score portion that needs no input/oracle comparison."""
     if not _kind_compatible(generated, golden):
         return -10_000
     score = 30
@@ -426,26 +502,6 @@ def _score(generated: Mapping[str, Any], golden: Mapping[str, Any]) -> int:
     generated_branch = generated.get("identity", {}).get("branch_index")
     if golden_branch is not None and generated_branch is not None:
         score += 40 if golden_branch == generated_branch else -20
-    required = _required_evidence(generated, golden)
-    score += min(
-        20, len(required["input_matches"]) + len(required["expected_matches"])
-    )
-    score -= min(
-        30, len(required["input_mismatches"]) +
-        len(required["expected_mismatches"])
-    )
-    generated_stub = generated.get("stub", {})
-    golden_stub = golden.get("stub", {})
-    if generated_stub.get("columns") == golden_stub.get("columns"):
-        score += 10
-    elif golden_stub.get("columns"):
-        score -= 10
-    generated_oracle = generated.get("oracle", {})
-    golden_oracle = golden.get("oracle", {})
-    if generated_oracle.get("columns") == golden_oracle.get("columns"):
-        score += 10
-    elif golden_oracle.get("columns"):
-        score -= 10
     return score
 
 
@@ -631,17 +687,52 @@ def match_semantic_cases(
         item for item in generated_cases if item.get("valid", True)
     ]
     available = {_case_key(item): item for item in matchable_generated}
+    candidate_indexes = {
+        _case_key(item): (
+            _alias_index(item.get("inputs", {})),
+            _alias_index(item.get("expected", {})),
+        )
+        for item in matchable_generated
+    }
+    # A kind-incompatible pair always receives the sentinel score.  Grouping
+    # by kind is therefore exactly equivalent to the previous all-pairs scan,
+    # while avoiding repeated work across unrelated viewpoints in a large
+    # corpus.  Keep keys rather than mutable case lists so a matched case is
+    # still removed globally from ``available``.
+    candidate_keys_by_kind: dict[str, list[str]] = {}
+    for item in matchable_generated:
+        candidate_keys_by_kind.setdefault(
+            str(item.get("kind", "")), []
+        ).append(_case_key(item))
     records: list[dict[str, Any]] = []
     for golden_case in golden_cases:
-        scored = [
-            (_score(case, golden_case), case)
-            for case in available.values()
-        ]
-        candidates = sorted(
-            (item for item in scored if item[0] > 0),
-            key=lambda item: (-item[0], _sort_key(item[1])),
-        )
-        if not candidates:
+        best_score = 0
+        tied: list[dict[str, Any]] = []
+        for kind, candidate_keys in candidate_keys_by_kind.items():
+            if not _kind_compatible({"kind": kind}, golden_case):
+                continue
+            for candidate_key in candidate_keys:
+                case = available.get(candidate_key)
+                if case is None:
+                    continue
+                identity_score = _identity_score(case, golden_case)
+                # The remaining components (required values, stub columns,
+                # and oracle columns) can add at most 20 + 10 + 10.  A
+                # strict comparison preserves exact best-score ties, which
+                # must remain AMBIGUOUS_MATCH rather than be silently chosen.
+                if identity_score + 40 < best_score:
+                    continue
+                input_index, expected_index = candidate_indexes[candidate_key]
+                score = _score_with_indexes(
+                    case, golden_case, input_index, expected_index,
+                    identity_score=identity_score,
+                )
+                if score > best_score:
+                    best_score = score
+                    tied = [case]
+                elif score > 0 and score == best_score:
+                    tied.append(case)
+        if not tied:
             records.append({
                 "match_type": MISSING_GENERATED,
                 "golden_case_id": golden_case.get("case_id"),
@@ -652,9 +743,8 @@ def match_semantic_cases(
                 "evidence": {"golden": golden_case.get("identity", {})},
             })
             continue
-        best_score = candidates[0][0]
-        tied = [case for score, case in candidates if score == best_score]
         if len(tied) > 1:
+            tied = sorted(tied, key=_sort_key)
             records.append({
                 "match_type": AMBIGUOUS_MATCH,
                 "golden_case_id": golden_case.get("case_id"),

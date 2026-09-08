@@ -34,7 +34,9 @@ def run_batch(args) -> int:
 
 
 def run_index(args) -> int:
-    from ut_agent.targets.winams.index import generate_project_from_index
+    from ut_agent.targets.winams.index import (
+        generate_project_from_index, load_generated_project_units,
+    )
 
     project_context = None
     if args.baseline_manifest:
@@ -97,7 +99,9 @@ def run_validate_corpus(args) -> int:
         write_corpus_validation_report,
         write_project_validation_markdown,
     )
-    from ut_agent.targets.winams.index import generate_project_from_index
+    from ut_agent.targets.winams.index import (
+        generate_project_from_index, load_generated_project_units,
+    )
     from ut_agent import __version__
 
     corpus_manifest = load_corpus_manifest(Path(args.manifest))
@@ -131,19 +135,26 @@ def run_validate_corpus(args) -> int:
             file=sys.stderr,
         )
     else:
-        units = generate_project_from_index(
-            corpus_manifest.index_csv,
-            corpus_manifest.product_root,
-            output_root,
-            clang_extractor=(Path(args.clang_extractor)
-                             if args.clang_extractor else None),
-            rules_path=Path(args.rules) if args.rules else None,
-            defines=parse_defines(args.define),
-            call_max=args.call_max,
-            extractor_timeout=args.extract_timeout,
-            check_golden=False,
-            project_context=context,
-        )
+        if args.reuse_generation:
+            units = load_generated_project_units(
+                corpus_manifest.index_csv,
+                corpus_manifest.product_root,
+                output_root,
+            )
+        else:
+            units = generate_project_from_index(
+                corpus_manifest.index_csv,
+                corpus_manifest.product_root,
+                output_root,
+                clang_extractor=(Path(args.clang_extractor)
+                                 if args.clang_extractor else None),
+                rules_path=Path(args.rules) if args.rules else None,
+                defines=parse_defines(args.define),
+                call_max=args.call_max,
+                extractor_timeout=args.extract_timeout,
+                check_golden=False,
+                project_context=context,
+            )
     report = build_corpus_validation_report(
         corpus_manifest, context, units,
         output_root=output_root,

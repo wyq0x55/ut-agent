@@ -13,6 +13,7 @@ from .evidence import (
     read_xlo,
 )
 from .corpus import (
+    CALIBRATION_CLASSIFICATIONS,
     ProjectCorpusManifest,
     STANDARD_GAP_CATEGORIES,
     build_corpus_validation_report,
@@ -36,7 +37,7 @@ from .cases import (
 __all__ = [
     "ArtifactEvidence", "ElfEvidence", "MapEvidence", "MotEvidence", "XloEvidence",
     "analyze_artifacts", "read_elf", "read_map", "read_mot", "read_xlo",
-    "ProjectCorpusManifest", "STANDARD_GAP_CATEGORIES",
+    "CALIBRATION_CLASSIFICATIONS", "ProjectCorpusManifest", "STANDARD_GAP_CATEGORIES",
     "build_corpus_validation_report", "compare_function_semantics",
     "golden_for_unit", "load_corpus_manifest", "normalize_generated_manifest",
     "preflight_corpus", "render_project_validation_markdown",

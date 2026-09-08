@@ -17,6 +17,7 @@ from ut_agent.generation.pack import BUILTIN_PACK, Rule, RulePack
 from ut_agent.generation.semantic import (
     call_columns as _semantic_call_columns,
     call_count_key,
+    call_param_key,
     call_param_keys,
     call_return_keys,
     call_capacity as _stub_capacity,
@@ -24,6 +25,7 @@ from ut_agent.generation.semantic import (
     global_input_columns as _global_input_columns,
     global_key,
     global_output_columns as _global_output_columns,
+    index_driver_limit as _semantic_index_driver_limit,
     pointer_address_key,
     pointer_value_key,
     visible_calls as _stub_calls,
@@ -416,9 +418,15 @@ def _control_env(values: dict[str, Any], ir: FunctionIR) -> dict[str, Any]:
     env = _expanded_env(values)
     for control in ir.control_vars:
         value = None
-        try:
-            value = _lookup(env, control.name)
-        except KeyError:
+        for key in (control.var, control.name):
+            if not key:
+                continue
+            try:
+                value = _lookup(env, key)
+                break
+            except KeyError:
+                continue
+        if value is None:
             origin = _origin_record(control.value_origin)
             if origin is not None:
                 kind = origin.get("kind")
@@ -447,6 +455,13 @@ def _control_env(values: dict[str, Any], ir: FunctionIR) -> dict[str, Any]:
                             break
                         except KeyError:
                             continue
+                elif kind == "stub_param":
+                    # A local/field copied from an externally filled pointer
+                    # argument is controlled by the call's typed parameter
+                    # slot, not by the automatic local name.  Resolve the
+                    # exact field before falling back to the local effect
+                    # chain so structured PAL/RTE outputs remain distinct.
+                    value = _stub_param_value(ir, origin, env)
                 elif kind == "const_table_field":
                     driver = str(origin.get("driver", ""))
                     table_values = origin.get("table_values", {})
@@ -1007,22 +1022,7 @@ def _index_driver_limit(ir: FunctionIR, driver_name: str) -> int | None:
     extractor-recorded array bounds for objects indexed by the same driver,
     not the size of whichever table happened to produce a derived value.
     """
-    wanted = _norm(driver_name)
-    limits: list[int] = []
-    for raw in ir.global_objects:
-        drivers = {_norm(item) for item in getattr(raw, "index_drivers", [])}
-        if wanted not in drivers:
-            continue
-        sizes = getattr(raw, "array_sizes", [])
-        if not sizes:
-            continue
-        try:
-            limit = int(sizes[0])
-        except (TypeError, ValueError):
-            continue
-        if limit > 0:
-            limits.append(limit)
-    return min(limits) if limits else None
+    return _semantic_index_driver_limit(ir, driver_name)
 
 
 def _ancestor_branches(ir: FunctionIR, branch) -> tuple:
@@ -1084,6 +1084,30 @@ def _clip_index_candidates(ir: FunctionIR, candidates: dict) -> None:
         entry["values"] = values
 
 
+def _array_index_coverage(baseline: Any) -> tuple[bool, bool]:
+    """Return fixed-array and table-array coverage modes from the contract.
+
+    ``psd-rebuild@1.0`` predates the explicit array comparison classes, so its
+    legacy fields retain their established behavior.  New baselines must use
+    ``comparison_classes``; the implementation does not infer table coverage
+    from a function, project, or Golden artifact.
+    """
+    policy = getattr(baseline, "array_policy", {})
+    if not isinstance(policy, dict):
+        return False, False
+    classes = policy.get("comparison_classes")
+    if isinstance(classes, dict):
+        indexed = classes.get("indexed_array", {})
+        table = classes.get("table_array", {})
+        fixed_index = (isinstance(indexed, dict)
+                       and indexed.get("selected_index") == "fixed")
+        table_all_indexes = (isinstance(table, dict)
+                             and table.get("index_coverage") == "all")
+        return fixed_index, table_all_indexes
+    legacy_fixed_index = bool(policy.get("fixed_index", False))
+    return legacy_fixed_index, legacy_fixed_index
+
+
 def _coverage_variants(ir: FunctionIR, baseline: Any,
                        obligation: Any,
                        assignment: dict[str, Any]) -> tuple[dict[str, Any], ...]:
@@ -1103,10 +1127,10 @@ def _coverage_variants(ir: FunctionIR, baseline: Any,
     )
     if logical_status is not None:
         return logical_status
+    fixed_index, table_all_indexes = _array_index_coverage(baseline)
     if (getattr(obligation, "kind", None) != "branch"
             or getattr(obligation, "outcome", None) is None
-            or not bool(getattr(baseline, "array_policy", {}).get(
-                "fixed_index", False))):
+            or not (fixed_index or table_all_indexes)):
         return (dict(assignment),)
     branch = next(
         (item for item in ir.branches
@@ -1117,29 +1141,30 @@ def _coverage_variants(ir: FunctionIR, baseline: Any,
     by_name = {str(control.name): control for control in ir.control_vars}
     by_var = {_norm(control.var): control for control in ir.control_vars}
     drivers: dict[str, list[int]] = {}
-    for atom in branch.atoms:
-        control = by_name.get(str(atom.var)) or by_var.get(_norm(atom.var))
-        origin = _origin_record(control.value_origin) if control else None
-        if (not isinstance(origin, dict)
-                or origin.get("kind") != "const_table_field"):
-            continue
-        driver_name = str(origin.get("driver", ""))
-        driver = by_name.get(driver_name) or by_var.get(_norm(driver_name))
-        table_values = origin.get("table_values")
-        if driver is None or not isinstance(table_values, dict):
-            continue
-        indexes: list[int] = []
-        for raw_index in table_values:
-            try:
-                indexes.append(int(raw_index))
-            except (TypeError, ValueError):
+    if table_all_indexes:
+        for atom in branch.atoms:
+            control = by_name.get(str(atom.var)) or by_var.get(_norm(atom.var))
+            origin = _origin_record(control.value_origin) if control else None
+            if (not isinstance(origin, dict)
+                    or origin.get("kind") != "const_table_field"):
                 continue
-        if indexes:
-            limit = _index_driver_limit(ir, driver.name)
-            if limit is not None:
-                indexes = [index for index in indexes if 0 <= index < limit]
+            driver_name = str(origin.get("driver", ""))
+            driver = by_name.get(driver_name) or by_var.get(_norm(driver_name))
+            table_values = origin.get("table_values")
+            if driver is None or not isinstance(table_values, dict):
+                continue
+            indexes: list[int] = []
+            for raw_index in table_values:
+                try:
+                    indexes.append(int(raw_index))
+                except (TypeError, ValueError):
+                    continue
             if indexes:
-                drivers[driver.name] = sorted(set(indexes))
+                limit = _index_driver_limit(ir, driver.name)
+                if limit is not None:
+                    indexes = [index for index in indexes if 0 <= index < limit]
+                if indexes:
+                    drivers[driver.name] = sorted(set(indexes))
 
     # A direct scalar comparison over a dynamic array index is the same
     # fixed-index coverage family even when no derived table field participates
@@ -1153,46 +1178,47 @@ def _coverage_variants(ir: FunctionIR, baseline: Any,
         if isinstance(_origin_record(control.value_origin), dict)
         and _origin_record(control.value_origin).get("kind") == "const_table_field"
     }
-    for atom in branch.atoms:
-        control = by_name.get(str(atom.var)) or by_var.get(_norm(atom.var))
-        if control is None:
-            continue
-        if control.source not in {"param", "global", "local_from_global"}:
-            continue
-        limit = _index_driver_limit(ir, control.name)
-        if limit is not None:
-            if (_norm(control.name) in derived_drivers
-                    and not _ancestor_uses_driver(ir, branch, control.name)):
+    if fixed_index:
+        for atom in branch.atoms:
+            control = by_name.get(str(atom.var)) or by_var.get(_norm(atom.var))
+            if control is None:
                 continue
-            if _ancestor_uses_driver(ir, branch, control.name):
-                # Keep the approved typed boundary representatives for a
-                # nested viewpoint.  The common index domain's endpoints are
-                # already present after candidate clipping.
-                indexes = list(typed_boundary_points(
-                    getattr(atom, "boundary", None),
-                    getattr(atom, "type_info", None),
-                    getattr(baseline, "boundary_policy", None),
-                ))
-                indexes = [
-                    index for index in indexes
-                    if isinstance(index, int) and 0 <= index < limit
-                ]
-                indexes.extend((0, limit - 1))
-                # Preserve the solver's reachable witness even when the
-                # enclosing branch excludes the lowest table indexes.  The
-                # boundary representatives are an expansion of that witness,
-                # not a replacement for it.
-                current_index = assignment.get(control.name)
-                if (isinstance(current_index, int)
-                        and not isinstance(current_index, bool)
-                        and 0 <= current_index < limit):
-                    indexes.append(current_index)
-                indexes = sorted(set(indexes))
-                if not indexes:
-                    indexes = [0, limit - 1]
-                drivers.setdefault(control.name, indexes)
-            else:
-                drivers.setdefault(control.name, list(range(limit)))
+            if control.source not in {"param", "global", "local_from_global"}:
+                continue
+            limit = _index_driver_limit(ir, control.name)
+            if limit is not None:
+                if (_norm(control.name) in derived_drivers
+                        and not _ancestor_uses_driver(ir, branch, control.name)):
+                    continue
+                if _ancestor_uses_driver(ir, branch, control.name):
+                    # Keep the approved typed boundary representatives for a
+                    # nested viewpoint.  The common index domain's endpoints are
+                    # already present after candidate clipping.
+                    indexes = list(typed_boundary_points(
+                        getattr(atom, "boundary", None),
+                        getattr(atom, "type_info", None),
+                        getattr(baseline, "boundary_policy", None),
+                    ))
+                    indexes = [
+                        index for index in indexes
+                        if isinstance(index, int) and 0 <= index < limit
+                    ]
+                    indexes.extend((0, limit - 1))
+                    # Preserve the solver's reachable witness even when the
+                    # enclosing branch excludes the lowest table indexes.  The
+                    # boundary representatives are an expansion of that witness,
+                    # not a replacement for it.
+                    current_index = assignment.get(control.name)
+                    if (isinstance(current_index, int)
+                            and not isinstance(current_index, bool)
+                            and 0 <= current_index < limit):
+                        indexes.append(current_index)
+                    indexes = sorted(set(indexes))
+                    if not indexes:
+                        indexes = [0, limit - 1]
+                    drivers.setdefault(control.name, indexes)
+                else:
+                    drivers.setdefault(control.name, list(range(limit)))
     if not drivers:
         return (dict(assignment),)
 
@@ -1386,7 +1412,12 @@ def _stub_param_value(ir: FunctionIR, origin: dict[str, Any],
             break
         if (item.callee or "") == callee:
             slot += _stub_capacity(ir, item)
-    candidates = call_param_keys(callee, index, slot)
+    field = str(origin.get("field", "")).strip().lstrip(".")
+    candidates = (
+        (call_param_key(callee, index, slot, field),
+         *call_param_keys(callee, index, slot))
+        if field else call_param_keys(callee, index, slot)
+    )
     for candidate in candidates:
         try:
             return _lookup(env, candidate)
@@ -1964,8 +1995,10 @@ def _generic_inputs(ir: FunctionIR,
         if item.get("name") and not item.get("path")
     }
     allowed = {
-        cv.name for cv in ir.control_vars
-        if cv.constant_value is None
+        key
+        for cv in ir.control_vars
+        for key in (cv.name, cv.var)
+        if key and cv.constant_value is None
         and cv.source in ("param", "global", "local_from_global", "stub")
     }
     unresolved = [
@@ -1991,6 +2024,33 @@ def _generic_inputs(ir: FunctionIR,
         # from the target input columns.
         if (name in allowed or name in loop_locals) and item["values"]
     }
+    # A local receive buffer is not a testcase column by its source name.  The
+    # extractor records its value origin as a typed Rte_Read stub parameter;
+    # expose that same call slot as the finite solver dimension so the local
+    # condition can be varied without promoting the automatic variable itself.
+    for control in ir.control_vars:
+        origin = _origin_record(control.value_origin)
+        if control.source != "local" or not isinstance(origin, dict):
+            continue
+        if origin.get("kind") != "stub_param":
+            continue
+        callee = str(origin.get("callee", ""))
+        if not callee:
+            continue
+        try:
+            index = int(origin.get("index"))
+        except (TypeError, ValueError):
+            continue
+        entry = candidates.get(control.var) or candidates.get(control.name)
+        if not entry or not entry.get("values"):
+            continue
+        slot = _stub_return_slot(
+            ir, callee, origin.get("call_order"), origin.get("call_offset"),
+        )
+        field = str(origin.get("field", "")).strip().lstrip(".")
+        domains[call_param_key(callee, index, slot, field or None)] = sorted(
+            entry["values"],
+        )
     fixed: dict[str, Any] = {}
     for cv in ir.control_vars:
         if cv.constant_value is not None:
@@ -2174,6 +2234,8 @@ def _domain_key_for(ir: FunctionIR, expression: str,
         if wanted in {_norm(control.name), _norm(control.var)}:
             if control.name in domains:
                 return control.name
+            if control.var in domains:
+                return control.var
             origin = _origin_record(control.value_origin)
             if isinstance(origin, dict) and origin.get("kind") == "const_table_field":
                 driver = str(origin.get("driver", ""))
@@ -2181,6 +2243,23 @@ def _domain_key_for(ir: FunctionIR, expression: str,
                     if driver in {_norm(candidate.name), _norm(candidate.var)} \
                             and candidate.name in domains:
                         return candidate.name
+            if isinstance(origin, dict) and origin.get("kind") == "stub_param":
+                callee = str(origin.get("callee", ""))
+                try:
+                    index = int(origin.get("index"))
+                except (TypeError, ValueError):
+                    index = None
+                if callee and index is not None:
+                    slot = _stub_return_slot(
+                        ir, callee, origin.get("call_order"),
+                        origin.get("call_offset"),
+                    )
+                    field = str(origin.get("field", "")).strip().lstrip(".")
+                    candidate = call_param_key(
+                        callee, index, slot, field or None,
+                    )
+                    if candidate in domains:
+                        return candidate
     for key in domains:
         if _norm(key) == wanted:
             return key
@@ -2244,6 +2323,301 @@ def _condition_target_atoms(tree: Any, outcome: bool) -> list[tuple[int, bool]]:
     return []
 
 
+def _tree_output_assignment(tree: Any, desired: bool) -> dict[int, bool] | None:
+    """Build one deterministic leaf assignment for a tree output."""
+    if not isinstance(tree, dict):
+        return None
+    kind = tree.get("kind")
+    if kind == "atom":
+        try:
+            return {int(tree["index"]): bool(desired)}
+        except (KeyError, TypeError, ValueError):
+            return None
+    if kind == "not":
+        return _tree_output_assignment(tree.get("child"), not desired)
+    if kind != "logical":
+        return None
+    children = tree.get("children")
+    if not isinstance(children, list) or not children:
+        return None
+    op = tree.get("op")
+    if op == "&&":
+        child_values = ([True] * len(children) if desired else
+                        [False] + [True] * (len(children) - 1))
+    elif op == "||":
+        child_values = ([True] + [False] * (len(children) - 1) if desired else
+                        [False] * len(children))
+    else:
+        return None
+    result: dict[int, bool] = {}
+    for child, child_value in zip(children, child_values):
+        assignment = _tree_output_assignment(child, child_value)
+        if assignment is None:
+            return None
+        result.update(assignment)
+    return result
+
+
+def _condition_tree_mcdc_pair(tree: Any,
+                              condition_index: int
+                              ) -> tuple[dict[int, bool], dict[int, bool]] | None:
+    """Return false/true leaf vectors that make one leaf independent.
+
+    The extractor stores the actual logical tree, so MC/DC for a mixed
+    expression must preserve the connective at each ancestor.  A selected
+    leaf is independent when every sibling subtree is fixed to that
+    ancestor's identity value (true for ``&&``, false for ``||``).  This
+    yields one deterministic pair without enumerating the global input
+    product.
+    """
+    if not isinstance(tree, dict):
+        return None
+    kind = tree.get("kind")
+    if kind == "atom":
+        try:
+            if int(tree["index"]) != condition_index:
+                return None
+        except (KeyError, TypeError, ValueError):
+            return None
+        return ({condition_index: False}, {condition_index: True})
+    if kind == "not":
+        return _condition_tree_mcdc_pair(tree.get("child"), condition_index)
+    if kind != "logical":
+        return None
+    children = tree.get("children")
+    if not isinstance(children, list) or not children:
+        return None
+    op = tree.get("op")
+    if op not in {"&&", "||"}:
+        return None
+    identity = op == "&&"
+    for selected_index, child in enumerate(children):
+        pair = _condition_tree_mcdc_pair(child, condition_index)
+        if pair is None:
+            continue
+        false_vector, true_vector = pair
+        for sibling_index, sibling in enumerate(children):
+            if sibling_index == selected_index:
+                continue
+            assignment = _tree_output_assignment(sibling, identity)
+            if assignment is None:
+                return None
+            false_vector.update(assignment)
+            true_vector.update(assignment)
+        return false_vector, true_vector
+    return None
+
+
+def _mcdc_expected_truths(branch: Branch, condition_index: int,
+                          outcome: bool) -> dict[int, bool] | None:
+    """Return the leaf truth vector for one side of an MC/DC pair."""
+    if branch.condition_tree is not None:
+        pair = _condition_tree_mcdc_pair(branch.condition_tree, condition_index)
+        if pair is None:
+            return None
+        return pair[1 if outcome else 0]
+    if (branch.connective or "") not in {"&&", "||"}:
+        return None
+    other = branch.connective == "&&"
+    return {
+        index: bool(outcome) if index == condition_index else other
+        for index in range(len(branch.atoms))
+    }
+
+
+def _branch_target_atoms(branch: Branch, outcome: bool) -> list[tuple[int, bool]]:
+    """Return sufficient atom truth targets for one branch outcome."""
+    atoms = list(branch.atoms)
+    if branch.condition_tree is not None:
+        return _condition_target_atoms(branch.condition_tree, outcome)
+    connective = branch.connective or "single"
+    if connective == "&&":
+        desired = [True] * len(atoms) if outcome else [False]
+    elif connective == "||":
+        desired = [False] * len(atoms) if not outcome else [True]
+    else:
+        desired = [outcome]
+    if connective == "&&" and not outcome:
+        return [(0, False)] if atoms else []
+    if connective == "||" and outcome:
+        return [(0, True)] if atoms else []
+    return list(enumerate(desired))
+
+
+def _ancestor_requirements(ir: FunctionIR, branch: Branch) -> list[tuple[Branch, bool]]:
+    """Return extractor-proven parent branch outcomes, outermost first."""
+    by_id = {item.bid: item for item in ir.branches}
+    result: list[tuple[Branch, bool]] = []
+    current = branch
+    visited: set[str] = set()
+    while current.parent_bid:
+        if current.bid in visited:
+            return []
+        visited.add(current.bid)
+        parent = by_id.get(current.parent_bid)
+        if parent is None:
+            return []
+        if parent.kind != "switch":
+            if current.parent_outcome is not None:
+                required = bool(current.parent_outcome)
+            else:
+                required = not (
+                    current.kind == "elseif" and current.chain_index > 0
+                )
+            result.append((parent, required))
+        current = parent
+    result.reverse()
+
+    def expand(item: Branch, required: bool,
+               visiting: set[tuple[str, bool]]) -> list[tuple[Branch, bool]]:
+        key = (item.bid, bool(required))
+        if key in visiting:
+            return []
+        visiting = {*visiting, key}
+        expanded: list[tuple[Branch, bool]] = []
+        for atom_index, expected in _branch_target_atoms(item, required):
+            if not (0 <= atom_index < len(item.atoms)):
+                continue
+            for guard_branch, guard_required in _local_guard_requirements(
+                    ir, item.atoms[atom_index], expected):
+                expanded.extend(expand(
+                    guard_branch, guard_required, visiting,
+                ))
+        expanded.append((item, bool(required)))
+        return expanded
+
+    result = [item for parent, required in result
+              for item in expand(parent, required, set())]
+    deduplicated: list[tuple[Branch, bool]] = []
+    seen: set[tuple[str, bool]] = set()
+    for parent, required in result:
+        key = (parent.bid, bool(required))
+        if key not in seen:
+            seen.add(key)
+            deduplicated.append((parent, bool(required)))
+    return deduplicated
+
+
+def _local_guard_requirements(ir: FunctionIR, atom: Any,
+                              expected: bool) -> tuple[tuple[Branch, bool], ...]:
+    """Resolve the extractor-recorded path for a local truth value."""
+    control = next(
+        (item for item in ir.control_vars
+         if _norm(item.var) == _norm(atom.var)
+         or _norm(item.name) == _norm(atom.var)),
+        None,
+    )
+    if control is None or control.source != "local" or atom.boundary is None:
+        return ()
+    effects = _local_value_effects(ir)
+    candidates = []
+    for effect in effects:
+        if _norm(str(effect.get("name", ""))) != _norm(control.name):
+            continue
+        value = effect.get("constant_value")
+        if value is None:
+            continue
+        try:
+            actual = evaluate_atom(atom, {atom.var: value})
+        except (KeyError, TypeError, ValueError):
+            continue
+        if actual == bool(expected):
+            candidates.append(value)
+    for value in candidates:
+        requirements = _local_value_guard_requirements(ir, atom, value)
+        if requirements is not None:
+            return requirements
+    return ()
+
+
+def _local_value_guard_requirements(
+        ir: FunctionIR, atom: Any, desired_value: Any
+        ) -> tuple[tuple[Branch, bool], ...] | None:
+    """Return guards that keep a local at one concrete value before an atom."""
+    control = next(
+        (item for item in ir.control_vars
+         if _norm(item.var) == _norm(atom.var)
+         or _norm(item.name) == _norm(atom.var)),
+        None,
+    )
+    if control is None or control.source != "local":
+        return None
+    branches = {item.bid: item for item in ir.branches}
+    effects = _local_value_effects(ir)
+    before_offset = None
+    provenance = getattr(atom, "provenance", None)
+    expansion = getattr(provenance, "expansion", None)
+    if expansion is not None:
+        try:
+            before_offset = int(expansion.offset)
+        except (TypeError, ValueError):
+            before_offset = None
+    effects = sorted(
+        (item for item in effects
+         if _norm(str(item.get("name", ""))) == _norm(control.name)
+         and (before_offset is None
+              or int(item.get("source_offset", -1)) <= before_offset)),
+        key=lambda item: int(item.get("source_offset", -1)),
+    )
+    selected = next(
+        (index for index, effect in enumerate(effects)
+         if effect.get("constant_value") == desired_value),
+        None,
+    )
+    if selected is None:
+        return None
+    requirements: list[tuple[Branch, bool]] = []
+    for guard in effects[selected].get("guards", []):
+        if not isinstance(guard, dict):
+            continue
+        branch = branches.get(str(guard.get("bid", "")))
+        if branch is not None:
+            requirements.append((branch, bool(guard.get("then"))))
+    for effect in effects[selected + 1:]:
+        if effect.get("constant_value") == desired_value:
+            continue
+        guards = [item for item in effect.get("guards", [])
+                  if isinstance(item, dict)]
+        if not guards:
+            return None
+        guard = guards[0]
+        branch = branches.get(str(guard.get("bid", "")))
+        if branch is not None:
+            requirements.append((branch, not bool(guard.get("then"))))
+    return tuple(requirements)
+
+
+def _apply_branch_target(ir: FunctionIR, domains: dict[str, list[Any]],
+                         raw: dict[str, Any], branch: Branch,
+                         outcome: bool) -> None:
+    """Apply a deterministic truth target without asserting full-path truth."""
+    for atom_index, expected in _branch_target_atoms(branch, outcome):
+        if atom_index < 0 or atom_index >= len(branch.atoms):
+            continue
+        atom = branch.atoms[atom_index]
+        key = _domain_key_for(ir, atom.var, domains)
+        if key is None:
+            for guard_branch, guard_required in _local_guard_requirements(
+                    ir, atom, expected):
+                _apply_branch_target(
+                    ir, domains, raw, guard_branch, guard_required,
+                )
+            continue
+        chosen = None
+        for value in _targeted_domain_values(ir, branch, key, domains):
+            trial = dict(raw)
+            trial[key] = value
+            env = _control_env(trial, ir)
+            try:
+                if evaluate_atom(atom, env) == expected:
+                    chosen = value
+                    break
+            except (KeyError, TypeError, ValueError):
+                continue
+        if chosen is not None:
+            raw[key] = chosen
+
+
 def _targeted_branch_candidate(ir: FunctionIR,
                                domains: dict[str, list[Any]],
                                fixed: dict[str, Any], branch: Branch,
@@ -2260,44 +2634,9 @@ def _targeted_branch_candidate(ir: FunctionIR,
         if values:
             raw[key] = values[0]
 
-    atoms = list(branch.atoms)
-    tree = branch.condition_tree
-    if tree is not None:
-        target_atoms = _condition_target_atoms(tree, outcome)
-    else:
-        connective = branch.connective or "single"
-        if connective == "&&":
-            desired = [True] * len(atoms) if outcome else [False]
-        elif connective == "||":
-            desired = [False] * len(atoms) if not outcome else [True]
-        else:
-            desired = [outcome]
-        if connective == "&&" and not outcome:
-            target_atoms = [(0, False)] if atoms else []
-        elif connective == "||" and outcome:
-            target_atoms = [(0, True)] if atoms else []
-        else:
-            target_atoms = list(enumerate(desired))
-
-    for atom_index, expected in target_atoms:
-        atom = atoms[atom_index]
-        key = _domain_key_for(ir, atom.var, domains)
-        if key is None:
-            continue
-        values = _targeted_domain_values(ir, branch, key, domains)
-        chosen = None
-        for value in values:
-            trial = dict(raw)
-            trial[key] = value
-            env = _control_env(trial, ir)
-            try:
-                if evaluate_atom(atom, env) == expected:
-                    chosen = value
-                    break
-            except (KeyError, TypeError, ValueError):
-                continue
-        if chosen is not None:
-            raw[key] = chosen
+    for parent, required in _ancestor_requirements(ir, branch):
+        _apply_branch_target(ir, domains, raw, parent, required)
+    _apply_branch_target(ir, domains, raw, branch, outcome)
 
     env = _control_env(raw, ir)
     try:
@@ -2307,6 +2646,185 @@ def _targeted_branch_candidate(ir: FunctionIR,
         )
     except (KeyError, TypeError, ValueError):
         return None
+
+
+def _targeted_condition_candidate(ir: FunctionIR,
+                                  domains: dict[str, list[Any]],
+                                  fixed: dict[str, Any], branch: Branch,
+                                  condition_index: int,
+                                  outcome: bool) -> dict[str, Any] | None:
+    """Construct a witness for one condition while preserving its path."""
+    if condition_index < 0 or condition_index >= len(branch.atoms):
+        return None
+    raw = dict(fixed)
+    branch_keys = {
+        key for atom in branch.atoms
+        if (key := _domain_key_for(ir, atom.var, domains)) is not None
+    }
+    for key in sorted(domains):
+        values = (_targeted_domain_values(ir, branch, key, domains)
+                  if key in branch_keys else domains[key])
+        if values:
+            raw[key] = values[0]
+    for parent, required in _ancestor_requirements(ir, branch):
+        _apply_branch_target(ir, domains, raw, parent, required)
+    atom = branch.atoms[condition_index]
+    key = _domain_key_for(ir, atom.var, domains)
+    if key is None:
+        for guard_branch, guard_required in _local_guard_requirements(
+                ir, atom, bool(outcome)):
+            _apply_branch_target(
+                ir, domains, raw, guard_branch, guard_required,
+            )
+        env = _control_env(raw, ir)
+        try:
+            if (evaluate_atom(atom, env) == outcome
+                    and branch_path_reachable(ir, branch, env) is True):
+                return env
+        except (KeyError, TypeError, ValueError):
+            pass
+        return None
+    for value in _targeted_domain_values(ir, branch, key, domains):
+        trial = dict(raw)
+        trial[key] = value
+        env = _control_env(trial, ir)
+        try:
+            if (evaluate_atom(atom, env) == outcome
+                    and branch_path_reachable(ir, branch, env) is True):
+                return env
+        except (KeyError, TypeError, ValueError):
+            continue
+    return None
+
+
+def _targeted_mcdc_candidate(ir: FunctionIR,
+                             domains: dict[str, list[Any]],
+                             fixed: dict[str, Any], branch: Branch,
+                             condition_index: int,
+                             outcome: bool) -> dict[str, Any] | None:
+    """Prove MC/DC from the branch/path dimensions only.
+
+    The full input product can contain unrelated global IO columns.  MC/DC
+    varies only the branch atoms and their extractor-proven parent path, so
+    enumerate that small semantic slice instead of treating the global
+    product guard as a proof failure.
+    """
+    if ((branch.connective or "") not in {"&&", "||"}
+            or condition_index < 0
+            or condition_index >= len(branch.atoms)):
+        return None
+    path = _ancestor_requirements(ir, branch)
+    expected_truths = _mcdc_expected_truths(
+        branch, condition_index, bool(outcome)
+    )
+    if expected_truths is None:
+        return None
+
+    def matches(env: dict[str, Any]) -> bool:
+        try:
+            atom_values = [evaluate_atom(atom, env) for atom in branch.atoms]
+            return (
+                all(atom_values[index] is expected
+                    for index, expected in expected_truths.items())
+                and evaluate_branch(branch, env) is bool(outcome)
+                and branch_path_reachable(ir, branch, env) is True
+            )
+        except (KeyError, TypeError, ValueError):
+            return False
+
+    requirements: list[tuple[Branch, Any, bool]] = []
+    for parent, required in path:
+        for atom_index, expected in _branch_target_atoms(parent, required):
+            if 0 <= atom_index < len(parent.atoms):
+                requirements.append((parent, parent.atoms[atom_index], expected))
+    for index, atom in enumerate(branch.atoms):
+        expected = expected_truths.get(index)
+        if expected is None:
+            return None
+        requirements.append((
+            branch, atom,
+            expected,
+        ))
+
+    # First use a linear proof attempt.  Independent atom dimensions never
+    # need their Cartesian product; only a conflicting repeated/path control
+    # needs the bounded fallback below.
+    raw = dict(fixed)
+    for key in sorted(domains):
+        if domains[key]:
+            raw[key] = domains[key][0]
+    applied: list[tuple[Any, bool]] = []
+    failed_key: str | None = None
+    for owner, atom, expected in requirements:
+        key = _domain_key_for(ir, atom.var, domains)
+        if key is None:
+            # A parent path may be controlled by an extractor-proven constant
+            # local.  It is not an input dimension, but it still belongs in
+            # the path proof; reject only when its fixed value contradicts
+            # the required outcome.
+            env = _control_env(raw, ir)
+            try:
+                if evaluate_atom(atom, env) != expected:
+                    return None
+            except (KeyError, TypeError, ValueError):
+                return None
+            applied.append((atom, expected))
+            continue
+        chosen = None
+        for value in _targeted_domain_values(ir, owner, key, domains):
+            trial = dict(raw)
+            trial[key] = value
+            env = _control_env(trial, ir)
+            try:
+                if (evaluate_atom(atom, env) == expected
+                        and all(evaluate_atom(previous, env) == wanted
+                                for previous, wanted in applied)):
+                    chosen = value
+                    break
+            except (KeyError, TypeError, ValueError):
+                continue
+        if chosen is None:
+            failed_key = key
+            break
+        raw[key] = chosen
+        applied.append((atom, expected))
+    else:
+        env = _control_env(raw, ir)
+        if matches(env):
+            return env
+
+    # Repeated controls in a nested elseif chain can require a different
+    # sufficient false witness than the first atom selected above.  Search
+    # only that local branch/path slice, with the same deterministic safety
+    # bound used for ordinary targeted search.
+    relevant: set[str] = set()
+    if failed_key is None:
+        for _owner, atom, _expected in requirements:
+            key = _domain_key_for(ir, atom.var, domains)
+            if key is not None:
+                relevant.add(key)
+    else:
+        include = False
+        for _owner, atom, _expected in requirements:
+            key = _domain_key_for(ir, atom.var, domains)
+            if key == failed_key:
+                include = True
+            if include and key is not None:
+                relevant.add(key)
+    keys = sorted(relevant)
+    values = [domains.get(key, ()) for key in keys]
+    cardinality = 1
+    for item in values:
+        cardinality *= len(item)
+    if cardinality > 4096 or any(not item for item in values):
+        return None
+    for combo in product(*values):
+        trial = dict(raw)
+        trial.update(dict(zip(keys, combo)))
+        env = _control_env(trial, ir)
+        if matches(env):
+            return env
+    return None
 
 
 def _targeted_generic_candidates(ir: FunctionIR,
@@ -2325,6 +2843,106 @@ def _targeted_generic_candidates(ir: FunctionIR,
         (item for item in ir.branches if item.bid == obligation.branch_id), None
     )
     if branch is None:
+        return
+    if obligation.kind == "boundary":
+        # Boundary obligations constrain one typed atom; they do not require
+        # replaying the full Cartesian product of every unrelated control.
+        # Keep the exact requested representative and let the solver's
+        # normal branch-path check decide whether the witness is reachable.
+        index = obligation.condition_index
+        if index is not None and 0 <= index < len(branch.atoms):
+            atom = branch.atoms[index]
+            key = _domain_key_for(ir, atom.var, domains)
+            value = obligation.boundary_value
+            control = next(
+                (item for item in ir.control_vars
+                 if _norm(item.var) == _norm(atom.var)
+                 or _norm(item.name) == _norm(atom.var)),
+                None,
+            )
+            if (key is None and control is not None
+                    and control.source == "local" and value is not None):
+                local_requirements = _local_value_guard_requirements(
+                    ir, atom, value,
+                )
+                if local_requirements is not None:
+                    trial = dict(raw)
+                    for guard_branch, guard_required in local_requirements:
+                        _apply_branch_target(
+                            ir, domains, trial, guard_branch, guard_required,
+                        )
+                    env = _control_env(trial, ir)
+                    try:
+                        if (branch_path_reachable(ir, branch, env) is True
+                                and _lookup(env, atom.var) == value):
+                            yield env
+                            return
+                    except (KeyError, TypeError, ValueError):
+                        pass
+            if key is not None and value is not None:
+                # Array/table index drivers are clipped to the common
+                # extractor-proven executable domain in ``_generic_inputs``.
+                # A typed scalar boundary outside that domain is not a valid
+                # isolated-call witness; do not inject it directly and then
+                # report a spurious global-output/evaluator UNKNOWN.
+                if value not in domains.get(key, ()):
+                    return
+                trial = dict(raw)
+                for parent, required in _ancestor_requirements(ir, branch):
+                    _apply_branch_target(ir, domains, trial, parent, required)
+                trial[key] = value
+                env = _control_env(trial, ir)
+                try:
+                    if branch_path_reachable(ir, branch, env) is True:
+                        yield env
+                        return
+                except (KeyError, TypeError, ValueError):
+                    pass
+                relevant = {
+                    candidate
+                    for item in (*_ancestor_requirements(ir, branch),
+                                 (branch, True))
+                    for atom in item[0].atoms
+                    if (candidate := _domain_key_for(ir, atom.var, domains))
+                    is not None
+                }
+                keys = sorted(relevant)
+                values = [domains.get(item, ()) for item in keys]
+                cardinality = 1
+                for item in values:
+                    cardinality *= len(item)
+                if (values and all(values) and cardinality <= 4096):
+                    for combo in product(*values):
+                        trial = dict(fixed)
+                        trial.update(dict(zip(keys, combo)))
+                        trial[key] = value
+                        env = _control_env(trial, ir)
+                        try:
+                            if (branch_path_reachable(ir, branch, env) is True
+                                    and _lookup(env, atom.var) == value):
+                                yield env
+                                return
+                        except (KeyError, TypeError, ValueError):
+                            continue
+        # No typed target could be constructed.  Returning no candidate keeps
+        # the result UNKNOWN/UNSAT without rebuilding an infeasible product;
+        # the caller retains the explicit solver status and reason.
+        return
+    if obligation.kind == "condition":
+        candidate = _targeted_condition_candidate(
+            ir, domains, fixed, branch,
+            int(obligation.condition_index), bool(obligation.outcome),
+        )
+        if candidate is not None:
+            yield candidate
+        return
+    if obligation.kind == "mcdc":
+        candidate = _targeted_mcdc_candidate(
+            ir, domains, fixed, branch,
+            int(obligation.condition_index), bool(obligation.outcome),
+        )
+        if candidate is not None:
+            yield candidate
         return
     # Large products may use targeted construction only when the C++ Clang
     # extractor preserved the condition AST.  Hand-built/legacy IR without

@@ -6,8 +6,9 @@ from dataclasses import replace
 from ut_agent.baseline.model import TestBaseline
 from ut_agent.ir import FunctionIR
 
-from .boundary import typed_boundary_points
+from .boundary import typed_boundary_points, typed_status_points
 from .model import TestObligation
+from .semantic import index_driver_limit
 
 
 def _case_label(case) -> str:
@@ -25,6 +26,95 @@ def _obligation(baseline: TestBaseline, *, source_fact: str,
         project_rule_ref=project_rule_ref,
         **kwargs,
     )
+
+
+def _normalized(value: str) -> str:
+    return "".join(str(value or "").split())
+
+
+def _index_limit_for_atom(ir: FunctionIR, atom) -> int | None:
+    """Return a proven bound when an atom observes an indexed object.
+
+    ``index_drivers`` comes from the extractor's access relation.  Matching
+    the driver against the serialized semantic path only locates that typed
+    relation; it does not infer C syntax or array shape in Python.
+    """
+    atom_path = _normalized(getattr(atom, "var", ""))
+    limits: list[int] = []
+    for raw in ir.global_objects:
+        for driver in getattr(raw, "index_drivers", []):
+            normalized = _normalized(driver)
+            if not normalized or normalized not in atom_path:
+                continue
+            limit = index_driver_limit(ir, driver)
+            if limit is not None:
+                limits.append(limit)
+    return min(limits) if limits else None
+
+
+def _boundary_conflicts_with_parent(ir: FunctionIR, branch, atom, point) -> bool:
+    """Reject a point contradicted by a single-atom parent path fact."""
+    by_id = {item.bid: item for item in ir.branches}
+    current = branch
+    visited: set[str] = set()
+    while current.parent_bid:
+        if current.bid in visited:
+            return False
+        visited.add(current.bid)
+        parent = by_id.get(current.parent_bid)
+        if parent is None:
+            return False
+        if parent.kind != "switch" and len(parent.atoms) == 1:
+            required = current.parent_outcome
+            if required is None:
+                required = not (
+                    current.kind == "elseif" and current.chain_index > 0
+                )
+            parent_atom = parent.atoms[0]
+            parent_control = next(
+                (item for item in ir.control_vars
+                 if item.var == parent_atom.var or item.name == parent_atom.var),
+                None,
+            )
+            parent_value = None
+            if (parent_control is not None
+                    and parent_control.value_origin is not None
+                    and parent_control.value_origin.kind == "const_table_field"):
+                origin = parent_control.value_origin
+                driver = _normalized(origin.driver or "")
+                if driver == _normalized(atom.var):
+                    try:
+                        parent_value = origin.table_values.get(str(int(point)))
+                    except (TypeError, ValueError):
+                        parent_value = None
+                    try:
+                        if parent_value is not None:
+                            parent_value = int(parent_value)
+                    except (TypeError, ValueError):
+                        parent_value = None
+            if (_normalized(parent_atom.var) == _normalized(atom.var)
+                    and parent_atom.boundary is not None
+                    and parent_atom.op in {"==", "!="}
+                    and atom.op in {"==", "!="}):
+                parent_truth = (
+                    point == parent_atom.boundary
+                    if parent_atom.op == "=="
+                    else point != parent_atom.boundary
+                )
+                if bool(parent_truth) != bool(required):
+                    return True
+            elif (parent_value is not None
+                  and parent_atom.boundary is not None
+                  and parent_atom.op in {"==", "!="}):
+                parent_truth = (
+                    parent_value == parent_atom.boundary
+                    if parent_atom.op == "=="
+                    else parent_value != parent_atom.boundary
+                )
+                if bool(parent_truth) != bool(required):
+                    return True
+        current = parent
+    return False
 
 
 def derive_obligations(ir: FunctionIR, baseline: TestBaseline,
@@ -123,13 +213,67 @@ def derive_obligations(ir: FunctionIR, baseline: TestBaseline,
                     ))
         if boundary_enabled:
             for index, atom in enumerate(branch.atoms):
+                control = next((item for item in ir.control_vars
+                                if item.var == atom.var or item.name == atom.var), None)
                 type_info = atom.type_info
                 if type_info is None:
-                    control = next((item for item in ir.control_vars
-                                    if item.var == atom.var or item.name == atom.var), None)
                     type_info = control.type_info if control else None
-                for point in typed_boundary_points(
-                        atom.boundary, type_info, baseline.boundary_policy):
+                if control is not None and control.source == "stub":
+                    # Stub return codes are categorical executable values,
+                    # even when their ABI type is an unsigned byte.  Keep
+                    # obligation derivation aligned with control_candidates.
+                    points = typed_status_points(
+                        atom.boundary, type_info, baseline.boundary_policy
+                    )
+                else:
+                    points = typed_boundary_points(
+                        atom.boundary, type_info, baseline.boundary_policy
+                    )
+                index_limit = _index_limit_for_atom(ir, atom)
+                if index_limit is not None:
+                    points = tuple(
+                        point for point in points
+                        if isinstance(point, int) and 0 <= point < index_limit
+                    )
+                if control is not None:
+                    origin = control.value_origin
+                    if (origin is not None
+                            and origin.kind == "const_table_field"
+                            and isinstance(origin.table_values, dict)):
+                        # A derived local is executable only at values present
+                        # in the extractor-proven table relation.  Do not turn
+                        # a typed scalar boundary into a fabricated local
+                        # value that the table can never produce.
+                        table_domain = set()
+                        for raw_value in origin.table_values.values():
+                            try:
+                                table_domain.add(int(raw_value))
+                            except (TypeError, ValueError):
+                                continue
+                        if table_domain:
+                            points = tuple(
+                                point for point in points
+                                if point in table_domain
+                            )
+                    if control.source == "local":
+                        local_domain = {
+                            effect.constant_value
+                            for effect in ir.local_value_effects
+                            if effect.name == control.name
+                            and effect.constant_value is not None
+                        }
+                        if local_domain:
+                            points = tuple(
+                                point for point in points
+                                if point in local_domain
+                            )
+                points = tuple(
+                    point for point in points
+                    if not _boundary_conflicts_with_parent(
+                        ir, branch, atom, point
+                    )
+                )
+                for point in points:
                     label = "exact" if point == atom.boundary else (
                         "below" if point < atom.boundary else "above"
                     )

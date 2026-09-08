@@ -34,6 +34,7 @@ C++ extractor → Typed FunctionIR → project context → generation
 - 生成阶段顺序为 `Obligation → Constraint → Solve → Evaluate → Oracle → Validate → Suite`；`SemanticTestSuite → targets/winams` 是独立的目标投影。
 - `UNKNOWN`、`UNSUPPORTED`、`NEEDS_REVIEW` 和缺失证据必须保持原状，不能用默认值、占位 CSV 或猜测伪装成 `VALIDATED`。
 - Golden、历史 TestCsv 和构建产物都是学习/校验证据，不是正常生成的语义事实源。
+- Golden 差异按 FunctionIR → implementation → runtime mapping → baseline interpretation → project rule → Golden → normative rule 校准；未完成证据链保持 `NEEDS_REVIEW`，generation gate 后的 case/row 差异标为派生观察，不能重复当根因。
 - 每个真实 gap 必须在最上游真实 owner/root-cause 层修复，并同时添加最小 synthetic fixture 与真实函数回归；不得用项目名/函数名硬编码语义特例。
 - 规则包必须有明确审批状态、版本和证据；候选规则不能进入正式生成。
 

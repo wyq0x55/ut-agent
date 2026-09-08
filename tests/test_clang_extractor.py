@@ -198,6 +198,7 @@ def test_standalone_resolves_function_pointer_table_initializer(tmp_path: Path):
         "void target(void) {\n"
         "  u1 value = 0U;\n"
         "  (void)table[0].get(&value);\n"
+        "  if (value == 1U) { }\n"
         "}\n",
         encoding="ascii",
     )
@@ -226,6 +227,118 @@ def test_standalone_resolves_function_pointer_table_initializer(tmp_path: Path):
     assert pointer["address_used"] is True
     assert pointer["pointee_write"] is True
     assert pointer["pointee_known"] is True
+    control = next(item for item in ir.control_vars if item.name == "value")
+    assert control.value_origin.kind == "stub_param"
+    assert control.value_origin.callee == "Rte_Read_can_status"
+
+
+def test_standalone_records_external_rte_read_into_local_as_stub_input(
+        tmp_path: Path):
+    executable = default_clang_extractor()
+    if executable is None:
+        pytest.skip("repository standalone extractor is not built")
+    header = tmp_path / "rte.h"
+    header.write_text(
+        "typedef unsigned char u1;\n"
+        "unsigned char Rte_Read_status(u1 *data);\n",
+        encoding="ascii",
+    )
+    source = tmp_path / "target.c"
+    source.write_text(
+        '#include "rte.h"\n'
+        "void target(void) {\n"
+        "  u1 value = 0U;\n"
+        "  (void)Rte_Read_status(&value);\n"
+        "  if (value == 1U) { }\n"
+        "}\n",
+        encoding="ascii",
+    )
+
+    ir = ClangExtractor(executable).extract(
+        make_compile_context([source], [tmp_path]), "target", cwd=tmp_path,
+    )
+
+    call = next(item for item in ir.calls if item.callee == "Rte_Read_status")
+    assert call.params[0].is_ptr is True
+    assert call.pointer_arguments["0"]["pointee_write"] is False
+    control = next(item for item in ir.control_vars if item.name == "value")
+    assert control.value_origin.kind == "stub_param"
+    effect = next(item for item in ir.local_value_effects
+                  if item.name == "value"
+                  and item.origin is not None
+                  and item.origin.kind == "stub_param")
+    assert effect.origin.kind == "stub_param"
+    assert effect.origin.callee == "Rte_Read_status"
+
+
+def test_standalone_records_external_stub_output_and_comparison_rhs(
+        tmp_path: Path):
+    executable = default_clang_extractor()
+    if executable is None:
+        pytest.skip("repository standalone extractor is not built")
+    header = tmp_path / "pal.h"
+    header.write_text(
+        "typedef unsigned char u1;\n"
+        "u1 pal_get_status(u1 *data);\n",
+        encoding="ascii",
+    )
+    source = tmp_path / "target.c"
+    source.write_text(
+        '#include "pal.h"\n'
+        "void target(void) {\n"
+        "  u1 expected = 1U;\n"
+        "  u1 actual;\n"
+        "  (void)pal_get_status(&actual);\n"
+        "  if (expected != actual) { }\n"
+        "}\n",
+        encoding="ascii",
+    )
+
+    ir = ClangExtractor(executable).extract(
+        make_compile_context([source], [tmp_path]), "target", cwd=tmp_path,
+    )
+
+    control = next(item for item in ir.control_vars if item.name == "actual")
+    assert control.value_origin.kind == "stub_param"
+    assert control.value_origin.callee == "pal_get_status"
+    assert any(item.var == "actual" for item in ir.control_vars)
+    branch = next(item for item in ir.branches if item.bid == "b0")
+    assert branch.atoms[0].right == "actual"
+
+
+def test_standalone_preserves_structured_stub_field_origin(
+        tmp_path: Path):
+    executable = default_clang_extractor()
+    if executable is None:
+        pytest.skip("repository standalone extractor is not built")
+    header = tmp_path / "pal.h"
+    header.write_text(
+        "typedef unsigned char u1;\n"
+        "typedef struct { u1 status; } Status;\n"
+        "u1 pal_get_record(Status *data);\n",
+        encoding="ascii",
+    )
+    source = tmp_path / "target.c"
+    source.write_text(
+        '#include "pal.h"\n'
+        "void target(void) {\n"
+        "  Status data;\n"
+        "  u1 status;\n"
+        "  (void)pal_get_record(&data);\n"
+        "  status = data.status;\n"
+        "  if (status == 1U) { }\n"
+        "}\n",
+        encoding="ascii",
+    )
+
+    ir = ClangExtractor(executable).extract(
+        make_compile_context([source], [tmp_path]), "target", cwd=tmp_path,
+    )
+
+    control = next(item for item in ir.control_vars if item.name == "status")
+    assert control.value_origin.kind == "stub_param"
+    assert control.value_origin.callee == "pal_get_record"
+    assert control.value_origin.field == "status"
 
 
 def test_standalone_emits_generic_record_bitfield_layout(tmp_path: Path):
@@ -254,7 +367,7 @@ def test_standalone_emits_generic_record_bitfield_layout(tmp_path: Path):
     assert layout["byte"].is_bitfield is False
 
 
-def test_standalone_propagates_scalar_global_initializer_from_context_tu(
+def test_standalone_keeps_external_global_initializer_as_test_input(
     tmp_path: Path,
 ):
     executable = default_clang_extractor()
@@ -279,9 +392,12 @@ def test_standalone_propagates_scalar_global_initializer_from_context_tu(
         cwd=tmp_path,
     )
 
-    assert ir.branches[0].constant_value is True
+    # The selected function runs in an isolated unit-test harness.  The
+    # context TU's initializer is provenance/default data, not a proof that
+    # the external global cannot be supplied as a testcase input.
+    assert ir.branches[0].constant_value is None
     control = next(item for item in ir.control_vars if item.name == "state")
-    assert control.constant_value == 1
+    assert control.constant_value is None
 
 
 def test_standalone_tracks_local_control_value_origin(tmp_path: Path):

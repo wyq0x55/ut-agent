@@ -2,7 +2,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from itertools import product
+from itertools import chain, product
 from typing import Any
 
 from ut_agent.baseline.model import TestBaseline
@@ -77,14 +77,14 @@ def _matches(ir: FunctionIR, obligation: TestObligation,
         index = obligation.condition_index
         if index is None or index < 0 or index >= len(branch.atoms):
             return None
-        if (branch.connective or "") not in {"&&", "||"}:
+        expected_truths = engine._mcdc_expected_truths(
+            branch, index, bool(obligation.outcome)
+        )
+        if expected_truths is None:
             return None
-        expected_others = True if branch.connective == "&&" else False
         atom_values = [engine.evaluate_atom(atom, env) for atom in branch.atoms]
-        if atom_values[index] != obligation.outcome:
-            return False
-        if any(value != expected_others for pos, value in enumerate(atom_values)
-               if pos != index):
+        if any(atom_values[pos] != expected
+               for pos, expected in expected_truths.items()):
             return False
         return engine.evaluate_branch(branch, env) == obligation.outcome
     if obligation.kind == "condition":
@@ -129,17 +129,28 @@ def solve_obligation(ir: FunctionIR, obligation: TestObligation,
     cardinality = 1
     for key in keys:
         cardinality *= len(domains[key])
-    if obligation.kind == "mcdc" and cardinality > limit:
-        return SolveResult(UNKNOWN, obligation, reason="MC/DC product exceeds solver limit")
-    if cardinality > limit and ir.branches:
-        candidates = engine._targeted_generic_candidates(
+    full_candidates = (
+        engine._control_env({**fixed, **dict(zip(keys, combo))}, ir)
+        for combo in product(*(domains[key] for key in keys))
+    )
+    if ir.branches and (cardinality > limit or obligation.kind == "boundary"):
+        # A typed boundary obligation fixes one extractor-proven atom value;
+        # unrelated controls do not need a Cartesian-product replay even when
+        # the total domain happens to fit under the global safety guard.
+        # Preserve the complete search as a fallback if the reduced witness
+        # cannot prove branch reachability with its first representatives.
+        targeted = engine._targeted_generic_candidates(
             ir, domains, fixed, obligation
         )
+        first = next(targeted, None)
+        if first is not None:
+            candidates = chain((first,), targeted)
+        elif cardinality > limit:
+            candidates = ()
+        else:
+            candidates = full_candidates
     else:
-        candidates = (
-            engine._control_env({**fixed, **dict(zip(keys, combo))}, ir)
-            for combo in product(*(domains[key] for key in keys))
-        )
+        candidates = full_candidates
     checked = 0
     saw_unknown = False
     for env in candidates:

@@ -15,6 +15,35 @@ def _records(ir) -> list[dict[str, Any]]:
     return [asdict(item) for item in ir.global_objects]
 
 
+def index_driver_limit(ir, driver_name: str) -> int | None:
+    """Return the extractor-proven common bound for an array index driver.
+
+    The relation is part of FunctionIR, so consumers may use it to keep
+    generated index witnesses executable without recovering array accesses
+    from source text.  When several objects share a driver, the executable
+    domain is their common intersection.
+    """
+    wanted = "".join(str(driver_name or "").split())
+    limits: list[int] = []
+    for raw in ir.global_objects:
+        drivers = {
+            "".join(str(item or "").split())
+            for item in getattr(raw, "index_drivers", [])
+        }
+        if wanted not in drivers:
+            continue
+        sizes = getattr(raw, "array_sizes", [])
+        if not sizes:
+            continue
+        try:
+            limit = int(sizes[0])
+        except (TypeError, ValueError):
+            continue
+        if limit > 0:
+            limits.append(limit)
+    return min(limits) if limits else None
+
+
 def _field_list(call, index: int) -> list[str]:
     metadata = call.caller_param_fields or call.param_fields
     raw = None
@@ -318,7 +347,7 @@ def call_columns(ir) -> tuple[list[str], list[str]]:
 __all__ = [
     "call_capacity", "call_columns", "call_count_key", "call_param_key",
     "call_param_keys", "call_return_key", "call_return_keys", "global_object_columns",
-    "global_base_key", "global_input_columns", "global_key",
+    "global_base_key", "global_input_columns", "global_key", "index_driver_limit",
     "global_output_columns", "is_call_return_key", "pointer_address_key",
     "pointer_value_key", "param_columns", "param_fields", "return_columns",
     "return_fields", "output_columns", "visible_calls",

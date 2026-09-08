@@ -1,7 +1,21 @@
 # Runtime baseline approval record
 
-This record is the explicit approval metadata for the runtime
-`psd-rebuild@1.0` TestBaseline.
+This record contains the explicit approval metadata for versioned runtime
+TestBaseline decisions.
+
+## psd-rebuild@1.1
+
+- Decision: `approved`
+- Authority: `repository-owner`
+- Approved by: `wyq0x55` (wan37 approval in the Issue #12 execution)
+- Approved at: `2026-09-04`
+- Scope: `config/baselines/psd-rebuild/1.1.yaml`, specifically the explicit
+  PSD 4-5 table-array `index_coverage: all` runtime contract.
+
+The approval is based on the [4-5 calibration record](calibration/4-5-table-array.yaml).
+It does not alter the raw Excel cells or promote unrelated source-only sections.
+
+## psd-rebuild@1.0
 
 - Decision: `approved`
 - Authority: `repository-owner`
@@ -27,3 +41,4 @@ It also does not claim that generated suites have been executed in WinAMS.
 - [Source manifest](manifest.yaml)
 - [Baseline index](index.md)
 - [Runtime baseline](../../../config/baselines/psd-rebuild/1.0.yaml)
+- [Runtime baseline 1.1](../../../config/baselines/psd-rebuild/1.1.yaml)

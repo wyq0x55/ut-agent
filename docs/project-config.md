@@ -23,7 +23,7 @@ config/winams/standard.yaml
 ```json
 {
   "project": {"id": "N-O2608-PSD-087"},
-  "baseline": {"id": "psd-rebuild", "version": "1.0"},
+  "baseline": {"id": "psd-rebuild", "version": "1.1"},
   "profile": {"mcdc_enabled": true},
   "rules": {"project_pack": null},
   "build": {"profile": "rh850-ghs"},
@@ -54,7 +54,7 @@ config/winams/standard.yaml
 An `approved` runtime baseline carries auditable approval metadata in the
 baseline document: authority, approver, decision date, scope, reason, and
 non-empty evidence references. The current decision record is
-[psd-rebuild@1.0 approval](baselines/psd-rebuild-v1.6/approval.md).
+[psd-rebuild@1.1 approval](baselines/psd-rebuild-v1.6/approval.md).
 
 The approval record is separate from source evidence. The source manifest may
 remain `source_only` / `needs_review`; those statuses are never promoted by

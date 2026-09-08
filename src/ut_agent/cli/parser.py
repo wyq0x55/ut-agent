@@ -72,6 +72,10 @@ def build_parser() -> argparse.ArgumentParser:
     )
     corpus.add_argument("--manifest", required=True, help="项目语料 manifest")
     corpus.add_argument("--out", required=True, help="本轮生成及报告目录")
+    corpus.add_argument(
+        "--reuse-generation", action="store_true",
+        help="只读复用已完成且带 artifact identity 的生成产物",
+    )
     corpus.add_argument("--config-root")
     corpus.add_argument("--call-max", type=int, default=5)
     corpus.add_argument("--extract-timeout", type=float, default=600.0)
