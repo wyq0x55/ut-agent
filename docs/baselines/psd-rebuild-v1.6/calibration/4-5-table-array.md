@@ -15,7 +15,7 @@ unchanged.
 | Docs interpretation | `4-5-array-compare.yaml` retains “覆盖表数组索引” in `purpose` and `mapping_note`. |
 | Runtime `psd-rebuild@1.0` | `array_policy` only has `fixed_index` and `preserve_other_elements`; it has no table-array index-coverage semantic. |
 | Generic implementation | `_coverage_variants` expands every extractor-proven `const_table_field` index, but the behavior is enabled indirectly by `array_policy.fixed_index`. |
-| N-O2608-PSD-087 FunctionIR | Current run contains three `const_table_field` families with 77 table indexes. All three are `NEEDS_REVIEW`; their Golden files are present but `NOT_INSPECTED` because the generation gate failed. |
+| N-O2608-PSD-087 FunctionIR | Final run contains three `const_table_field` families with 77 table indexes. All three are `VALIDATED`; their Golden files are present but `NOT_INSPECTED` because the report matching budget was exhausted. |
 | N-O2606-PSD-049 FunctionIR | Current run contains three `const_table_field` families with 73 table indexes. All three are `VALIDATED`, their Golden files parse, and all three comparisons remain `AMBIGUOUS_MATCH`. |
 
 ## Decision
@@ -32,11 +32,13 @@ the established legacy interpretation only for 1.0.
 
 ## Evidence limits and next checks
 
-The current reports cover both projects: N-O2608 has 6/6 indexed functions
-processed with 5 generation-gate failures; N-O2606 has 48/48 indexed
-functions processed and 15 validated functions with parsed Golden files. The
-three N-O2606 table-array functions have suite/oracle/projection differences,
-so the report does not attribute those differences to the array-policy field.
+The final reports cover both projects: N-O2608 has 6/6 indexed functions
+processed and 6/6 generation-validated, while its three table-array Golden
+files remain `NOT_INSPECTED` under the report matching budget. N-O2606 has
+48/48 indexed functions processed, 48/48 generation-validated, and all three
+table-array Golden files parsed; their comparisons remain `AMBIGUOUS_MATCH`
+with suite/oracle/projection differences. The report does not attribute those
+differences to the array-policy field.
 The cross-project FunctionIR facts establish applicability, not a new
 normative rule.
 

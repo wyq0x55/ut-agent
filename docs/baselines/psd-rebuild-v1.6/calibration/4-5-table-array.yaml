@@ -8,7 +8,7 @@ observed_mismatch:
   evidence_status: reviewed
 golden_semantic_behavior:
   status: assessed_with_generation_and_matching_limits
-  reason: "N-O2608 table-array functions are present but blocked by generation gate; N-O2606 table-array functions parse and compare as AMBIGUOUS_MATCH with suite/oracle/projection gaps."
+  reason: "N-O2608 table-array functions are generation-validated but their Golden files remain NOT_INSPECTED under the report matching budget; N-O2606 table-array functions parse and compare as AMBIGUOUS_MATCH with suite/oracle/projection gaps."
 function_ir_facts:
   status: cross_project_confirmed
   projects:
@@ -57,13 +57,13 @@ cross_project_evidence:
   status: recorded_review_required
   run: .tmp/issue12-observability-20260908/issue12-table-array-calibration.json
   reports:
-    - .tmp/issue12-observability-20260908/N-O2608-PSD-087-final/project-validation.json
-    - .tmp/issue12-observability-20260908/N-O2606-PSD-049-final/project-validation.json
+    - .tmp/issue12-observability-20260908/N-O2608-PSD-087-global-io-v9/project-validation.json
+    - .tmp/issue12-observability-20260908/N-O2606-PSD-049-global-io-v20/project-validation.json
   conclusion: "Runtime mapping correction is supported; no isolated table-array behavior fix or normative rule is proven."
 counterexamples:
   - "A dynamic array without FunctionIR const_table_field keeps fixed selected-index coverage."
 regression:
   synthetic: passed
-  current_project: generation_gate_partial
+  current_project: generation_validated_golden_not_inspected
   historical_project: parsed_ambiguous_match
   behavior_fix: not_confirmed
