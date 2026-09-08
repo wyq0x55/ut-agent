@@ -12,6 +12,9 @@ from ut_agent.learning import label_kind, normalize_golden_csv, normalize_label
 from ut_agent.generation.boundary import control_candidates, typed_boundary_points
 from ut_agent.generation.obligation import derive_obligations
 from ut_agent.generation.solver import solve_obligation
+from ut_agent.generation.engine import (
+    _control_env, _local_value, _pointer_output_values,
+)
 from ut_agent.generation.model import TestObligation as GenerationObligation
 from ut_agent.ir import (
     Atom, Branch, CallSite, ControlVar, Effect, FunctionIR, GlobalObject,
@@ -531,6 +534,68 @@ def test_issue12_stub_param_field_binds_local_control_to_call_slot():
     assert result.assignment[
         "call:pal_get_record:param:0:0.status"
     ] == 1
+
+
+def test_issue12_pointer_output_evaluates_extractor_expression_tree():
+    ir = FunctionIR(
+        name="synthetic_pointer_expression", file="target.c", line=1,
+        ret_type="void",
+        globals_used=["source"],
+        params=[Param(
+            name="out", type="u1 *", is_ptr=True, is_written=True,
+            write_effects=[Effect(
+                path="out[0]", value="value",
+                origin=ValueOrigin(
+                    kind="local",
+                    expression_tree={
+                        "kind": "reference", "name": "value",
+                    },
+                ),
+            )],
+        )],
+        local_value_effects=[
+            Effect(
+                name="value", value="(source & 256) >> 8",
+                source_offset=1,
+                origin=ValueOrigin(
+                    kind="local",
+                    expression_tree={
+                        "kind": "binary", "op": ">>",
+                        "lhs": {
+                            "kind": "binary", "op": "&",
+                            "lhs": {"kind": "reference", "name": "source"},
+                            "rhs": {"kind": "constant", "value": 256},
+                        },
+                        "rhs": {"kind": "constant", "value": 8},
+                    },
+                ),
+            ),
+            Effect(
+                name="value", value="(source & 512) >> 8", operator="|=",
+                source_offset=2,
+                origin=ValueOrigin(
+                    kind="local",
+                    expression_tree={
+                        "kind": "binary", "op": ">>",
+                        "lhs": {
+                            "kind": "binary", "op": "&",
+                            "lhs": {"kind": "reference", "name": "source"},
+                            "rhs": {"kind": "constant", "value": 512},
+                        },
+                        "rhs": {"kind": "constant", "value": 8},
+                    },
+                ),
+            ),
+        ],
+    )
+
+    selected = {"global:source": 0x300, "source": 0x300}
+    env = _control_env(selected, ir)
+    assert env["source"] == 0x300
+    assert _local_value(ir, "value", env) == 3
+    values = _pointer_output_values(ir, ir.params[0], selected)
+
+    assert values == {"param:out:pointee:out[0]": 3}
 
 
 def test_issue12_boundary_skips_const_table_parent_conflict():

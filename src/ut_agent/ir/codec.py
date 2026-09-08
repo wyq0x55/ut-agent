@@ -401,6 +401,7 @@ def _read_origin(value: Mapping[str, Any] | None) -> ValueOrigin | None:
         call_offset=value.get("call_offset"), call_order=value.get("call_order"),
         base=value.get("base"), index=value.get("index"), field=value.get("field"),
         table_values=dict(value.get("table_values", {})),
+        expression_tree=value.get("expression_tree"),
     )
 
 

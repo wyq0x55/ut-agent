@@ -553,3 +553,43 @@ def test_standalone_tracks_return_and_local_value_effects(tmp_path: Path):
     assert {item.name for item in local_effects} == {"result"}
     assert any(item.constant_value == 1 for item in local_effects)
     assert any(item.origin and item.origin.kind == "stub_return" for item in local_effects)
+
+
+def test_standalone_emits_typed_expression_tree_for_pointer_output(tmp_path: Path):
+    executable = default_clang_extractor()
+    if executable is None:
+        pytest.skip("repository standalone extractor is not built")
+    header = tmp_path / "state.h"
+    header.write_text(
+        "typedef unsigned char u1;\n"
+        "typedef unsigned int u4;\n"
+        "extern u4 source;\n",
+        encoding="ascii",
+    )
+    source = tmp_path / "target.c"
+    source.write_text(
+        '#include "state.h"\n'
+        "void target(u1 *out) {\n"
+        "  u1 value = (u1)((source & 0x100U) >> 8U);\n"
+        "  value |= (u1)((source & 0x200U) >> 8U);\n"
+        "  out[0] = value;\n"
+        "}\n",
+        encoding="ascii",
+    )
+
+    ir = ClangExtractor(executable).extract(
+        make_compile_context([source], [tmp_path]), "target", cwd=tmp_path,
+    )
+
+    output = ir.params[0].write_effects[0]
+    assert output.path == "out[0]"
+    assert output.origin is not None
+    assert output.origin.expression_tree["kind"] == "reference"
+    assert output.origin.expression_tree["name"] == "value"
+    local = [item for item in ir.local_value_effects if item.name == "value"]
+    assert len(local) == 2
+    tree = local[0].origin.expression_tree
+    assert tree["kind"] == "binary"
+    assert tree["op"] == ">>"
+    assert tree["lhs"]["kind"] == "binary"
+    assert tree["lhs"]["op"] == "&"

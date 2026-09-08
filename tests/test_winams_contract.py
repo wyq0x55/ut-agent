@@ -157,6 +157,39 @@ def test_static_pointer_pointee_column_uses_canonical_semantic_key():
     assert data[pointee_positions[-1]] == "0x1"
 
 
+def test_indexed_pointer_write_is_output_only_and_uses_indexed_semantic_key():
+    ir = FunctionIR(
+        name="indexed_target",
+        file="Dma.c",
+        line=1,
+        ret_type="void",
+        params=[Param(
+            "data", "uint8 *", is_ptr=True, is_written=True,
+            access_paths=[{
+                "path": "data[26]", "read": False, "write": True,
+            }],
+        )],
+    )
+    intent = TestIntent(
+        case_id="U001",
+        obligation=TestObligation("ENTRY", "execution"),
+        inputs={"param:data:address": 1},
+        expected={"param:data:pointee:data[26]": 7},
+        validation=ValidationResult(VALIDATED, checks=("oracle",)),
+    )
+
+    rows = list(__import__("csv").reader(
+        __import__("io").StringIO(render_intents_csv(
+            ir, GenerationResult("indexed_target", VALIDATED, (intent,)),
+        ))
+    ))
+    comment = next(row for row in rows if row and row[0] == "#COMMENT")
+    data = next(row for row in rows if row and row[0] == "")
+
+    assert comment.count("@data[26]") == 1
+    assert data[comment.index("@data[26]")] == "0x7"
+
+
 def test_render_intents_includes_stub_declarations_and_columns():
     ir = _ir()
     result = GenerationResult(ir.name, NEEDS_REVIEW, issues=("validation-only",))

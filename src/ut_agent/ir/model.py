@@ -69,6 +69,9 @@ class ValueOrigin:
     index: Optional[str] = None
     field: Optional[str] = None
     table_values: dict[str, int] = dataclasses.field(default_factory=dict)
+    # Extractor-owned typed expression facts.  Python consumers may evaluate
+    # this tree, but must not recover C semantics from ``expression`` text.
+    expression_tree: Optional[dict[str, Any]] = None
 
 
 @dataclass

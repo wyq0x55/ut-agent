@@ -123,26 +123,7 @@ def _global_effect_value(ir: FunctionIR, effect: dict[str, Any],
     constant = effect.get("constant_value")
     if constant is not None:
         return constant
-    expression = str(effect.get("value", "")).strip()
-    try:
-        return _lookup(env, expression)
-    except KeyError:
-        origin = effect.get("origin")
-        if not isinstance(origin, dict):
-            return None
-        if origin.get("kind") == "stub_return":
-            return _stub_return_value(ir, origin, env)
-        driver = str(origin.get("driver", ""))
-        if driver:
-            try:
-                return _lookup(env, driver)
-            except KeyError:
-                try:
-                    offset = int(effect.get("source_offset", -1))
-                except (TypeError, ValueError):
-                    offset = -1
-                return _local_value(ir, driver, env, before_offset=offset)
-    return None
+    return _effect_expression_value(ir, effect, env)
 
 
 def _resolve_record_storage_values(
@@ -391,6 +372,184 @@ def _lookup(env: dict[str, Any], name: str) -> Any:
             if candidate in env:
                 return env[candidate]
     raise KeyError(name)
+
+
+def _expression_tree(origin: Any) -> dict[str, Any] | None:
+    record = _origin_record(origin)
+    if record is None:
+        return None
+    tree = record.get("expression_tree")
+    return tree if isinstance(tree, dict) else None
+
+
+def _expression_reference_path(tree: Any) -> str | None:
+    if not isinstance(tree, dict):
+        return None
+    kind = tree.get("kind")
+    if kind == "reference":
+        name = str(tree.get("name", "")).strip()
+        return name or None
+    if kind == "member":
+        base = _expression_reference_path(tree.get("base"))
+        field = str(tree.get("field", "")).strip()
+        if base and field:
+            return f"{base}.{field}"
+    return None
+
+
+def _cast_expression_value(value: Any, type_info: Any) -> Any | None:
+    if not isinstance(type_info, dict):
+        return value
+    try:
+        result = int(value)
+    except (TypeError, ValueError):
+        return None
+    if type_info.get("kind") not in {"integer", "enum", "bool"}:
+        return result
+    width = type_info.get("bit_width")
+    if not isinstance(width, int) or width <= 0 or width > 64:
+        return result
+    mask = (1 << width) - 1
+    result &= mask
+    if type_info.get("signed") and result & (1 << (width - 1)):
+        result -= 1 << width
+    return result
+
+
+def _eval_expression_tree(ir: FunctionIR, tree: Any,
+                          env: dict[str, Any],
+                          seen: set[str] | None = None) -> Any | None:
+    """Evaluate extractor-owned typed value facts, never source spelling."""
+    if not isinstance(tree, dict):
+        return None
+    seen = set() if seen is None else seen
+    kind = str(tree.get("kind", ""))
+    if kind == "constant":
+        return tree.get("value")
+    if kind == "reference":
+        name = str(tree.get("name", "")).strip()
+        if not name:
+            return None
+        try:
+            return _lookup(env, name)
+        except KeyError:
+            if name in seen:
+                return None
+            return _local_value(ir, name, env, seen)
+    if kind == "member":
+        path = _expression_reference_path(tree)
+        if path:
+            try:
+                return _lookup(env, path)
+            except KeyError:
+                pass
+        base = _eval_expression_tree(ir, tree.get("base"), env, seen)
+        if isinstance(base, dict):
+            return base.get(str(tree.get("field", "")))
+        return None
+    if kind == "subscript":
+        base_path = _expression_reference_path(tree.get("base"))
+        index = _eval_expression_tree(ir, tree.get("index"), env, seen)
+        if base_path is not None and index is not None:
+            try:
+                return _lookup(env, f"{base_path}[{int(index)}]")
+            except (KeyError, TypeError, ValueError):
+                pass
+        return None
+    if kind == "cast":
+        value = _eval_expression_tree(ir, tree.get("operand"), env, seen)
+        return None if value is None else _cast_expression_value(
+            value, tree.get("type_info")
+        )
+    if kind == "unary":
+        op = str(tree.get("op", ""))
+        value = _eval_expression_tree(ir, tree.get("operand"), env, seen)
+        if value is None:
+            return None
+        try:
+            if op in {"*", "&", "+"}:
+                return value
+            if op == "-":
+                return -int(value)
+            if op == "~":
+                return ~int(value)
+            if op == "!":
+                return int(not bool(value))
+        except (TypeError, ValueError):
+            return None
+        return None
+    if kind == "binary":
+        op = str(tree.get("op", ""))
+        lhs = _eval_expression_tree(ir, tree.get("lhs"), env, seen)
+        rhs = _eval_expression_tree(ir, tree.get("rhs"), env, seen)
+        if lhs is None or rhs is None:
+            return None
+        try:
+            left, right = int(lhs), int(rhs)
+            if op == "+":
+                return left + right
+            if op == "-":
+                return left - right
+            if op == "*":
+                return left * right
+            if op == "/" and right != 0:
+                return int(left / right)
+            if op == "%" and right != 0:
+                return left % right
+            if op == "<<":
+                return left << right
+            if op == ">>":
+                return left >> right
+            if op == "&":
+                return left & right
+            if op == "|":
+                return left | right
+            if op == "^":
+                return left ^ right
+            if op == "==":
+                return int(left == right)
+            if op == "!=":
+                return int(left != right)
+            if op == "<":
+                return int(left < right)
+            if op == "<=":
+                return int(left <= right)
+            if op == ">":
+                return int(left > right)
+            if op == ">=":
+                return int(left >= right)
+            if op == "&&":
+                return int(bool(left) and bool(right))
+            if op == "||":
+                return int(bool(left) or bool(right))
+        except (TypeError, ValueError, ZeroDivisionError):
+            return None
+        return None
+    if kind == "conditional":
+        condition = _eval_expression_tree(ir, tree.get("condition"), env, seen)
+        if condition is None:
+            return None
+        selected = tree.get("then") if bool(condition) else tree.get("else")
+        return _eval_expression_tree(ir, selected, env, seen)
+    return None
+
+
+def _effect_expression_value(ir: FunctionIR, effect: dict[str, Any],
+                             env: dict[str, Any],
+                             seen: set[str] | None = None) -> Any | None:
+    expression = str(effect.get("value", "")).strip()
+    if expression:
+        try:
+            return _lookup(env, expression)
+        except KeyError:
+            pass
+    tree = _expression_tree(effect.get("origin"))
+    if tree is not None:
+        value = _eval_expression_tree(ir, tree, env, seen)
+        if value is not None:
+            return value
+    return _origin_value(ir, effect.get("origin"), env,
+                         set() if seen is None else seen)
 
 
 def _expanded_env(values: dict[str, Any]) -> dict[str, Any]:
@@ -1271,13 +1430,7 @@ def _write_effect_value(ir: FunctionIR, effect: dict[str, Any],
     constant = effect.get("constant_value")
     if constant is not None:
         return constant
-    expression = str(effect.get("value", "")).strip()
-    if not expression:
-        return None
-    try:
-        return _lookup(env, expression)
-    except KeyError:
-        return _origin_value(ir, effect.get("origin"), env, set())
+    return _effect_expression_value(ir, effect, env)
 
 
 def _guards_active(ir: FunctionIR, guards: Any, env: dict[str, Any]) -> bool | None:
@@ -1539,12 +1692,9 @@ def _local_value(ir: FunctionIR, name: str, env: dict[str, Any],
         if constant is not None:
             value = constant
         else:
-            try:
-                value = _lookup(env, expression)
-            except KeyError:
-                value = _origin_value(
-                    ir, effect.get("origin"), env, set(seen),
-                )
+            value = _effect_expression_value(
+                ir, effect, env, set(seen),
+            )
         if value is None:
             continue
         operation = str(effect.get("operator", "="))
@@ -1614,12 +1764,9 @@ def _local_field_value(ir: FunctionIR, name: str, path: str,
         if constant is not None:
             return constant
         expression = str(effect.get("value", "")).strip()
-        try:
-            return _lookup(env, expression)
-        except KeyError:
-            value = _origin_value(ir, effect.get("origin"), env, set())
-            if value is not None:
-                return value
+        value = _effect_expression_value(ir, effect, env)
+        if value is not None:
+            return value
     return None
 
 
@@ -1637,12 +1784,7 @@ def _return_value(ir: FunctionIR, selected: dict[str, Any]) -> Any | None:
         if constant is not None:
             value = constant
         else:
-            expression = str(effect.get("value", "")).strip()
-            try:
-                value = _lookup(env, expression)
-            except KeyError:
-                origin = effect.get("origin")
-                value = _origin_value(ir, origin, env, set())
+            value = _effect_expression_value(ir, effect, env)
             if value is None:
                 return None
         applicable.append(value)

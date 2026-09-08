@@ -442,7 +442,9 @@ def _winams_function_return_comment(ir: FunctionIR) -> str:
     return f"{ir.name}@@"
 
 
-def _winams_param_access_paths(param, *, writes_only: bool = False) -> list[str]:
+def _winams_param_access_paths(
+    param, *, writes_only: bool = False, reads_only: bool = False,
+) -> list[str]:
     """Return deterministic AST lvalue paths carried by a parameter."""
     raw = param.access_paths
     if not isinstance(raw, (list, tuple)):
@@ -461,7 +463,7 @@ def _winams_param_access_paths(param, *, writes_only: bool = False) -> list[str]
                 offset = index
         else:
             continue
-        if not path or (writes_only and not write):
+        if not path or (writes_only and not write) or (reads_only and not read):
             continue
         entries.append((offset, index, path))
     return [path for _, _, path in sorted(entries)]
@@ -495,7 +497,7 @@ def _winams_param_write_columns(param, *, static_function: bool = False) -> list
 
 def _winams_param_read_columns(param, *, static_function: bool = False) -> list[str]:
     """Map dereferenced parameter reads to settable WinAMS input columns."""
-    paths = _winams_param_access_paths(param)
+    paths = _winams_param_access_paths(param, reads_only=True)
     name = str(param.name)
     columns: list[str] = []
     for path in paths:

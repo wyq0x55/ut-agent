@@ -849,6 +849,7 @@ class FunctionBodyVisitor final
   struct ValueOrigin {
     std::string Kind;
     std::string Expression;
+    const Expr *ExpressionNode = nullptr;
     std::string Driver;
     const VarDecl *DriverDecl = nullptr;
     std::string Callee;
@@ -915,6 +916,9 @@ struct GlobalFieldAccess {
     std::string Path;
     std::string Value;
     std::optional<int64_t> ConstantValue;
+    std::optional<ValueOrigin> Origin;
+    int64_t SourceOffset = -1;
+    std::string Operation = "=";
     std::vector<std::pair<std::string, bool>> Guards;
     int64_t Order = 0;
   };
@@ -1004,12 +1008,14 @@ public:
               {"constant_value", Effect.ConstantValue
                                     ? llvm::json::Value(*Effect.ConstantValue)
                                     : llvm::json::Value(nullptr)},
-              {"source_offset", static_cast<int64_t>(-1)},
+              {"source_offset", Effect.SourceOffset},
               {"order", Effect.Order},
               {"guards", std::move(Guards)},
-              {"origin", llvm::json::Value(nullptr)},
+              {"origin", Effect.Origin
+                              ? llvm::json::Value(origin(*Effect.Origin))
+                              : llvm::json::Value(nullptr)},
               {"name", llvm::json::Value(nullptr)},
-              {"operator", "="}});
+              {"operator", jsonText(Effect.Operation)}});
         }
       }
       Value["write_effects"] = std::move(Writes);
@@ -1048,11 +1054,13 @@ public:
             {"constant_value", Effect.ConstantValue
                                   ? llvm::json::Value(*Effect.ConstantValue)
                                   : llvm::json::Value(nullptr)},
-            {"source_offset", static_cast<int64_t>(-1)},
+            {"source_offset", Effect.SourceOffset},
             {"order", Effect.Order},
             {"guards", std::move(Guards)},
-            {"origin", llvm::json::Value(nullptr)},
-            {"operator", "="}});
+            {"origin", Effect.Origin
+                            ? llvm::json::Value(origin(*Effect.Origin))
+                            : llvm::json::Value(nullptr)},
+            {"operator", jsonText(Effect.Operation)}});
       }
     }
     return Result;
@@ -1090,6 +1098,8 @@ public:
       Result["index"] = jsonText(Value.Index);
     if (!Value.Field.empty())
       Result["field"] = jsonText(Value.Field);
+    if (Value.ExpressionNode)
+      Result["expression_tree"] = expressionTree(Value.ExpressionNode);
     return Result;
   }
 
@@ -1197,26 +1207,7 @@ public:
       llvm::json::Object Extensions{
           {"canonical_var", jsonText(Fact.CanonicalVar)}};
       if (Fact.Origin) {
-        llvm::json::Object Origin{
-            {"kind", jsonText(Fact.Origin->Kind)},
-             {"expression", jsonText(Fact.Origin->Expression)}};
-        if (!Fact.Origin->Driver.empty())
-          Origin["driver"] = jsonText(Fact.Origin->Driver);
-        if (!Fact.Origin->Callee.empty())
-          Origin["callee"] = jsonText(Fact.Origin->Callee);
-        if (Fact.Origin->CallOffset >= 0) {
-          Origin["call_offset"] = Fact.Origin->CallOffset;
-          const int64_t Order = callOrder(Fact.Origin->CallOffset);
-          if (Order >= 0)
-            Origin["call_order"] = Order;
-        }
-        if (!Fact.Origin->Base.empty())
-          Origin["base"] = jsonText(Fact.Origin->Base);
-        if (!Fact.Origin->Index.empty())
-          Origin["index"] = jsonText(Fact.Origin->Index);
-        if (!Fact.Origin->Field.empty())
-          Origin["field"] = jsonText(Fact.Origin->Field);
-        ValueOriginValue = std::move(Origin);
+        ValueOriginValue = origin(*Fact.Origin);
       }
       Result.push_back(llvm::json::Object{
           {"name", jsonText(Fact.Name)},
@@ -1827,6 +1818,92 @@ private:
     return Type.isConstQualified();
   }
 
+  // Preserve a small, typed value-expression tree for downstream oracle
+  // evaluation. The Python layer may evaluate this extractor-owned tree,
+  // but must not parse the source spelling in ValueOrigin::Expression.
+  llvm::json::Value expressionTree(const Expr *Expression) const {
+    if (!Expression)
+      return llvm::json::Value(nullptr);
+    if (const auto *Paren = dyn_cast<ParenExpr>(Expression))
+      return expressionTree(Paren->getSubExpr());
+    if (const auto *Implicit = dyn_cast<ImplicitCastExpr>(Expression))
+      return expressionTree(Implicit->getSubExpr());
+    if (const auto *Cast = dyn_cast<ExplicitCastExpr>(Expression))
+      return llvm::json::Object{
+          {"kind", "cast"},
+          {"type_info", typeInfo(Cast->getType(), &Context)},
+          {"operand", expressionTree(Cast->getSubExpr())},
+      };
+    if (const auto *Literal = dyn_cast<IntegerLiteral>(Expression))
+      return llvm::json::Object{
+          {"kind", "constant"},
+          {"value", static_cast<int64_t>(Literal->getValue().getLimitedValue())},
+      };
+    if (const auto *Literal = dyn_cast<CharacterLiteral>(Expression))
+      return llvm::json::Object{
+          {"kind", "constant"},
+          {"value", static_cast<int64_t>(Literal->getValue())},
+      };
+    if (const auto *Literal = dyn_cast<CXXBoolLiteralExpr>(Expression))
+      return llvm::json::Object{
+          {"kind", "constant"},
+          {"value", Literal->getValue()},
+      };
+    if (const auto *Reference = dyn_cast<DeclRefExpr>(Expression)) {
+      if (const auto *Enum = dyn_cast<EnumConstantDecl>(Reference->getDecl()))
+        return llvm::json::Object{
+            {"kind", "constant"},
+            {"value", Enum->getInitVal().getSExtValue()},
+        };
+      const std::string Path = accessPath(Reference, Context);
+      return llvm::json::Object{
+          {"kind", "reference"},
+          {"name", jsonText(Path.empty()
+                                  ? Reference->getNameInfo().getAsString()
+                                  : Path)},
+          {"type_info", typeInfo(Reference->getType(), &Context)},
+      };
+    }
+    if (const auto *Member = dyn_cast<MemberExpr>(Expression))
+      return llvm::json::Object{
+          {"kind", "member"},
+          {"base", expressionTree(Member->getBase())},
+          {"field", jsonText(Member->getMemberNameInfo().getAsString())},
+          {"type_info", typeInfo(Member->getType(), &Context)},
+      };
+    if (const auto *Subscript = dyn_cast<ArraySubscriptExpr>(Expression))
+      return llvm::json::Object{
+          {"kind", "subscript"},
+          {"base", expressionTree(Subscript->getBase())},
+          {"index", expressionTree(Subscript->getIdx())},
+          {"type_info", typeInfo(Subscript->getType(), &Context)},
+      };
+    if (const auto *Unary = dyn_cast<UnaryOperator>(Expression))
+      return llvm::json::Object{
+          {"kind", "unary"},
+          {"op", UnaryOperator::getOpcodeStr(Unary->getOpcode()).str()},
+          {"operand", expressionTree(Unary->getSubExpr())},
+          {"type_info", typeInfo(Unary->getType(), &Context)},
+      };
+    if (const auto *Binary = dyn_cast<BinaryOperator>(Expression))
+      return llvm::json::Object{
+          {"kind", "binary"},
+          {"op", BinaryOperator::getOpcodeStr(Binary->getOpcode()).str()},
+          {"lhs", expressionTree(Binary->getLHS())},
+          {"rhs", expressionTree(Binary->getRHS())},
+          {"type_info", typeInfo(Binary->getType(), &Context)},
+      };
+    if (const auto *Conditional = dyn_cast<ConditionalOperator>(Expression))
+      return llvm::json::Object{
+          {"kind", "conditional"},
+          {"condition", expressionTree(Conditional->getCond())},
+          {"then", expressionTree(Conditional->getTrueExpr())},
+          {"else", expressionTree(Conditional->getFalseExpr())},
+          {"type_info", typeInfo(Conditional->getType(), &Context)},
+      };
+    return llvm::json::Value(nullptr);
+  }
+
   std::optional<ValueOrigin> expressionOrigin(const Expr *Expression) const {
     if (!Expression)
       return std::nullopt;
@@ -1836,6 +1913,7 @@ private:
     // identical uncast member is tracked correctly.
     Expression = Expression->IgnoreParenCasts();
     ValueOrigin Origin;
+    Origin.ExpressionNode = Expression;
     Origin.Expression = text(Expression->getSourceRange(), true);
 
     if (const auto *Call = dyn_cast<CallExpr>(Expression)) {
@@ -2102,15 +2180,27 @@ private:
   }
 
   void recordParameterWriteEffect(const ParmVarDecl *Parameter,
-                                  const Expr *Lhs, const Expr *Rhs) {
-    if (!Parameter || !Lhs || !Rhs)
+                                  const Expr *Lhs, const Expr *Rhs,
+                                  const BinaryOperator *Operator) {
+    if (!Parameter || !Lhs || !Rhs || !Operator)
       return;
     const std::string Path = accessPath(Lhs, Context);
     if (Path.empty() || Path == jsonText(Parameter->getNameAsString()))
       return;
-    ParamWriteEffects[Parameter].push_back(ParamWriteEffect{
-        Path, text(Rhs->getSourceRange(), true), constantInteger(Rhs, Context),
-        activeGuards(Lhs), NextEffectOrder++});
+    ParamWriteEffect Effect;
+    Effect.Path = Path;
+    Effect.Value = text(Rhs->getSourceRange(), true);
+    Effect.ConstantValue = constantInteger(Rhs, Context);
+    Effect.Origin = expressionOrigin(Rhs);
+    Effect.SourceOffset = static_cast<int64_t>(
+        SM.getFileOffset(SM.getExpansionLoc(Lhs->getBeginLoc())));
+    Effect.Operation =
+        BinaryOperator::getOpcodeStr(Operator->getOpcode()).str();
+    Effect.Guards = activeGuards(Operator);
+    if (Effect.Guards.empty())
+      Effect.Guards = activeGuards(Lhs);
+    Effect.Order = NextEffectOrder++;
+    ParamWriteEffects[Parameter].push_back(std::move(Effect));
   }
 
   void recordGlobalWriteEffect(const Expr *Lhs, const Expr *Rhs,
@@ -3007,7 +3097,7 @@ public:
           Path != jsonText(Param->getNameAsString())) {
         WrittenParams.insert(Param);
         recordParameterWriteEffect(Param, Operator->getLHS(),
-                                   Operator->getRHS());
+                                   Operator->getRHS(), Operator);
       }
     }
     if (isExternalGlobal(Variable)) {

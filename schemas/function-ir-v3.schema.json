@@ -163,7 +163,8 @@
         "base": { "type": ["string", "null"] },
         "index": { "type": ["string", "null"] },
         "field": { "type": ["string", "null"] },
-        "table_values": { "type": "object", "additionalProperties": { "type": "integer" } }
+        "table_values": { "type": "object", "additionalProperties": { "type": "integer" } },
+        "expression_tree": { "type": ["object", "null"] }
       }
     },
     "guard": {
