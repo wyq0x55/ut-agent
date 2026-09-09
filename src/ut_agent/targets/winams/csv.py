@@ -1704,12 +1704,28 @@ def _render_intent_value(
 ) -> str:
     address = _pointer_address_value(key, ir) if ir is not None else None
     if address is not None:
+        if value == 0 or value == "0" or value == "0x0":
+            return "0x0"
         return f"0x{address:x}"
+    if value == "" or value is None:
+        return ""
     if isinstance(value, bool):
         return "0x1" if value else "0x0"
     if isinstance(value, int):
         return f"0x{value:x}" if value >= 0 else str(value)
     return str(value)
+
+
+def _is_param_pointee_column(param_name: str, comment: str, key: str | None) -> bool:
+    if comment in (f"@{param_name}", param_name):
+        return False
+    if key and (key == pointer_address_key(param_name)):
+        return False
+    if comment.startswith((f"@{param_name}[", f"@{param_name}->", f"@{param_name}.", f"*{param_name}")):
+        return True
+    if key and (key.startswith(f"param:{param_name}:pointee") or key == f"*{param_name}"):
+        return True
+    return False
 
 
 def _source_span(value: object) -> tuple[int, int] | None:
@@ -1845,13 +1861,27 @@ def render_intents_csv(ir: FunctionIR, result: GenerationResult, *,
     branch_indexes = {branch.bid: index for index, branch in enumerate(ir.branches)}
 
     def data_line(intent: TestIntent) -> str:
+        null_ptrs = {
+            param.name for param in ir.params
+            if param.is_ptr
+            and (
+                intent.inputs.get(param.name) == 0
+                or intent.inputs.get(pointer_address_key(param.name)) == 0
+            )
+        }
         values = []
         for comment, key in input_columns:
+            if any(_is_param_pointee_column(p, comment, key) for p in null_ptrs):
+                values.append("")
+                continue
             raw = intent.raw_inputs.get(comment)
             values.append(raw if raw is not None else _render_intent_value(
                 _intent_value(intent.inputs, comment, key, ir=ir),
                 comment=comment, key=key, ir=ir))
         for comment, key in output_columns:
+            if any(_is_param_pointee_column(p, comment, key) for p in null_ptrs):
+                values.append("")
+                continue
             raw = intent.raw_expected.get(comment)
             values.append(raw if raw is not None else _render_intent_value(
                 _intent_value(intent.expected, comment, key, ir=ir),
@@ -2021,13 +2051,27 @@ def render_intents_csv(ir: FunctionIR, result: GenerationResult, *,
                     ]
 
                     def projected_signature(item: TestIntent) -> tuple:
+                        null_ptrs = {
+                            param.name for param in ir.params
+                            if param.is_ptr
+                            and (
+                                item.inputs.get(param.name) == 0
+                                or item.inputs.get(pointer_address_key(param.name)) == 0
+                            )
+                        }
                         values = []
                         for comment, key in input_columns:
+                            if any(_is_param_pointee_column(p, comment, key) for p in null_ptrs):
+                                values.append(("in", comment, key, "''"))
+                                continue
                             values.append((
                                 "in", comment, key,
                                 repr(_intent_value(item.inputs, comment, key)),
                             ))
                         for comment, key in output_columns:
+                            if any(_is_param_pointee_column(p, comment, key) for p in null_ptrs):
+                                values.append(("out", comment, key, "''"))
+                                continue
                             values.append((
                                 "out", comment, key,
                                 repr(_intent_value(item.expected, comment, key)),

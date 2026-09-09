@@ -656,3 +656,30 @@ def test_standalone_emits_typed_expression_tree_for_pointer_output(tmp_path: Pat
     assert tree["op"] == ">>"
     assert tree["lhs"]["kind"] == "binary"
     assert tree["lhs"]["op"] == "&"
+
+
+def test_standalone_emits_branch_guards_for_enclosed_call(tmp_path: Path):
+    executable = default_clang_extractor()
+    if executable is None:
+        pytest.skip("repository standalone extractor is not built")
+    source = tmp_path / "guarded_call.c"
+    source.write_text(
+        "typedef unsigned char u1;\n"
+        "void helper(void);\n"
+        "void target(u1 *ptr) {\n"
+        "  if (ptr != 0) {\n"
+        "    helper();\n"
+        "  }\n"
+        "}\n",
+        encoding="ascii",
+    )
+
+    ir = ClangExtractor(executable).extract(
+        make_compile_context([source]), "target", cwd=tmp_path,
+    )
+
+    assert len(ir.calls) == 1
+    call = ir.calls[0]
+    assert call.callee == "helper"
+    assert call.guards == [{"bid": "b0", "then": True}]
+

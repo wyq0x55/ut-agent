@@ -613,3 +613,54 @@ extern const Cfg xnl_spi_unit_cfg[1];
     assert control.constant_value is None
     csv_text = render_csv(ir)
     assert "FALSE デッドコードがあった為、この分岐に入ることができません" not in csv_text
+
+
+def test_csv_renders_null_pointer_address_zero_and_empty_pointee():
+    ir = FunctionIR(
+        name="target",
+        file="target.c",
+        line=1,
+        ret_type="void",
+        params=[Param("ptr", "uint8 *", is_ptr=True, is_written=True,
+                      access_paths=["*ptr"])],
+        branches=[Branch(
+            bid="b0", kind="if", line=2, cond_text="ptr != 0",
+            atoms=[Atom("ptr", "uint8 *", "!=", 0, "0", "ptr != 0")],
+        )],
+        calls=[CallSite(
+            order=0, callee="helper", line=3,
+            guards=[{"bid": "b0", "then": True}],
+        )],
+        control_vars=[ControlVar("ptr", "ptr", "param")],
+    )
+    result = GenerationResult(
+        "target", VALIDATED,
+        intents=(
+            TestIntent(
+                case_id="U001",
+                obligation=TestObligation(oid="b0:T", kind="branch", branch_id="b0", outcome=True),
+                inputs={"ptr": 1, "param:ptr:address": 1, "*ptr": 42, "call:helper:count": 0},
+                expected={"*ptr": 42, "call:helper:count": 1},
+                validation=ValidationResult("VALIDATED"),
+            ),
+            TestIntent(
+                case_id="U002",
+                obligation=TestObligation(oid="b0:F", kind="branch", branch_id="b0", outcome=False),
+                inputs={"ptr": 0, "param:ptr:address": 0, "*ptr": 0, "call:helper:count": 0},
+                expected={"call:helper:count": 0},
+                validation=ValidationResult("VALIDATED"),
+            ),
+        ),
+    )
+    csv_text = render_intents_csv(ir, result)
+    lines = [line.split(",") for line in csv_text.splitlines() if line.startswith(",")]
+    assert len(lines) == 2
+    true_row = lines[0]
+    assert "0x5400" in true_row
+    assert "0x2a" in true_row
+    false_row = lines[1]
+    assert "0x0" in false_row
+    comment_line = next(line.split(",") for line in csv_text.splitlines() if line.startswith("#COMMENT"))
+    ptr_val_idx = comment_line.index('"*ptr"')
+    assert false_row[ptr_val_idx] == ""
+

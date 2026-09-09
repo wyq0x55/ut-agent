@@ -799,6 +799,16 @@ def _control_env(values: dict[str, Any], ir: FunctionIR) -> dict[str, Any]:
                 )
                 for concrete in call_return_keys(callee, slot):
                     env[concrete] = value
+
+    for param in ir.params:
+        if param.is_ptr:
+            ptr_val = env.get(param.name)
+            if ptr_val == 0:
+                env[pointer_address_key(param.name)] = 0
+                env[param.name] = 0
+            elif ptr_val is not None and ptr_val != 0:
+                env.setdefault(pointer_address_key(param.name), 1)
+
     return env
 
 
@@ -956,14 +966,18 @@ def branch_path_reachable(ir: FunctionIR, branch: Branch,
     return True
 
 
-def _required_outputs(ir: FunctionIR) -> list[str]:
+def _required_outputs(ir: FunctionIR, assignment: dict[str, Any] | None = None) -> list[str]:
     required = []
     if ir.ret_type not in ("", "void"):
         required.append("return")
-    required.extend(
-        pointer_value_key(param.name)
-        for param in ir.params if param.is_ptr and param.is_written
-    )
+    for param in ir.params:
+        if param.is_ptr and param.is_written:
+            if assignment is not None and (
+                assignment.get(param.name) == 0
+                or assignment.get(pointer_address_key(param.name)) == 0
+            ):
+                continue
+            required.append(pointer_value_key(param.name))
     required.extend(memory.name for memory in ir.memory_vars if memory.write)
     required.extend(_global_output_columns(ir))
     return list(dict.fromkeys(required))
@@ -2180,6 +2194,8 @@ def _generic_expected(ir: FunctionIR, selected: dict[str, Any]) -> dict[str, Any
     for param in ir.params:
         if not param.is_ptr or not param.is_written:
             continue
+        if selected.get(param.name) == 0 or selected.get(pointer_address_key(param.name)) == 0:
+            continue
         pointer_values = _pointer_output_values(ir, param, selected)
         if pointer_values is not None:
             expected.update(pointer_values)
@@ -2308,7 +2324,7 @@ def validate_intent(ir: FunctionIR, intent: TestIntent, *,
             except (KeyError, TypeError, ValueError) as exc:
                 errors.append(f"分支不可证明: {branch.bid}: {exc}")
 
-    for name in _required_outputs(ir):
+    for name in _required_outputs(ir, intent.inputs):
         if not _has_key(intent.expected, name):
             errors.append(f"缺少期望值 oracle: {name}")
     checks.append("oracle-completeness")

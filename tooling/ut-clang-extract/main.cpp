@@ -1382,8 +1382,46 @@ private:
            SM.getFileOffset(InnerEnd) <= SM.getFileOffset(OuterEnd);
   }
 
+  std::vector<std::pair<std::string, bool>> activeGuards(
+      const Stmt *Statement) const {
+    std::vector<std::pair<std::string, bool>> Result;
+    const Stmt *Current = Statement;
+    for (unsigned Depth = 0; Depth < 64 && Current; ++Depth) {
+      auto Parents = Context.getParents(*Current);
+      if (Parents.empty())
+        break;
+      const DynTypedNode &Parent = Parents[0];
+      if (const auto *If = Parent.get<IfStmt>()) {
+        auto Branch = BranchIds.find(If);
+        if (Branch != BranchIds.end()) {
+          const bool InThen = If->getThen() && sourceRangeContains(
+              If->getThen()->getSourceRange(), Statement->getSourceRange());
+          const bool InElse = If->getElse() && sourceRangeContains(
+              If->getElse()->getSourceRange(), Statement->getSourceRange());
+          if (InThen || InElse)
+            Result.emplace_back(Branch->second, InThen);
+        }
+      }
+      if (const auto *ParentStmt = Parent.get<Stmt>()) {
+        Current = ParentStmt;
+        continue;
+      }
+      if (const auto *ParentExpr = Parent.get<Expr>()) {
+        Current = ParentExpr;
+        continue;
+      }
+      break;
+    }
+    std::reverse(Result.begin(), Result.end());
+    return Result;
+  }
+
   llvm::json::Array callGuards(const CallExpr *Call) const {
     llvm::json::Array Result;
+    for (const auto &Guard : activeGuards(Call)) {
+      Result.push_back(llvm::json::Object{
+          {"bid", Guard.first}, {"then", Guard.second}});
+    }
     const Stmt *Current = Call;
     for (unsigned Depth = 0; Depth < 64; ++Depth) {
       auto Parents = Context.getParents(*Current);
@@ -2182,40 +2220,6 @@ private:
         return static_cast<int64_t>(Index);
     }
     return -1;
-  }
-
-  std::vector<std::pair<std::string, bool>> activeGuards(
-      const Stmt *Statement) const {
-    std::vector<std::pair<std::string, bool>> Result;
-    const Stmt *Current = Statement;
-    for (unsigned Depth = 0; Depth < 64 && Current; ++Depth) {
-      auto Parents = Context.getParents(*Current);
-      if (Parents.empty())
-        break;
-      const DynTypedNode &Parent = Parents[0];
-      if (const auto *If = Parent.get<IfStmt>()) {
-        auto Branch = BranchIds.find(If);
-        if (Branch != BranchIds.end()) {
-          const bool InThen = If->getThen() && sourceRangeContains(
-              If->getThen()->getSourceRange(), Statement->getSourceRange());
-          const bool InElse = If->getElse() && sourceRangeContains(
-              If->getElse()->getSourceRange(), Statement->getSourceRange());
-          if (InThen || InElse)
-            Result.emplace_back(Branch->second, InThen);
-        }
-      }
-      if (const auto *ParentStmt = Parent.get<Stmt>()) {
-        Current = ParentStmt;
-        continue;
-      }
-      if (const auto *ParentExpr = Parent.get<Expr>()) {
-        Current = ParentExpr;
-        continue;
-      }
-      break;
-    }
-    std::reverse(Result.begin(), Result.end());
-    return Result;
   }
 
   void recordParameterWriteEffect(const ParmVarDecl *Parameter,

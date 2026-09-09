@@ -49,7 +49,7 @@ def evaluate_obligation(ir: FunctionIR, obligation: TestObligation,
     consulted.  A missing required effect is an incomplete semantic result,
     not a guessed oracle.
     """
-    required = tuple(engine._required_outputs(ir))
+    required = tuple(engine._required_outputs(ir, assignment))
     try:
         post_state = engine._generic_expected(ir, assignment)
     except (KeyError, TypeError, ValueError) as exc:
