@@ -9,7 +9,8 @@ from conftest import ROOT
 from ut_agent import cli
 from ut_agent.ir import (
     Atom, Branch, CallSite, ControlVar, Effect, FieldAccess, FunctionIR,
-    GlobalObject, Param, RecordLayoutField, TypeInfo,
+    GlobalObject, Param, Provenance, RecordLayoutField, SourceLocation,
+    TypeInfo, ValueOrigin,
 )
 from ut_agent.generation import (
     NEEDS_REVIEW, UNSUPPORTED, VALIDATED, Rule, RulePack, evaluate_atom,
@@ -20,7 +21,7 @@ from ut_agent.targets.winams.csv import render_intents_csv
 from ut_agent.learning.rule_infer import infer_rule_pack
 from ut_agent.toolchain import ClangExtractor, default_clang_extractor, make_compile_context
 from ut_agent.generation.boundary import control_candidates
-from ut_agent.generation.semantic import global_key
+from ut_agent.generation.semantic import global_key, global_object_columns
 
 
 def _branch_ir(*, ret_type: str = "void") -> FunctionIR:
@@ -224,6 +225,78 @@ def test_record_storage_oracle_uses_typed_layout_without_project_names():
     assert result.status == VALIDATED
     assert result.intents[0].expected[global_key("state", field="byte")] == 1
     assert all(not key.startswith("AMSTB_") for key in result.intents[0].expected)
+
+
+def test_union_aggregate_write_does_not_expose_unwritten_storage_aliases():
+    layout = [
+        RecordLayoutField("bits.b0", 0, 1, True, "bits", 0, 8),
+        RecordLayoutField("byte", 0, 8, False, "byte", 0, 8),
+    ]
+    ir = FunctionIR(
+        name="aggregate_union_target", file="record.c", line=1, ret_type="void",
+        global_objects=[GlobalObject(
+            name="state", write=True, is_union=True,
+            field_paths=["bits.b0", "byte"],
+            field_accesses=[FieldAccess("bits", write=True)],
+            record_layout=layout,
+        )],
+        global_write_effects=[Effect(
+            path="state.bits.b0", constant_value=1,
+        )],
+    )
+    result = generate_intents(ir)
+    assert result.status == VALIDATED
+    assert global_key("state", field="byte") not in result.intents[0].expected
+    text = render_intents_csv(ir, result)
+    assert "record.c/state.byte" not in text
+
+
+def test_array_global_columns_match_winams_field_major_order():
+    ir = FunctionIR(
+        name="array_order_target", file="record.c", line=1, ret_type="void",
+    )
+    obj = {
+        "name": "state", "write": True, "array_sizes": [2],
+        "field_paths": ["first", "second"],
+    }
+
+    assert global_object_columns(ir, obj, writable=True) == [
+        "global:state[0].first", "global:state[1].first",
+        "global:state[0].second", "global:state[1].second",
+    ]
+
+
+def test_dynamic_global_effects_expand_extractor_loop_slots():
+    loop = Branch(
+        bid="loop", kind="for", line=2,
+        provenance=Provenance(
+            SourceLocation("target.c", 1, 1, 10, 50),
+            SourceLocation("target.c", 1, 1, 10, 50),
+        ),
+        extensions={"execution_loop": {
+            "driver": "index", "start": 0, "step": 1, "count": 2,
+        }},
+    )
+    ir = FunctionIR(
+        name="dynamic_effect_target", file="target.c", line=1,
+        ret_type="void", branches=[loop],
+        global_objects=[GlobalObject(
+            name="state", write=True, array_sizes=[2],
+            field_paths=["value"],
+            field_accesses=[FieldAccess("value", write=True)],
+        )],
+        global_write_effects=[Effect(
+            path="state[index].value", source_offset=20,
+            origin=ValueOrigin(
+                kind="const_table_field", driver="index",
+                table_values={"0": 7, "1": 8},
+            ),
+        )],
+    )
+
+    expected = generate_intents(ir).intents[0].expected
+    assert expected["global:state[0].value"] == 7
+    assert expected["global:state[1].value"] == 8
 
 
 def test_unknown_global_output_is_needs_review_not_zero():

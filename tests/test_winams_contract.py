@@ -273,6 +273,30 @@ def test_csv_does_not_emit_output_for_input_only_pointer():
     assert "data_out(期待)" not in legacy_headers
 
 
+def test_csv_does_not_duplicate_input_only_stub_record_fields_as_outputs():
+    ir = FunctionIR(
+        name="stub_record_input", file="Dma.c", line=1, ret_type="void",
+        calls=[CallSite(
+            order=0, callee="read_record", line=2,
+            params=[Param("record", "Record *", is_ptr=True)],
+            caller_param_fields={"0": ["u1_data10"]},
+            caller_param_output={"0": False},
+            pointer_arguments={"0": {
+                "address_used": True, "pointee_write": False,
+            }},
+        )],
+    )
+
+    rows = list(__import__("csv").reader(
+        __import__("io").StringIO(render_csv(ir))
+    ))
+    comment = next(row for row in rows if row and row[0] == "#COMMENT")
+    assert comment.count(
+        "AMSTB_SrcFile.c/AMSTB_read_record@PTROUT00_read_record[0].u1_data10"
+    ) == 1
+    assert rows[0][4] == "1"
+
+
 def test_csv_does_not_emit_rte_read_receive_pointer_as_output():
     ir = FunctionIR(
         name="target",

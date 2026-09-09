@@ -706,7 +706,10 @@ std::optional<int64_t> constantInteger(const Expr *Expression,
   Expr::EvalResult Result;
   if (!Expression->EvaluateAsInt(Result, Context))
     return std::nullopt;
-  return Result.Val.getInt().getSExtValue();
+  const llvm::APInt &Value = Result.Val.getInt();
+  if (Expression->getType()->isUnsignedIntegerType())
+    return static_cast<int64_t>(Value.getZExtValue());
+  return Value.getSExtValue();
 }
 
 std::optional<int64_t> nestedConstantInteger(const Expr *Expression,
@@ -1554,6 +1557,42 @@ private:
       break;
     }
     return Capacity;
+  }
+
+  llvm::json::Array executionLoops(const CallExpr *Call) const {
+    std::vector<llvm::json::Value> Values;
+    const Stmt *Current = Call;
+    for (unsigned Depth = 0; Depth < 64; ++Depth) {
+      auto Parents = Context.getParents(*Current);
+      if (Parents.empty())
+        break;
+      const DynTypedNode &Parent = Parents[0];
+      if (const auto *Loop = Parent.get<ForStmt>()) {
+        auto Counter = loopCounter(Loop);
+        auto Count = forTripCount(Loop);
+        if (!Counter || !Count || *Count <= 0)
+          return {};
+        Values.push_back(llvm::json::Object{
+            {"driver", jsonText(Counter->Variable->getNameAsString())},
+            {"start", Counter->Start},
+            {"step", Counter->Step},
+            {"count", *Count}});
+      }
+      if (const auto *ParentStmt = Parent.get<Stmt>()) {
+        Current = ParentStmt;
+        continue;
+      }
+      if (const auto *ParentExpr = Parent.get<Expr>()) {
+        Current = ParentExpr;
+        continue;
+      }
+      break;
+    }
+    std::reverse(Values.begin(), Values.end());
+    llvm::json::Array Result;
+    for (llvm::json::Value &Value : Values)
+      Result.push_back(std::move(Value));
+    return Result;
   }
 
   bool returnValueUsed(const CallExpr *Call) const {
@@ -2640,6 +2679,18 @@ private:
             Logical->getOpcode()));
     }
     llvm::json::Object Extensions = emptyExtensions();
+    if (Kind == "for") {
+      if (const auto *Loop = dyn_cast<ForStmt>(Statement)) {
+        auto Counter = loopCounter(Loop);
+        auto Count = forTripCount(Loop);
+        if (Counter && Count && *Count > 0)
+          Extensions["execution_loop"] = llvm::json::Object{
+              {"driver", jsonText(Counter->Variable->getNameAsString())},
+              {"start", Counter->Start},
+              {"step", Counter->Step},
+              {"count", *Count}};
+      }
+    }
     llvm::json::Value ConditionTree(nullptr);
     if (Condition) {
       size_t AtomIndex = 0;
@@ -2784,6 +2835,8 @@ public:
         {"return_used", returnValueUsed(Call)}};
     if (llvm::json::Array Guards = callGuards(Call); !Guards.empty())
       Extensions["guards"] = std::move(Guards);
+    if (llvm::json::Array Loops = executionLoops(Call); !Loops.empty())
+      Extensions["execution_loops"] = std::move(Loops);
     llvm::json::Object PointerArguments;
     for (unsigned Index = 0; Index < Call->getNumArgs(); ++Index) {
       const Expr *Argument = Call->getArg(Index);
@@ -2847,6 +2900,16 @@ public:
     }
     if (!PointerArguments.empty())
       Extensions["pointer_arguments"] = std::move(PointerArguments);
+    llvm::json::Object CallerOrigins;
+    for (unsigned Index = 0; Index < Call->getNumArgs(); ++Index) {
+      const Expr *Argument = Call->getArg(Index);
+      if (!Argument || !Argument->getType()->isPointerType())
+        continue;
+      if (auto Origin = expressionOrigin(Argument))
+        CallerOrigins[std::to_string(Index)] = origin(*Origin);
+    }
+    if (!CallerOrigins.empty())
+      Extensions["caller_param_origins"] = std::move(CallerOrigins);
     llvm::json::Object CallerFields;
     for (unsigned Index = 0; Index < Call->getNumArgs(); ++Index) {
       if (!Call->getArg(Index)->getType()->isPointerType())

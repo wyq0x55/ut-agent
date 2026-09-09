@@ -221,6 +221,9 @@ def output_columns(ir, call) -> list[str]:
                 call_param_key(str(call.callee), index, slot, "pointee")
                 for slot in range(call_capacity(ir, call))
             )
+        elif (not caller_output and _field_list(call, index)
+              and not info.get("pointee_write", False)):
+            continue
         else:
             # The direct stub stores the pointer slot even when the callee
             # cannot write the pointee; the target observes the passed address.
@@ -242,6 +245,12 @@ def _global_columns(ir, obj: dict[str, Any], *, writable: bool) -> list[str]:
         if str(item).lstrip(".")
     ]
     raw_accesses = obj.get("field_accesses", [])
+    copied_accesses = {
+        str(item.get("path", "")).lstrip(".")
+        for item in raw_accesses
+        if isinstance(item, dict) and item.get("path")
+        and item.get("copied_from_local")
+    } if isinstance(raw_accesses, list) else set()
     accesses = {
         str(item.get("path", "")).lstrip("."): (
             bool(item.get("read")), bool(item.get("write"))
@@ -260,18 +269,15 @@ def _global_columns(ir, obj: dict[str, Any], *, writable: bool) -> list[str]:
         ]
         layout = obj.get("record_layout", [])
         if isinstance(layout, list):
-            def accessed(path: str) -> bool:
-                return any(
-                    access == path or access.startswith(path + ".")
-                    or path.startswith(access + ".")
-                    for access in accesses
-                )
+            def exact_write(path: str) -> bool:
+                return path not in copied_accesses \
+                    and accesses.get(path, (False, False))[1]
 
             accessed_bitfields = {
                 str(item.get("path", "")).lstrip(".")
                 for item in layout
                 if isinstance(item, dict) and item.get("is_bitfield")
-                and accessed(str(item.get("path", "")).lstrip("."))
+                and exact_write(str(item.get("path", "")).lstrip("."))
             }
             for item in layout:
                 if not isinstance(item, dict) or item.get("is_bitfield"):
@@ -303,13 +309,14 @@ def _global_columns(ir, obj: dict[str, Any], *, writable: bool) -> list[str]:
         return []
     indexes = list(product(*(range(size) for size in sizes))) if sizes else [()]
     result: list[str] = []
-    for index in indexes:
-        if field_paths:
+    if field_paths:
+        for field in field_paths:
             result.extend(
                 global_key(str(obj["name"]), tuple(index), field)
-                for field in field_paths
+                for index in indexes
             )
-        else:
+    else:
+        for index in indexes:
             result.append(global_key(str(obj["name"]), tuple(index)))
     return result
 

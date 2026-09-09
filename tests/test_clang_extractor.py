@@ -261,6 +261,9 @@ def test_standalone_records_external_rte_read_into_local_as_stub_input(
     call = next(item for item in ir.calls if item.callee == "Rte_Read_status")
     assert call.params[0].is_ptr is True
     assert call.pointer_arguments["0"]["pointee_write"] is False
+    caller_origin = call.extensions["caller_param_origins"]["0"]
+    assert caller_origin["kind"] == "local"
+    assert caller_origin["driver"] == "value"
     control = next(item for item in ir.control_vars if item.name == "value")
     assert control.value_origin.kind == "stub_param"
     effect = next(item for item in ir.local_value_effects
@@ -269,6 +272,45 @@ def test_standalone_records_external_rte_read_into_local_as_stub_input(
                   and item.origin.kind == "stub_param")
     assert effect.origin.kind == "stub_param"
     assert effect.origin.callee == "Rte_Read_status"
+
+
+def test_standalone_records_pointer_caller_loop_slots(tmp_path: Path):
+    executable = default_clang_extractor()
+    if executable is None:
+        pytest.skip("repository standalone extractor is not built")
+    header = tmp_path / "pal.h"
+    header.write_text(
+        "typedef unsigned char u1;\n"
+        "typedef struct { u1 value; } Frame;\n"
+        "u1 pal_read(const Frame *data);\n",
+        encoding="ascii",
+    )
+    source = tmp_path / "target.c"
+    source.write_text(
+        '#include "pal.h"\n'
+        "void target(void) {\n"
+        "  Frame frame;\n"
+        "  for (u1 index = 0U; index < 3U; ++index) {\n"
+        "    frame.value = index;\n"
+        "    (void)pal_read(&frame);\n"
+        "  }\n"
+        "}\n",
+        encoding="ascii",
+    )
+
+    ir = ClangExtractor(executable).extract(
+        make_compile_context([source], [tmp_path]), "target", cwd=tmp_path,
+    )
+
+    call = next(item for item in ir.calls if item.callee == "pal_read")
+    assert call.extensions["caller_param_origins"]["0"]["driver"] == "frame"
+    assert call.extensions["execution_loops"] == [{
+        "driver": "index", "start": 0, "step": 1, "count": 3,
+    }]
+    loop = next(item for item in ir.branches if item.kind == "for")
+    assert loop.extensions["execution_loop"] == {
+        "driver": "index", "start": 0, "step": 1, "count": 3,
+    }
 
 
 def test_standalone_records_external_stub_output_and_comparison_rhs(
@@ -553,6 +595,27 @@ def test_standalone_tracks_return_and_local_value_effects(tmp_path: Path):
     assert {item.name for item in local_effects} == {"result"}
     assert any(item.constant_value == 1 for item in local_effects)
     assert any(item.origin and item.origin.kind == "stub_return" for item in local_effects)
+
+
+def test_standalone_preserves_unsigned_cast_constant_value(tmp_path: Path):
+    executable = default_clang_extractor()
+    if executable is None:
+        pytest.skip("repository standalone extractor is not built")
+    source = tmp_path / "unsigned_constant.c"
+    source.write_text(
+        "typedef unsigned char u1;\n"
+        "u1 target(void) {\n"
+        "  u1 result = (u1)0x80U;\n"
+        "  return result;\n"
+        "}\n",
+        encoding="ascii",
+    )
+    ir = ClangExtractor(executable).extract(
+        make_compile_context([source]), "target", cwd=tmp_path
+    )
+    result = next(item for item in ir.local_value_effects
+                  if item.name == "result")
+    assert result.constant_value == 128
 
 
 def test_standalone_emits_typed_expression_tree_for_pointer_output(tmp_path: Path):

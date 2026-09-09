@@ -13,7 +13,9 @@ from ut_agent.generation.boundary import control_candidates, typed_boundary_poin
 from ut_agent.generation.obligation import derive_obligations
 from ut_agent.generation.solver import solve_obligation
 from ut_agent.generation.engine import (
-    _control_env, _generic_inputs, _local_value, _pointer_output_values,
+    _call_is_reachable, _control_env, _generic_expected, _generic_inputs,
+    _local_value,
+    _pointer_output_values,
 )
 from ut_agent.generation.model import TestObligation as GenerationObligation
 from ut_agent.ir import (
@@ -763,6 +765,184 @@ def test_nested_switch_branch_requires_extractor_proven_case():
     assert result.status == "SAT"
     assert result.assignment["state"] == 4
     assert result.assignment["rot"] == 1
+
+
+def test_call_count_oracle_follows_extractor_switch_path():
+    info = TypeInfo(
+        canonical_type="unsigned char", kind="integer", bit_width=8,
+        signed=False, min_value=0, max_value=255,
+    )
+
+    def location(start: int, end: int, line: int) -> SourceLocation:
+        return SourceLocation("target.c", line, 1, start, end)
+
+    switch = Branch(
+        bid="switch", kind="switch", line=2,
+        cases=[
+            Case("case 1", 1, False,
+                 provenance=Provenance(location(100, 180, 3),
+                                       location(100, 180, 3))),
+            Case("default", None, True,
+                 provenance=Provenance(location(200, 280, 4),
+                                       location(200, 280, 4))),
+        ],
+        selector=ValueOrigin(kind="variable", driver="state"),
+        provenance=Provenance(location(90, 290, 2),
+                              location(90, 290, 2)),
+    )
+    call = CallSite(
+        order=0, callee="dep", line=3, ret_type="void",
+        provenance=Provenance(location(110, 120, 3),
+                              location(110, 120, 3)),
+    )
+    ir = FunctionIR(
+        name="call_count_switch", file="target.c", line=1, ret_type="void",
+        branches=[switch], calls=[call],
+        control_vars=[ControlVar("state", "state", "global", type_info=info)],
+    )
+
+    assert _generic_expected(
+        ir, {"state": 1, "call:dep:count": 0}
+    )["call:dep:count"] == 1
+    assert _generic_expected(
+        ir, {"state": 0, "call:dep:count": 0}
+    )["call:dep:count"] == 0
+
+
+def test_call_count_oracle_resolves_extractor_table_guard():
+    info = TypeInfo(
+        canonical_type="unsigned char", kind="integer", bit_width=8,
+        signed=False, min_value=0, max_value=255,
+    )
+
+    def location(start: int, end: int, line: int) -> SourceLocation:
+        return SourceLocation("target.c", line, 1, start, end)
+
+    branch = Branch(
+        bid="table_if", kind="if", line=2,
+        atoms=[Atom(
+            "cfg[index].mode", "unsigned char", "==", 0, None,
+            "cfg[index].mode == 0", type_info=info,
+            extensions={"canonical_var": "cfg[index].mode"},
+        )],
+        provenance=Provenance(location(90, 180, 2),
+                              location(90, 180, 2)),
+    )
+    call = CallSite(
+        order=0, callee="dep", line=3, ret_type="void", max_occurrences=4,
+        guards=[{
+            "global": "cfg", "index_var": "index", "field": "mode",
+            "op": "==", "boundary": 0, "then": True,
+        }],
+        provenance=Provenance(location(120, 130, 3),
+                              location(120, 130, 3)),
+    )
+    ir = FunctionIR(
+        name="table_guard_call", file="target.c", line=1, ret_type="void",
+        branches=[branch], calls=[call],
+        control_vars=[
+            ControlVar("index", "index", "local", type_info=info),
+            ControlVar("mode", "cfg[index].mode", "global", type_info=info),
+        ],
+        global_objects=[GlobalObject(
+            name="cfg", read=True, is_const=True, array_sizes=[2],
+            index_drivers=["index"], field_paths=["mode"],
+        )],
+    )
+
+    assert _call_is_reachable(ir, call, _control_env(
+        {"index": 0, "mode": 0}, ir,
+    )) is True
+    assert _call_is_reachable(ir, call, _control_env(
+        {"index": 0, "mode": 1}, ir,
+    )) is False
+    assert _generic_expected(
+        ir, {"index": 0, "mode": 0, "call:dep:count": 0}
+    )["call:dep:count"] == 4
+
+
+def test_stub_pointer_oracle_uses_extractor_caller_origin():
+    call = CallSite(
+        order=0, callee="dep", line=3, ret_type="void",
+        params=[Param("data", "Record *", is_ptr=True)], max_occurrences=2,
+        pointer_arguments={"0": {
+            "address_used": True, "pointee_write": False,
+        }},
+        caller_param_fields={"0": ["value"]},
+        caller_param_output={"0": True},
+        extensions={"caller_param_origins": {
+            "0": {"kind": "local", "driver": "frame"},
+        }, "execution_loops": [{
+            "driver": "index", "start": 0, "step": 1, "count": 2,
+        }]},
+        provenance=Provenance(
+            SourceLocation("target.c", 3, 1, 20, 30),
+            SourceLocation("target.c", 3, 1, 20, 30),
+        ),
+    )
+    ir = FunctionIR(
+        name="stub_pointer_oracle", file="target.c", line=1,
+        ret_type="void", calls=[call],
+        local_value_effects=[Effect(
+            name="frame", path="value", source_offset=10,
+            origin=ValueOrigin(
+                kind="const_table_field", driver="index",
+                table_values={"0": 7, "1": 8},
+            ),
+        )],
+    )
+
+    assert _generic_expected(ir, {
+        "call:dep:param:0:0.value": 0,
+        "call:dep:param:0:1.value": 0,
+    })[
+        "call:dep:param:0:0.value"
+    ] == 7
+    assert _generic_expected(ir, {
+        "call:dep:param:0:0.value": 0,
+        "call:dep:param:0:1.value": 0,
+    })["call:dep:param:0:1.value"] == 8
+
+
+def test_local_oracle_effect_uses_switch_case_reachability():
+    info = TypeInfo(
+        canonical_type="unsigned char", kind="integer", bit_width=8,
+        signed=False, min_value=0, max_value=255,
+    )
+
+    def location(start: int, end: int, line: int) -> SourceLocation:
+        return SourceLocation("target.c", line, 1, start, end)
+
+    switch = Branch(
+        bid="switch", kind="switch", line=2,
+        cases=[
+            Case("case 1", 1, False,
+                 provenance=Provenance(location(100, 180, 3),
+                                       location(100, 180, 3))),
+            Case("default", None, True,
+                 provenance=Provenance(location(200, 280, 4),
+                                       location(200, 280, 4))),
+        ],
+        selector=ValueOrigin(kind="variable", driver="state"),
+        provenance=Provenance(location(90, 290, 2),
+                              location(90, 290, 2)),
+    )
+    ir = FunctionIR(
+        name="switch_effects", file="target.c", line=1,
+        ret_type="unsigned char", branches=[switch],
+        control_vars=[ControlVar("state", "state", "global", type_info=info)],
+        local_value_effects=[
+            Effect(name="result", constant_value=128, source_offset=110),
+            Effect(name="result", constant_value=0, source_offset=210),
+        ],
+        return_effects=[Effect(
+            value="result",
+            origin=ValueOrigin(kind="local", driver="result"),
+        )],
+    )
+
+    assert _generic_expected(ir, {"state": 1})["return"] == 128
+    assert _generic_expected(ir, {"state": 0})["return"] == 0
 
 
 def test_issue6_baseline_keeps_source_mapped_approved_rules():

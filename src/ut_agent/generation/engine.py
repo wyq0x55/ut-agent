@@ -27,6 +27,8 @@ from ut_agent.generation.semantic import (
     global_key,
     global_output_columns as _global_output_columns,
     index_driver_limit as _semantic_index_driver_limit,
+    output_columns as _semantic_call_output_columns,
+    param_fields as _semantic_call_param_fields,
     pointer_address_key,
     pointer_value_key,
     visible_calls as _stub_calls,
@@ -125,6 +127,76 @@ def _global_effect_value(ir: FunctionIR, effect: dict[str, Any],
     if constant is not None:
         return constant
     return _effect_expression_value(ir, effect, env)
+
+
+def _is_integer_literal(value: str) -> bool:
+    try:
+        int(value, 0)
+    except (TypeError, ValueError):
+        return False
+    return True
+
+
+def _effect_execution_environments(ir: FunctionIR,
+                                   effect: dict[str, Any],
+                                   env: dict[str, Any]
+                                   ) -> tuple[dict[str, Any], ...]:
+    parts = _split_access_path(str(effect.get("path", "")))
+    if parts is None or not any(
+            not _is_integer_literal(index) for index in parts[1]):
+        return (env,)
+    try:
+        offset = int(effect.get("source_offset", -1))
+    except (TypeError, ValueError):
+        offset = -1
+    if offset < 0:
+        return (env,)
+    loops: list[tuple[int, int, dict[str, Any]]] = []
+    for branch in ir.branches:
+        if branch.kind != "for":
+            continue
+        span = _source_span(branch)
+        if span is None or not span[0] <= offset <= span[1]:
+            continue
+        extensions = branch.extensions
+        raw_loop = (extensions["execution_loop"]
+                    if isinstance(extensions, dict)
+                    and "execution_loop" in extensions else None)
+        if not isinstance(raw_loop, dict):
+            continue
+        driver = raw_loop.get("driver")
+        if not isinstance(driver, str) or not driver.strip():
+            return (env,)
+        try:
+            start = int(raw_loop["start"])
+            step = int(raw_loop["step"])
+            count = int(raw_loop["count"])
+        except (KeyError, TypeError, ValueError):
+            return (env,)
+        if step == 0 or count <= 0:
+            return (env,)
+        loops.append((span[0], span[1], {
+            "driver": driver, "start": start, "step": step,
+            "count": count,
+        }))
+    if not loops:
+        return (env,)
+    loops.sort(key=lambda item: (item[0], -item[1]))
+    values = [
+        [
+            (raw["driver"], raw["start"] + raw["step"] * index)
+            for index in range(raw["count"])
+        ]
+        for _, _, raw in loops
+    ]
+    result: list[dict[str, Any]] = []
+    for combination in product(*values):
+        current = dict(env)
+        for driver, value in combination:
+            current[_norm(driver)] = value
+            current[driver] = value
+        result.append(current)
+    return tuple(result)
 
 
 def _resolve_record_storage_values(
@@ -238,12 +310,18 @@ def _global_output_values(ir: FunctionIR, selected: dict[str, Any]) -> dict[str,
         except KeyError:
             unresolved_columns.add(column)
     raw_effects = _effect_records(ir.global_write_effects)
-    for effect in raw_effects:
-        if not isinstance(effect, dict):
+    effect_contexts = [
+        (effect, effect_env)
+        for effect in raw_effects if isinstance(effect, dict)
+        for effect_env in _effect_execution_environments(ir, effect, env)
+    ]
+    for effect, effect_env in effect_contexts:
+        env = effect_env
+        if _guards_active(
+                ir, effect.get("guards", []), effect_env,
+                effect.get("source_offset")) is not True:
             continue
-        if _guards_active(ir, effect.get("guards", []), env) is not True:
-            continue
-        column = _global_effect_column(ir, effect, env)
+        column = _global_effect_column(ir, effect, effect_env)
         root = _norm(str(effect.get("path", ""))).split("[", 1)[0].split(".", 1)[0]
         origin = effect.get("origin")
         # Do not let an alias in the testcase environment collapse a
@@ -258,7 +336,7 @@ def _global_output_values(ir: FunctionIR, selected: dict[str, Any]) -> dict[str,
             if (isinstance(origin, dict)
                     and origin.get("kind") == "local"
                     and has_leaf_columns)
-            else _global_effect_value(ir, effect, env)
+            else _global_effect_value(ir, effect, effect_env)
         )
         if column and isinstance(origin, dict) \
                 and origin.get("kind") == "stub_return":
@@ -269,7 +347,7 @@ def _global_output_values(ir: FunctionIR, selected: dict[str, Any]) -> dict[str,
             # scalar value of the return slot.  The scalar slot is populated
             # with zero by generic input synthesis, so checking ``value is
             # None`` here would silently bypass the structured mapping.
-            field_values = _stub_return_field_values(ir, origin, env)
+            field_values = _stub_return_field_values(ir, origin, effect_env)
             mapped = False
             for field, field_value in field_values.items():
                 leaf = f"{column}.{field}"
@@ -1509,8 +1587,13 @@ def _write_effect_value(ir: FunctionIR, effect: dict[str, Any],
     return _effect_expression_value(ir, effect, env)
 
 
-def _guards_active(ir: FunctionIR, guards: Any, env: dict[str, Any]) -> bool | None:
+def _guards_active(ir: FunctionIR, guards: Any, env: dict[str, Any],
+                   offset: Any = None) -> bool | None:
     """Evaluate an extractor guard list without treating unknown as false."""
+    if offset is not None:
+        switch_path = _switch_offset_reachable(ir, offset, env)
+        if switch_path is not True:
+            return switch_path
     if not isinstance(guards, list):
         return True
     for guard in guards:
@@ -1522,6 +1605,9 @@ def _guards_active(ir: FunctionIR, guards: Any, env: dict[str, Any]) -> bool | N
         if branch is None:
             return None
         try:
+            path = branch_path_reachable(ir, branch, env)
+            if path is not True:
+                return path
             active = evaluate_branch(branch, env)
         except (KeyError, TypeError, ValueError):
             return None
@@ -1760,7 +1846,10 @@ def _local_value(ir: FunctionIR, name: str, env: dict[str, Any],
         effects = bounded
     effects.sort(key=lambda item: int(item.get("source_offset", -1)))
     for effect in reversed(effects):
-        active = _guards_active(ir, effect.get("guards", []), env)
+        active = _guards_active(
+            ir, effect.get("guards", []), env,
+            effect.get("source_offset"),
+        )
         if active is not True:
             continue
         constant = effect.get("constant_value")
@@ -1815,7 +1904,8 @@ def _local_value(ir: FunctionIR, name: str, env: dict[str, Any],
 
 def _local_field_value(ir: FunctionIR, name: str, path: str,
                        env: dict[str, Any],
-                       before_offset: int | None = None) -> Any | None:
+                       before_offset: int | None = None,
+                       exclude_call_offset: int | None = None) -> Any | None:
     """Resolve one AST-recorded field assignment of an automatic record."""
     effects = [
         item for item in _local_value_effects(ir)
@@ -1831,10 +1921,21 @@ def _local_field_value(ir: FunctionIR, name: str, path: str,
                 offset = -1
             if offset < 0 or offset <= before_offset:
                 bounded.append(item)
-        effects = bounded
+    effects = bounded
     effects.sort(key=lambda item: int(item.get("source_offset", -1)))
     for effect in reversed(effects):
-        if _guards_active(ir, effect.get("guards", []), env) is not True:
+        origin = _origin_record(effect.get("origin"))
+        if exclude_call_offset is not None and isinstance(origin, dict) \
+                and origin.get("kind") == "stub_return":
+            try:
+                origin_call_offset = int(origin.get("call_offset"))
+            except (TypeError, ValueError):
+                origin_call_offset = None
+            if origin_call_offset == exclude_call_offset:
+                continue
+        if _guards_active(
+                ir, effect.get("guards", []), env,
+                effect.get("source_offset")) is not True:
             continue
         constant = effect.get("constant_value")
         if constant is not None:
@@ -1846,6 +1947,117 @@ def _local_field_value(ir: FunctionIR, name: str, path: str,
     return None
 
 
+def _call_extension(call: Any, name: str) -> Any:
+    extensions = getattr(call, "extensions", {})
+    if not isinstance(extensions, dict) or name not in extensions:
+        return None
+    return extensions[name]
+
+
+def _call_slot_environments(ir: FunctionIR, call: Any,
+                            selected: dict[str, Any]
+                            ) -> tuple[dict[str, Any], ...] | None:
+    base = _control_env(selected, ir)
+    raw_loops = _call_extension(call, "execution_loops")
+    try:
+        capacity = max(1, int(call.max_occurrences))
+    except (AttributeError, TypeError, ValueError):
+        capacity = 1
+    if not raw_loops:
+        return (base,) if capacity == 1 else None
+    if not isinstance(raw_loops, list):
+        return None
+    loop_values: list[list[tuple[str, int]]] = []
+    for raw_loop in raw_loops:
+        if not isinstance(raw_loop, dict):
+            return None
+        driver = raw_loop.get("driver")
+        if not isinstance(driver, str) or not driver.strip():
+            return None
+        try:
+            start = int(raw_loop["start"])
+            step = int(raw_loop["step"])
+            count = int(raw_loop["count"])
+        except (KeyError, TypeError, ValueError):
+            return None
+        if count <= 0 or step == 0:
+            return None
+        loop_values.append([
+            (driver, start + step * index) for index in range(count)
+        ])
+    environments: list[dict[str, Any]] = []
+    for combination in product(*loop_values):
+        environment = dict(base)
+        for driver, value in combination:
+            environment[_norm(driver)] = value
+            environment[driver] = value
+        reachable = _call_is_reachable(ir, call, environment)
+        if reachable is None:
+            return None
+        if reachable:
+            environments.append(environment)
+    if len(environments) != capacity:
+        return None
+    return tuple(environments)
+
+
+def _stub_pointer_output_values(ir: FunctionIR,
+                                selected: dict[str, Any]
+                                ) -> dict[str, Any]:
+    values: dict[str, Any] = {}
+    for call in _stub_calls(ir):
+        output_keys = set(_semantic_call_output_columns(ir, call))
+        if not output_keys:
+            continue
+        origins = _call_extension(call, "caller_param_origins")
+        if not isinstance(origins, dict):
+            continue
+        slot_environments = _call_slot_environments(ir, call, selected)
+        if slot_environments is None:
+            continue
+        call_span = _source_span(call)
+        if call_span is None:
+            continue
+        for index, param in enumerate(call.params):
+            if not param.is_ptr:
+                continue
+            info = call.pointer_arguments.get(str(index), {}) \
+                if isinstance(call.pointer_arguments, dict) else {}
+            if not isinstance(info, dict) or info.get("pointee_write"):
+                continue
+            fields = _semantic_call_param_fields(call, index)
+            origin = origins.get(str(index), origins.get(index))
+            if not isinstance(origin, dict) \
+                    or origin.get("kind") != "local":
+                continue
+            root = str(origin.get("driver", "")).strip()
+            if not root or not fields:
+                continue
+            keys = [
+                call_param_key(str(call.callee), index, slot, field)
+                for field in fields
+                for slot in range(len(slot_environments))
+            ]
+            if not any(key in output_keys for key in keys):
+                continue
+            for slot, environment in enumerate(slot_environments):
+                for field in fields:
+                    key = call_param_key(
+                        str(call.callee), index, slot, field,
+                    )
+                    if key not in output_keys:
+                        continue
+                    value = _local_field_value(
+                        ir, root, field, environment,
+                        before_offset=call_span[0],
+                        exclude_call_offset=call_span[0],
+                    )
+                    if value is None:
+                        break
+                    values[key] = value
+    return values
+
+
 def _return_value(ir: FunctionIR, selected: dict[str, Any]) -> Any | None:
     """Prove the tested-function return for the selected AST path."""
     raw = _effect_records(ir.return_effects)
@@ -1854,7 +2066,9 @@ def _return_value(ir: FunctionIR, selected: dict[str, Any]) -> Any | None:
     env = _control_env(selected, ir)
     applicable: list[Any] = []
     for effect in raw:
-        if _guards_active(ir, effect.get("guards", []), env) is not True:
+        if _guards_active(
+                ir, effect.get("guards", []), env,
+                effect.get("source_offset")) is not True:
             continue
         constant = effect.get("constant_value")
         if constant is not None:
@@ -1958,13 +2172,11 @@ def _generic_expected(ir: FunctionIR, selected: dict[str, Any]) -> dict[str, Any
         expected.update(global_values)
     # Call-count comparison fields are semantic observations.  The target
     # adapter owns their concrete comparison-column spelling.
-    for call in _stub_calls(ir):
-        name = call_count_key(call.callee)
-        try:
-            value = _lookup(selected, name)
-        except KeyError:
-            continue
-        expected[name] = value
+    call_counts = _call_execution_counts(ir, selected)
+    if call_counts is not None:
+        for callee, value in call_counts.items():
+            expected[call_count_key(callee)] = value
+    expected.update(_stub_pointer_output_values(ir, selected))
     for param in ir.params:
         if not param.is_ptr or not param.is_written:
             continue
@@ -1981,6 +2193,8 @@ def _generic_expected(ir: FunctionIR, selected: dict[str, Any]) -> dict[str, Any
     # by AST-proven tested-function pointer/global write effects.
     _, stub_output_columns = _semantic_call_columns(ir)
     for column in stub_output_columns:
+        if column in expected:
+            continue
         try:
             expected[column] = _lookup(selected, column)
         except KeyError:
@@ -2180,6 +2394,150 @@ def _switch_obligation_matches(branch: Branch,
         return False
     boundary = obligation.boundary_value
     return boundary is None or selector == boundary
+
+
+def _table_guard_branch(ir: FunctionIR, call: Any,
+                        guard: dict[str, Any]) -> Branch | None:
+    global_name = guard.get("global")
+    index_var = guard.get("index_var")
+    field = guard.get("field")
+    operator = guard.get("op")
+    boundary = guard.get("boundary")
+    if not all(isinstance(item, str) and item.strip()
+               for item in (global_name, index_var, field, operator)):
+        return None
+    if not isinstance(guard.get("then"), bool) or boundary is None:
+        return None
+    target = _norm(f"{global_name}[{index_var}].{field}")
+    candidates: list[Branch] = []
+    for branch in ir.branches:
+        for atom in branch.atoms:
+            extensions = atom.extensions if isinstance(atom.extensions, dict) else {}
+            canonical_var = (
+                extensions["canonical_var"]
+                if "canonical_var" in extensions else None
+            )
+            paths = (atom.var, canonical_var)
+            if (target not in {_norm(path) for path in paths if path}
+                    or atom.op != operator or atom.boundary != boundary):
+                continue
+            candidates.append(branch)
+            break
+    if not candidates:
+        return None
+    call_span = _source_span(call)
+    if call_span is None:
+        return candidates[0] if len(candidates) == 1 else None
+    contained = [
+        branch for branch in candidates
+        if (branch_span := _source_span(branch)) is not None
+        and branch_span[0] <= call_span[0]
+        and call_span[1] <= branch_span[1]
+    ]
+    if len(contained) == 1:
+        return contained[0]
+    return None
+
+
+def _call_is_reachable(ir: FunctionIR, call: Any,
+                       env: dict[str, Any]) -> bool | None:
+    for guard in getattr(call, "guards", ()):
+        if not isinstance(guard, dict):
+            return None
+        branch = next((item for item in ir.branches
+                       if item.bid == guard.get("bid")), None) \
+            if guard.get("bid") is not None else _table_guard_branch(
+                ir, call, guard,
+            )
+        if branch is None:
+            return None
+        path = branch_path_reachable(ir, branch, env)
+        if path is not True:
+            return path
+        try:
+            if evaluate_branch(branch, env) != bool(guard.get("then")):
+                return False
+        except (KeyError, TypeError, ValueError):
+            return None
+
+    call_span = _source_span(call)
+    if call_span is None:
+        return True if not getattr(call, "guards", ()) else None
+    for switch in (item for item in ir.branches if item.kind == "switch"):
+        switch_span = _source_span(switch)
+        if (switch_span is None
+                or switch_span[0] > call_span[0]
+                or call_span[1] > switch_span[1]):
+            continue
+        cases = _switch_cases_for_branch(switch, call)
+        if not cases:
+            return None
+        try:
+            selector = _switch_selector_value(switch, ir, env)
+        except (KeyError, TypeError, ValueError):
+            return None
+        if not any(
+                _switch_case_matches(case, selector, switch.cases)
+                for case in cases):
+            return False
+    return True
+
+
+def _switch_offset_reachable(ir: FunctionIR, offset: Any,
+                             env: dict[str, Any]) -> bool | None:
+    try:
+        target = int(offset)
+    except (TypeError, ValueError):
+        return True
+    for switch in (item for item in ir.branches if item.kind == "switch"):
+        switch_span = _source_span(switch)
+        if (switch_span is None
+                or target < switch_span[0]
+                or target > switch_span[1]):
+            continue
+        cases = [
+            case for case in switch.cases
+            if (case_span := _source_span(case)) is not None
+            and case_span[0] <= target <= case_span[1]
+        ]
+        if not cases:
+            return None
+        try:
+            selector = _switch_selector_value(switch, ir, env)
+        except (KeyError, TypeError, ValueError):
+            return None
+        if not any(
+                _switch_case_matches(case, selector, switch.cases)
+                for case in cases):
+            return False
+    return True
+
+
+def _call_execution_counts(ir: FunctionIR,
+                           selected: dict[str, Any]) -> dict[str, int] | None:
+    env = _control_env(selected, ir)
+    counts: dict[str, int] = {}
+    unknown: set[str] = set()
+    for call in ir.calls:
+        if _is_memory_helper(call) or call.ptr_call:
+            continue
+        callee = str(call.callee or "").strip()
+        if not callee:
+            continue
+        reachable = _call_is_reachable(ir, call, env)
+        if reachable is None:
+            unknown.add(callee)
+        elif reachable:
+            try:
+                occurrences = max(1, int(call.max_occurrences))
+            except (AttributeError, TypeError, ValueError):
+                occurrences = 1
+            counts[callee] = counts.get(callee, 0) + occurrences
+        else:
+            counts.setdefault(callee, 0)
+    if unknown:
+        return None
+    return counts
 
 
 def _apply_switch_path_target(ir: FunctionIR,

@@ -781,6 +781,7 @@ def _winams_global_columns(
         if str(item).lstrip(".")
     ]
     field_accesses = {}
+    copied_accesses: set[str] = set()
     field_access_order: dict[str, tuple[int, int, int]] = {}
     raw_accesses = obj.get("field_accesses", ())
     if isinstance(raw_accesses, (list, tuple)):
@@ -794,6 +795,8 @@ def _winams_global_columns(
                 bool(item.get("read", False)),
                 bool(item.get("write", False)),
             )
+            if item.get("copied_from_local", False):
+                copied_accesses.add(path)
             try:
                 line = int(item.get("line", 0))
             except (TypeError, ValueError):
@@ -918,17 +921,15 @@ def _winams_global_columns(
     if direction == "output" and field_paths:
         layout = obj.get("record_layout", [])
         if isinstance(layout, (list, tuple)):
-            def accessed(path: str) -> bool:
-                return any(
-                    access == path or access.startswith(path + ".")
-                    or path.startswith(access + ".")
-                    for access in field_accesses
-                )
-
             selected_bitfields = [
                 item for item in layout
                 if isinstance(item, dict) and item.get("is_bitfield")
-                and accessed(str(item.get("path", "")).lstrip("."))
+                and field_accesses.get(
+                    str(item.get("path", "")).lstrip("."),
+                    (False, False),
+                )[1]
+                and str(item.get("path", "")).lstrip(".")
+                not in copied_accesses
             ]
             if selected_bitfields:
                 for item in layout:
