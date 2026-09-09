@@ -6,7 +6,8 @@
 from pathlib import Path
 
 from ut_agent.ir import (
-    Atom, Branch, CallSite, Case, ControlVar, FunctionIR, MemoryVar, Param,
+    Atom, Branch, CallSite, Case, ControlVar, FunctionIR, GlobalObject,
+    MemoryVar, Param,
     Provenance, SourceLocation,
 )
 from ut_agent.toolchain import ClangExtractor, default_clang_extractor, make_compile_context
@@ -374,6 +375,57 @@ def test_render_intents_preserves_parsed_switch_cases_without_oracle():
     assert text.count(";$L$,case 0:") == 1
     assert text.count(";$L$,case 2:") == 1
     assert text.count(";$L$,default:") == 1
+
+
+def test_render_switch_matrix_before_nested_branch_viewpoints():
+    ir = FunctionIR(
+        name="switch_target", file="Dma.c", line=1, ret_type="void",
+        branches=[
+            Branch(
+                bid="B00", kind="switch", line=2,
+                cond_text="switch (state)",
+                cases=[Case("case 2", 2, False), Case("case 4", 4, False),
+                       Case("default", None, True)],
+            ),
+            Branch(
+                bid="B01", kind="if", line=3, parent_bid="B00",
+                cond_text="if (state == 2)",
+                atoms=[Atom("state", "uint8", "==", 2, None,
+                             "state == 2")],
+            ),
+        ],
+        globals_used=["state"],
+        global_objects=[GlobalObject(name="state", read=True)],
+        control_vars=[ControlVar("state", "state", "global", var_type="uint8")],
+    )
+    valid = ValidationResult(VALIDATED, checks=("test",))
+    intents = (
+        TestIntent(
+            "U001", TestObligation("b0:case:0", "case", branch_id="B00",
+                                   description="case 2:", case_label="case 2:"),
+            inputs={"state": 2}, validation=valid,
+        ),
+        TestIntent(
+            "U002", TestObligation("b0:case:1", "case", branch_id="B00",
+                                   description="case 4:", case_label="case 4:"),
+            inputs={"state": 4}, validation=valid,
+        ),
+        TestIntent(
+            "U003", TestObligation("b0:case:2", "case", branch_id="B00",
+                                   description="default:", case_label="default:"),
+            inputs={"state": 0}, validation=valid,
+        ),
+        TestIntent(
+            "U004", TestObligation("b1:T", "branch", branch_id="B01",
+                                   outcome=True, description="if (state == 2)"),
+            inputs={"state": 2}, validation=valid,
+        ),
+    )
+
+    text = render_intents_csv(ir, GenerationResult("switch_target", VALIDATED, intents))
+    labels = [line for line in text.splitlines() if line.startswith(";$L$")]
+    assert labels.index(";$L$,default:") < labels.index(";$L$,if (state == 2)")
+    assert labels.count(";$L$,if (state == 2)") == 1
 
 
 

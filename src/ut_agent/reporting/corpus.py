@@ -6,9 +6,10 @@ Golden CSVs; it never supplies Golden data to the generator or oracle.
 """
 from __future__ import annotations
 
+import csv
 import hashlib
 import json
-import csv
+import os
 import re
 from collections import Counter
 from dataclasses import dataclass
@@ -54,8 +55,12 @@ CALIBRATION_CLASSIFICATIONS = (
     "NEEDS_REVIEW",
 )
 
-SEMANTIC_MATCH_PAIR_BUDGET = 4096
-SEMANTIC_MATCH_INTENT_BYTES_BUDGET = 1024 * 1024
+SEMANTIC_MATCH_PAIR_BUDGET = int(
+    os.environ.get("UT_AGENT_MATCH_PAIR_BUDGET", "4096")
+)
+SEMANTIC_MATCH_INTENT_BYTES_BUDGET = int(
+    os.environ.get("UT_AGENT_INTENT_BYTES_BUDGET", str(1024 * 1024))
+)
 
 _CALIBRATION_INVESTIGATION_ORDER = (
     ("FunctionIR", "FUNCTION_IR_GAP"),
@@ -1027,6 +1032,8 @@ def build_corpus_validation_report(
     generator_commit: str = "unknown",
     generator_version: str = "0.1.0",
     blocked: tuple[dict[str, Any], ...] = (),
+    pair_budget: int | None = None,
+    bytes_budget: int | None = None,
 ) -> dict[str, Any]:
     """Build a machine-readable all-functions generation/compare report."""
     progress = ProgressRecorder(
@@ -1157,29 +1164,41 @@ def build_corpus_validation_report(
                 golden_error = str(exc)
                 golden_row_upper_bound = 0
             intent_count = generated_manifest.get("intent_count")
+            effective_pair_budget = (
+                pair_budget if pair_budget is not None else SEMANTIC_MATCH_PAIR_BUDGET
+            )
+            effective_bytes_budget = (
+                bytes_budget if bytes_budget is not None else SEMANTIC_MATCH_INTENT_BYTES_BUDGET
+            )
             pair_upper_bound = (
                 int(intent_count) * golden_row_upper_bound
                 if isinstance(intent_count, int) else None
             )
-            if pair_upper_bound is not None and pair_upper_bound > SEMANTIC_MATCH_PAIR_BUDGET:
+            if (effective_pair_budget and pair_upper_bound is not None
+                    and pair_upper_bound > effective_pair_budget):
                 matching_budget = {
                     "status": "MATCHING_BUDGET_EXCEEDED",
-                    "pair_budget": SEMANTIC_MATCH_PAIR_BUDGET,
+                    "pair_budget": effective_pair_budget,
                     "candidate_pairs_upper_bound": pair_upper_bound,
                     "generated_intent_count": intent_count,
                     "golden_physical_row_upper_bound": golden_row_upper_bound,
                     "budget_basis": "physical_csv_row_upper_bound",
                 }
+        else:
+            effective_bytes_budget = (
+                bytes_budget if bytes_budget is not None else SEMANTIC_MATCH_INTENT_BYTES_BUDGET
+            )
         if (generation_status == "VALIDATED" and matching_budget is None
+                and effective_bytes_budget
                 and Path(unit.intent_manifest).is_file()
                 and Path(unit.intent_manifest).stat().st_size
-                > SEMANTIC_MATCH_INTENT_BYTES_BUDGET):
+                > effective_bytes_budget):
             csv_only_intent_payload = True
             generated_manifest = dict(generated_manifest)
             generated_manifest.update({
                 "details_status": "CSV_ONLY_INTENT_BYTES_BUDGET",
                 "intent_payload_bytes": Path(unit.intent_manifest).stat().st_size,
-                "intent_payload_bytes_budget": SEMANTIC_MATCH_INTENT_BYTES_BUDGET,
+                "intent_payload_bytes_budget": effective_bytes_budget,
             })
         with progress.stage(
             unit.row.function, "golden_parse",

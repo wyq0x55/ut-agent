@@ -68,11 +68,8 @@ def _matches(ir: FunctionIR, obligation: TestObligation,
     if path is not True:
         return path
     if obligation.kind == "case":
-        case = engine._find_switch_case(branch, obligation)
-        if case is None:
-            return None
         selector = engine._switch_selector_value(branch, ir, env)
-        return engine._switch_case_matches(case, selector, branch.cases)
+        return engine._switch_obligation_matches(branch, obligation, selector)
     if obligation.kind == "mcdc":
         index = obligation.condition_index
         if index is None or index < 0 or index >= len(branch.atoms):

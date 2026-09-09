@@ -13,12 +13,12 @@ from ut_agent.generation.boundary import control_candidates, typed_boundary_poin
 from ut_agent.generation.obligation import derive_obligations
 from ut_agent.generation.solver import solve_obligation
 from ut_agent.generation.engine import (
-    _control_env, _local_value, _pointer_output_values,
+    _control_env, _generic_inputs, _local_value, _pointer_output_values,
 )
 from ut_agent.generation.model import TestObligation as GenerationObligation
 from ut_agent.ir import (
-    Atom, Branch, CallSite, ControlVar, Effect, FunctionIR, GlobalObject,
-    Param, TypeInfo,
+    Atom, Branch, CallSite, Case, ControlVar, Effect, FunctionIR, GlobalObject,
+    Param, Provenance, SourceLocation, TypeInfo,
     ValueOrigin,
 )
 from ut_agent.project import load_manifest
@@ -637,6 +637,132 @@ def test_issue12_boundary_skips_const_table_parent_conflict():
         if item.branch_id == "child" and item.kind == "boundary"
     }
     assert 0 not in child_points
+
+
+def test_switch_selector_covers_cases_and_default_boundaries():
+    info = TypeInfo(
+        canonical_type="unsigned char", kind="integer", bit_width=8,
+        signed=False, min_value=0, max_value=255,
+    )
+    ir = FunctionIR(
+        name="switch_boundaries", file="target.c", line=1, ret_type="void",
+        branches=[Branch(
+            bid="switch", kind="switch", line=2,
+            cases=[Case("case 2", 2, False), Case("case 4", 4, False),
+                   Case("default", None, True)],
+            selector=ValueOrigin(kind="variable", driver="state"),
+        )],
+        control_vars=[ControlVar(
+            "state", "state", "global", type_info=info,
+        )],
+    )
+    baseline = load_baseline(ROOT / "config" / "baselines" /
+                             "psd-rebuild" / "1.1.yaml")
+
+    values = sorted(control_candidates(ir, baseline.boundary_policy)["state"]["values"])
+    assert values == [0, 1, 2, 3, 4, 5, 255]
+
+    obligations = [item for item in derive_obligations(ir, baseline)
+                   if item.branch_id == "switch"]
+    assert [item.case_label for item in obligations[:3]] == [
+        "case 2:", "case 4:", "default:"
+    ]
+    assert [item.boundary_value for item in obligations[2:]] == [
+        0, 1, 3, 5, 255
+    ]
+    assert [item.description for item in obligations[3:]] == [
+        "組合せ(default:1)", "組合せ(default:2)", "組合せ(default:3)",
+        "組合せ(default:4)",
+    ]
+    results = [solve_obligation(ir, item, baseline) for item in obligations]
+    assert all(item.status == "SAT" for item in results)
+    assert [item.assignment["state"] for item in results] == [
+        2, 4, 0, 1, 3, 5, 255
+    ]
+
+
+def test_switch_default_boundaries_follow_proven_index_limit():
+    info = TypeInfo(
+        canonical_type="unsigned char", kind="integer", bit_width=8,
+        signed=False, min_value=0, max_value=255,
+    )
+    ir = FunctionIR(
+        name="indexed_switch_boundaries", file="target.c", line=1,
+        ret_type="void",
+        branches=[Branch(
+            bid="switch", kind="switch", line=2,
+            cases=[Case("case 15", 15, False), Case("case 20", 20, False),
+                   Case("default", None, True)],
+            selector=ValueOrigin(kind="variable", driver="index"),
+        )],
+        control_vars=[ControlVar(
+            "index", "index", "global", type_info=info,
+        )],
+        global_objects=[GlobalObject(
+            name="table", read=True, array_sizes=[73],
+            index_drivers=["index"],
+        )],
+    )
+    baseline = load_baseline(ROOT / "config" / "baselines" /
+                             "psd-rebuild" / "1.1.yaml")
+
+    domains, _fixed = _generic_inputs(ir, baseline)
+    values = domains["index"]
+    assert values == [0, 14, 15, 16, 19, 20, 21, 72]
+    obligations = [item for item in derive_obligations(ir, baseline)
+                   if item.branch_id == "switch"]
+    assert [item.boundary_value for item in obligations[2:]] == [
+        0, 14, 16, 19, 21, 72
+    ]
+
+
+def test_nested_switch_branch_requires_extractor_proven_case():
+    info = TypeInfo(
+        canonical_type="unsigned char", kind="integer", bit_width=8,
+        signed=False, min_value=0, max_value=255,
+    )
+
+    def location(start: int, end: int, line: int) -> SourceLocation:
+        return SourceLocation("target.c", line, 1, start, end)
+
+    switch = Branch(
+        bid="switch", kind="switch", line=2,
+        cases=[
+            Case("case 2", 2, False,
+                 provenance=Provenance(location(100, 180, 3),
+                                       location(100, 180, 3))),
+            Case("case 4", 4, False,
+                 provenance=Provenance(location(200, 280, 4),
+                                       location(200, 280, 4))),
+            Case("default", None, True,
+                 provenance=Provenance(location(300, 340, 5),
+                                       location(300, 340, 5))),
+        ],
+        selector=ValueOrigin(kind="variable", driver="state"),
+    )
+    child = Branch(
+        bid="child", kind="if", line=4, parent_bid="switch",
+        atoms=[Atom("rot", "unsigned char", "==", 1, None,
+                    "rot == 1", type_info=info)],
+        provenance=Provenance(location(210, 220, 4),
+                              location(210, 220, 4)),
+    )
+    ir = FunctionIR(
+        name="nested_switch", file="target.c", line=1, ret_type="void",
+        branches=[switch, child],
+        control_vars=[
+            ControlVar("state", "state", "global", type_info=info),
+            ControlVar("rot", "rot", "global", type_info=info),
+        ],
+    )
+    baseline = load_baseline(ROOT / "config" / "baselines" /
+                             "psd-rebuild" / "1.1.yaml")
+    obligation = next(item for item in derive_obligations(ir, baseline)
+                      if item.oid == "child:T")
+    result = solve_obligation(ir, obligation, baseline)
+    assert result.status == "SAT"
+    assert result.assignment["state"] == 4
+    assert result.assignment["rot"] == 1
 
 
 def test_issue6_baseline_keeps_source_mapped_approved_rules():

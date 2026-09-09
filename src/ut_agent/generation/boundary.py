@@ -123,6 +123,33 @@ def typed_boundary_points(boundary, type_info: TypeInfo | None,
     return tuple(sorted(_policy_points(boundary, _domain(type_info), policy)))
 
 
+def switch_default_points(cases, type_info: TypeInfo | None,
+                          policy: Mapping[str, object] | None = None) -> tuple:
+    """Return typed selector values that exercise a switch default arm."""
+    if not any(case.is_default for case in cases):
+        return ()
+    domain = _domain(type_info)
+    if domain is None:
+        return ()
+    explicit = {
+        case.value for case in cases
+        if not case.is_default and case.value is not None
+    }
+    points = {
+        value for value in (_minimum(domain), _maximum(domain))
+        if _in(value, domain)
+    }
+    adjacent = (True if policy is None else
+                bool(policy.get("adjacent_constant_values", False)))
+    if adjacent:
+        for value in explicit:
+            points.update(
+                candidate for candidate in (value - 1, value + 1)
+                if _in(candidate, domain)
+            )
+    return tuple(sorted(points - explicit))
+
+
 def _selector_control(branch, controls):
     selector = branch.selector
     if not isinstance(selector, ValueOrigin):
@@ -221,36 +248,11 @@ def control_candidates(ir: FunctionIR,
                   if not case.is_default and case.value is not None}
         if values:
             add(control, values)
-            typed_domain = _domain(control.type_info)
-            # A default candidate is only valid when it belongs to the
-            # extractor-proven selector domain.  Never manufacture a value
-            # just past the largest case: that can escape an unsigned or
-            # enum contract (for example case 255 -> candidate 256).
-            if typed_domain is None:
-                add(control, {max(values) + 1})
-            else:
-                # Search a bounded deterministic set.  Enumerating a proven
-                # 32-bit range just to find a default witness is both
-                # unnecessary and potentially unbounded in practice.
-                lower = int(_minimum(typed_domain))
-                upper = int(_maximum(typed_domain))
-                probes = [lower, upper, lower + 1, upper - 1]
-                probes.extend(
-                    lower + offset for offset in range(len(values) + 2)
-                )
-                default_values = {
-                    candidate for candidate in probes
-                    if lower <= candidate <= upper
-                    and _in(candidate, typed_domain)
-                    and candidate not in values
-                }
+            default_values = switch_default_points(
+                branch.cases, control.type_info, boundary_policy,
+            )
+            if default_values:
                 add(control, default_values)
-            if typed_domain is not None:
-                if boundary_policy is None or bool(
-                        boundary_policy.get("typed", False)):
-                    add(control, _selected_representatives(
-                        typed_domain, boundary_policy,
-                    ))
 
     return candidates
 

@@ -110,7 +110,9 @@ def evaluate_obligation(ir: FunctionIR, obligation: TestObligation,
                                         required_outputs=required,
                                         complete=complete)
             actual = engine._switch_selector_value(branch, ir, env)
-            observed = engine._switch_case_matches(case, actual, branch.cases)
+            observed = engine._switch_obligation_matches(
+                branch, obligation, actual,
+            )
             expected = True
         elif obligation.kind == "mcdc":
             index = obligation.condition_index

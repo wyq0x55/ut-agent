@@ -6,7 +6,8 @@ from itertools import product
 from typing import Any
 
 from ut_agent.generation.boundary import (
-    control_candidates, typed_boundary_points, typed_status_points,
+    control_candidates, switch_default_points, typed_boundary_points,
+    typed_status_points,
 )
 from ut_agent.ir import Atom, Branch, FunctionIR, TypeInfo
 from ut_agent.generation.model import (
@@ -832,8 +833,8 @@ def branch_path_reachable(ir: FunctionIR, branch: Branch,
     child branch in a normal nested body is executable only when its parent
     is true.  An ``elseif`` child is the alternative arm of its preceding
     chain and therefore requires the enclosing condition to be false.  A
-    switch is a structural parent without a boolean outcome, so its case
-    reachability remains represented by the case obligation itself.
+    switch is a structural parent whose child branch is reachable only
+    from an extractor-proven containing case.
 
     ``None`` means the available FunctionIR cannot prove the path; callers
     must keep that obligation reviewable rather than treating it as false.
@@ -849,6 +850,17 @@ def branch_path_reachable(ir: FunctionIR, branch: Branch,
         if parent is None:
             return None
         if parent.kind == "switch":
+            cases = _switch_cases_for_branch(parent, current)
+            if not cases:
+                return None
+            try:
+                selector = _switch_selector_value(parent, ir, env)
+            except (KeyError, TypeError, ValueError):
+                return None
+            if not any(
+                    _switch_case_matches(case, selector, parent.cases)
+                    for case in cases):
+                return False
             current = parent
             continue
         if current.parent_outcome is not None:
@@ -2043,7 +2055,8 @@ def validate_intent(ir: FunctionIR, intent: TestIntent, *,
             else:
                 try:
                     actual = _switch_selector_value(branch, ir, env)
-                    if not _switch_case_matches(case, actual, branch.cases):
+                    if not _switch_obligation_matches(
+                            branch, obligation, actual):
                         errors.append(
                             f"case 结果不符: {branch.bid} 期望="
                             f"{_case_obligation_label(case)} 实际={actual}"
@@ -2096,6 +2109,115 @@ def _case_obligation_label(case) -> str:
     if case.value is not None:
         return f"case {case.value}:"
     return f"case {case.label}:"
+
+
+def _source_span(value: Any) -> tuple[int, int] | None:
+    provenance = getattr(value, "provenance", None)
+    expansion = getattr(provenance, "expansion", None)
+    if expansion is None:
+        return None
+    try:
+        start = int(expansion.offset)
+        end = int(expansion.end_offset)
+    except (TypeError, ValueError):
+        return None
+    if start < 0 or end < start:
+        return None
+    return start, end
+
+
+def _switch_cases_for_branch(switch: Branch, branch: Branch) -> tuple[Any, ...]:
+    """Find the switch cases whose extractor spans contain a child branch."""
+    branch_span = _source_span(branch)
+    if branch_span is not None:
+        contained = []
+        for case in switch.cases:
+            case_span = _source_span(case)
+            if (case_span is not None
+                    and case_span[0] <= branch_span[0]
+                    and branch_span[1] <= case_span[1]):
+                contained.append(case)
+        if contained:
+            return tuple(contained)
+
+    branch_line = int(getattr(branch, "line", 0) or 0)
+    case_lines = [
+        int(getattr(case.provenance.expansion, "line", 0) or 0)
+        if getattr(case, "provenance", None) is not None
+        and getattr(case.provenance, "expansion", None) is not None
+        else 0
+        for case in switch.cases
+    ]
+    selected = []
+    for index, case in enumerate(switch.cases):
+        case_line = case_lines[index]
+        next_lines = [line for line in case_lines[index + 1:] if line]
+        next_line = min(next_lines, default=None)
+        if case_line and branch_line >= case_line \
+                and (next_line is None or branch_line < next_line):
+            selected.append(case)
+    return tuple(selected)
+
+
+def _switch_selector_index_limit(ir: FunctionIR,
+                                 selector: str) -> int | None:
+    wanted = _norm(selector)
+    limits = [
+        _index_driver_limit(ir, driver)
+        for raw in ir.global_objects
+        for driver in getattr(raw, "index_drivers", [])
+        if _norm(driver) == wanted
+    ]
+    values = [limit for limit in limits if limit is not None]
+    return min(values) if values else None
+
+
+def _switch_obligation_matches(branch: Branch,
+                               obligation: TestObligation,
+                               selector: Any) -> bool:
+    case = _find_switch_case(branch, obligation)
+    if case is None or not _switch_case_matches(case, selector, branch.cases):
+        return False
+    boundary = obligation.boundary_value
+    return boundary is None or selector == boundary
+
+
+def _apply_switch_path_target(ir: FunctionIR,
+                              domains: dict[str, list[Any]],
+                              raw: dict[str, Any],
+                              branch: Branch) -> bool:
+    """Choose a proven selector value for every enclosing switch case."""
+    by_id = {item.bid: item for item in ir.branches}
+    current = branch
+    visited: set[str] = set()
+    while current.parent_bid:
+        if current.bid in visited:
+            return False
+        visited.add(current.bid)
+        parent = by_id.get(current.parent_bid)
+        if parent is None:
+            return False
+        if parent.kind == "switch":
+            cases = _switch_cases_for_branch(parent, current)
+            selector = parent.selector
+            selector_expression = (
+                selector.driver or selector.expression
+                if selector is not None else ""
+            )
+            key = _domain_key_for(ir, selector_expression, domains)
+            if not cases or key is None:
+                return False
+            selected = None
+            for value in domains.get(key, ()):
+                if any(_switch_case_matches(case, value, parent.cases)
+                       for case in cases):
+                    selected = value
+                    break
+            if selected is None:
+                return False
+            raw[key] = selected
+        current = parent
+    return True
 
 
 def _find_switch_case(branch: Branch, obligation: TestObligation):
@@ -2334,12 +2456,70 @@ def _generic_intents(
                 # A switch has no boolean outcome of its own in TestCsv.  Its
                 # executable obligations are the source cases; nested ifs
                 # remain attached to the corresponding case in the renderer.
+                selector = branch.selector
+                selector_names = {
+                    name for name in (
+                        selector.driver if selector else None,
+                        selector.expression if selector else None,
+                    ) if name
+                }
+                control = next(
+                    (item for item in ir.control_vars
+                     if item.name in selector_names
+                     or item.var in selector_names),
+                    None,
+                )
+                default_points = (
+                    switch_default_points(
+                        branch.cases,
+                        control.type_info if control is not None else None,
+                    )
+                    if control is not None else ()
+                )
+                selector_expression = (
+                    selector.driver if selector else None
+                ) or (selector.expression if selector else "")
+                selector_limit = _switch_selector_index_limit(
+                    ir, selector_expression,
+                ) if selector_expression else None
+                if selector_limit is not None:
+                    default_points = tuple(
+                        point for point in default_points
+                        if isinstance(point, int)
+                        and 0 <= point < selector_limit
+                    )
+                    if selector_limit > 0:
+                        explicit_values = {
+                            case.value for case in branch.cases
+                            if not case.is_default and case.value is not None
+                        }
+                        if selector_limit - 1 not in explicit_values:
+                            default_points = tuple(sorted(
+                                {*default_points, selector_limit - 1}
+                            ))
+                default_point = default_points[0] if default_points else None
                 for case_index, case in enumerate(branch.cases):
                     label = _case_obligation_label(case)
                     obligations.append(TestObligation(
                         oid=f"{branch.bid}:case:{case_index}",
                         kind="case", branch_id=branch.bid,
                         description=label, case_label=label,
+                        boundary_value=(default_point
+                                        if case.is_default else None),
+                    ))
+                default_label = next(
+                    (_case_obligation_label(item) for item in branch.cases
+                     if item.is_default),
+                    "default:",
+                )
+                for point_index, point in enumerate(default_points[1:], 1):
+                    obligations.append(TestObligation(
+                        oid=f"{branch.bid}:default:{point_index}:{point}",
+                        kind="case", branch_id=branch.bid,
+                        description=f"组合(default:{point_index})",
+                        case_label=default_label,
+                        boundary_class="default",
+                        boundary_value=point,
                     ))
                 continue
             outcomes = ((branch.constant_value,) if branch.constant_value is not None
@@ -2382,7 +2562,8 @@ def _generic_intents(
                     case = _find_switch_case(branch, obligation)
                     if case is not None:
                         selector = _switch_selector_value(branch, ir, env)
-                        if _switch_case_matches(case, selector, branch.cases):
+                        if _switch_obligation_matches(
+                                branch, obligation, selector):
                             selected = env
                             break
                 elif (
@@ -2856,6 +3037,8 @@ def _targeted_branch_candidate(ir: FunctionIR,
         if values:
             raw[key] = values[0]
 
+    if not _apply_switch_path_target(ir, domains, raw, branch):
+        return None
     for parent, required in _ancestor_requirements(ir, branch):
         _apply_branch_target(ir, domains, raw, parent, required)
     _apply_branch_target(ir, domains, raw, branch, outcome)
@@ -2888,6 +3071,8 @@ def _targeted_condition_candidate(ir: FunctionIR,
                   if key in branch_keys else domains[key])
         if values:
             raw[key] = values[0]
+    if not _apply_switch_path_target(ir, domains, raw, branch):
+        return None
     for parent, required in _ancestor_requirements(ir, branch):
         _apply_branch_target(ir, domains, raw, parent, required)
     atom = branch.atoms[condition_index]
@@ -2975,6 +3160,8 @@ def _targeted_mcdc_candidate(ir: FunctionIR,
     for key in sorted(domains):
         if domains[key]:
             raw[key] = domains[key][0]
+    if not _apply_switch_path_target(ir, domains, raw, branch):
+        return None
     applied: list[tuple[Any, bool]] = []
     failed_key: str | None = None
     for owner, atom, expected in requirements:
@@ -3110,6 +3297,8 @@ def _targeted_generic_candidates(ir: FunctionIR,
                 if value not in domains.get(key, ()):
                     return
                 trial = dict(raw)
+                if not _apply_switch_path_target(ir, domains, trial, branch):
+                    return
                 for parent, required in _ancestor_requirements(ir, branch):
                     _apply_branch_target(ir, domains, trial, parent, required)
                 trial[key] = value
@@ -3166,12 +3355,6 @@ def _targeted_generic_candidates(ir: FunctionIR,
         if candidate is not None:
             yield candidate
         return
-    # Large products may use targeted construction only when the C++ Clang
-    # extractor preserved the condition AST.  Hand-built/legacy IR without
-    # that provenance must retain the original UNSUPPORTED gate instead of
-    # guessing a flattened multi-atom expression.
-    if branch.condition_tree is None:
-        return
     if obligation.kind == "case":
         selector = branch.selector
         selector_expression = (
@@ -3181,19 +3364,29 @@ def _targeted_generic_candidates(ir: FunctionIR,
         if key is None:
             yield _control_env(raw, ir)
             return
-        for value in domains[key]:
+        values = domains[key]
+        if obligation.boundary_value is not None:
+            values = [
+                obligation.boundary_value
+            ] if obligation.boundary_value in values else []
+        for value in values:
             trial = dict(raw)
             trial[key] = value
             env = _control_env(trial, ir)
             try:
-                case = _find_switch_case(branch, obligation)
-                if case is not None and _switch_case_matches(
-                    case, _switch_selector_value(branch, ir, env), branch.cases
-                ):
+                if _switch_obligation_matches(
+                        branch, obligation,
+                        _switch_selector_value(branch, ir, env)):
                     yield env
                     return
             except (KeyError, TypeError, ValueError):
                 continue
+        return
+    # Large products may use targeted construction only when the C++ Clang
+    # extractor preserved the condition AST.  Hand-built/legacy IR without
+    # that provenance must retain the original UNSUPPORTED gate instead of
+    # guessing a flattened multi-atom expression.
+    if branch.condition_tree is None:
         return
     if obligation.outcome is not None:
         candidate = _targeted_branch_candidate(

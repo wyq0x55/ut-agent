@@ -161,6 +161,8 @@ def run_validate_corpus(args) -> int:
         generator_commit=_local_git_commit(Path(__file__).resolve().parents[3]),
         generator_version=__version__,
         blocked=blocked,
+        pair_budget=getattr(args, "pair_budget", None),
+        bytes_budget=getattr(args, "bytes_budget", None),
     )
     report_path = write_corpus_validation_report(
         report, output_root / "corpus-validation-report.json"

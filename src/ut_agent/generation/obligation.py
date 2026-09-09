@@ -6,7 +6,9 @@ from dataclasses import replace
 from ut_agent.baseline.model import TestBaseline
 from ut_agent.ir import FunctionIR
 
-from .boundary import typed_boundary_points, typed_status_points
+from .boundary import (
+    switch_default_points, typed_boundary_points, typed_status_points,
+)
 from .model import TestObligation
 from .semantic import index_driver_limit
 
@@ -45,6 +47,19 @@ def _index_limit_for_atom(ir: FunctionIR, atom) -> int | None:
         for driver in getattr(raw, "index_drivers", []):
             normalized = _normalized(driver)
             if not normalized or normalized not in atom_path:
+                continue
+            limit = index_driver_limit(ir, driver)
+            if limit is not None:
+                limits.append(limit)
+    return min(limits) if limits else None
+
+
+def _index_limit_for_selector(ir: FunctionIR, selector: str) -> int | None:
+    wanted = _normalized(selector)
+    limits: list[int] = []
+    for raw in ir.global_objects:
+        for driver in getattr(raw, "index_drivers", []):
+            if _normalized(driver) != wanted:
                 continue
             limit = index_driver_limit(ir, driver)
             if limit is not None:
@@ -171,6 +186,48 @@ def derive_obligations(ir: FunctionIR, baseline: TestBaseline,
                 ))
             continue
         if branch.kind == "switch" and branch.cases and switch_enabled:
+            selector = branch.selector
+            selector_names = {
+                name for name in (
+                    selector.driver if selector else None,
+                    selector.expression if selector else None,
+                ) if name
+            }
+            control = next(
+                (item for item in ir.control_vars
+                 if item.name in selector_names
+                 or item.var in selector_names),
+                None,
+            )
+            default_points = (
+                switch_default_points(
+                    branch.cases, control.type_info,
+                    baseline.boundary_policy,
+                )
+                if control is not None else ()
+            )
+            selector_expression = (
+                selector.driver if selector else None
+            ) or (selector.expression if selector else "")
+            selector_limit = _index_limit_for_selector(
+                ir, selector_expression,
+            ) if selector_expression else None
+            if selector_limit is not None:
+                default_points = tuple(
+                    point for point in default_points
+                    if isinstance(point, int) and 0 <= point < selector_limit
+                )
+                if selector_limit > 0:
+                    explicit_values = {
+                        case.value for case in branch.cases
+                        if not case.is_default and case.value is not None
+                    }
+                    if selector_limit - 1 not in explicit_values:
+                        default_points = tuple(sorted(
+                            {*default_points, selector_limit - 1}
+                        ))
+            default_point = default_points[0] if default_points else None
+            has_default = any(case.is_default for case in branch.cases)
             for index, case in enumerate(branch.cases):
                 if case.is_default and not include_default:
                     continue
@@ -180,7 +237,26 @@ def derive_obligations(ir: FunctionIR, baseline: TestBaseline,
                     rule_id="psd.6.control",
                     oid=f"{branch.bid}:case:{index}", kind="case",
                     branch_id=branch.bid, description=label, case_label=label,
+                    boundary_value=(default_point
+                                    if case.is_default else None),
                 ))
+            if include_default and has_default and control is not None:
+                for point_index, point in enumerate(default_points[1:], 1):
+                    default_label = next(
+                        (_case_label(case) for case in branch.cases
+                         if case.is_default),
+                        "default:",
+                    )
+                    obligations.append(_obligation(
+                        baseline, source_fact=f"branch:{branch.bid}:selector",
+                        rule_id="psd.6.control",
+                        oid=f"{branch.bid}:default:{point_index}:{point}",
+                        kind="case", branch_id=branch.bid,
+                        description=f"組合せ(default:{point_index})",
+                        case_label=default_label,
+                        boundary_class="default",
+                        boundary_value=point,
+                    ))
             continue
         if branch.kind == "switch" and branch.cases:
             continue

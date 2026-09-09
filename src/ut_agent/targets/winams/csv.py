@@ -1676,6 +1676,8 @@ def _intent_value(
         return dynamic_value
     candidates = [comment]
     if key:
+        if key.startswith("global:"):
+            candidates.append(key[len("global:"):])
         candidates.append(key)
     tail = comment.split("/")[-1]
     candidates.extend((tail, tail.lstrip("@*")))
@@ -1878,16 +1880,14 @@ def render_intents_csv(ir: FunctionIR, result: GenerationResult, *,
                     and item.obligation.kind == "case"
                     and item.obligation.description
                 ]
-                # Keep each source case in source order.  Nested branches are
-                # emitted immediately after their owning case, so a switch
-                # case is a real parent in the TestCsv tree rather than a
-                # comment followed by flat sibling branches.
+                # Keep each source case and its selector witnesses in source
+                # order.  Child branch viewpoints follow the complete switch
+                # selector matrix.
                 parent_groups: dict[str, list[TestIntent]] = {}
                 for item in case_intents:
                     parent = item.obligation.case_label or item.obligation.description
                     parent_groups.setdefault(parent, []).append(item)
                 emitted_groups: set[str] = set()
-                emitted_children: set[str] = set()
                 direct_children = children.get(branch.bid, [])
                 for case_index, case in enumerate(branch.cases):
                     out.append(f";$L$,{_case_label(case)}")
@@ -1913,11 +1913,6 @@ def render_intents_csv(ir: FunctionIR, result: GenerationResult, *,
                                 data_line(child) for child in group
                                 if child.obligation.description == label_text
                             )
-                    for child in _case_child_branches(
-                            branch, case_index, case, direct_children):
-                        emitted_children.add(child.bid)
-                        emit_branch(child)
-
                 # Keep an oracle label that did not match a parsed case, but
                 # keep it inside the switch rather than turning it into a
                 # top-level branch. This is only a lossless fallback for
@@ -1928,8 +1923,7 @@ def render_intents_csv(ir: FunctionIR, result: GenerationResult, *,
                     out.append(f";$L$,{parent}")
                     out.extend(data_line(item) for item in group)
                 for child in direct_children:
-                    if child.bid not in emitted_children:
-                        emit_branch(child)
+                    emit_branch(child)
                 return
             if branch.kind == "for":
                 # A loop is one WinAMS branch unit with one executable
