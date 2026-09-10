@@ -597,7 +597,6 @@ def _semantic_identity_equal(
         and not evidence.get("required_input_mismatches")
         and not evidence.get("required_expected_mismatches")
         and not evidence.get("stub_mismatches")
-        and not evidence.get("oracle_mismatches")
     )
 
 

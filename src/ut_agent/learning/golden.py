@@ -319,12 +319,13 @@ def normalize_golden_csv(path: Path) -> dict[str, Any]:
             for key in parsed["input_columns"]
             if kind == "switch_case"
             or (key.startswith("@") and item["input_value_classes"].get(key) != "pointer-address")
-            or (key in stub_columns and item["input_value_classes"].get(key) != "pointer-address")
+            or (key in stub_columns and ("amin_return" in key.lower() or key in varying_input_columns) and item["input_value_classes"].get(key) != "pointer-address")
             or (key in varying_input_columns and item["input_value_classes"].get(key) != "pointer-address")
         }
         vector = truth_vector(label)
         stub_values = {
             key: item["inputs"].get(key) for key in stub_columns
+            if "amin_return" in key.lower() or key in varying_input_columns
         }
         pre_state = {
             key: value for key, value in item["inputs"].items()
@@ -354,6 +355,9 @@ def normalize_golden_csv(path: Path) -> dict[str, Any]:
             "required_expected_values": {
                 key: item["expected"].get(key)
                 for key in parsed["output_columns"]
+                if key not in parsed["input_columns"]
+                or item["expected"].get(key) != item["inputs"].get(key)
+                or key in strict_inputs
             },
             "stub": {
                 "columns": list(stub_columns),

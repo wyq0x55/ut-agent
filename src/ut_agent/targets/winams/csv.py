@@ -1730,7 +1730,11 @@ def _render_intent_value(
     value: object, *, comment: str = "", key: str | None = None,
     ir: FunctionIR | None = None,
 ) -> str:
-    address = _pointer_address_value(key, ir) if ir is not None else None
+    address = None
+    if ir is not None:
+        address = _pointer_address_value(key, ir)
+        if address is None and isinstance(value, str):
+            address = _pointer_address_value(value, ir)
     if address is not None:
         if value == 0 or value == "0" or value == "0x0":
             return "0x0"

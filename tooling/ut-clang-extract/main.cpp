@@ -124,6 +124,7 @@ struct RunState {
   // in its own TU, so applying these facts is deliberately deferred until the
   // complete document is assembled.
   std::map<std::string, int64_t> GlobalInitializers;
+  std::map<std::string, std::string> GlobalSymbolInitializers;
   // Function-pointer table initializers are retained as AST facts.  A call
   // through a table can then be resolved to the configured Rte function
   // without consulting a reference CSV.
@@ -2052,6 +2053,20 @@ private:
       }
     }
 
+    if (const auto *Subscript = dyn_cast<ArraySubscriptExpr>(Expression)) {
+      const VarDecl *Table = referencedVar(Subscript->getBase());
+      if (Table && isExternalGlobal(Table)) {
+        Origin.Kind = isConstObject(Table->getType()) ? "const_table_element"
+                                                      : "global_array_element";
+        Origin.Base = jsonText(Table->getNameAsString());
+        Origin.Index = text(Subscript->getIdx()->getSourceRange(), true);
+        Origin.DriverDecl = referencedVar(Subscript->getIdx());
+        if (Origin.DriverDecl)
+          Origin.Driver = jsonText(Origin.DriverDecl->getNameAsString());
+        return Origin;
+      }
+    }
+
     const VarDecl *Variable = referencedVar(Expression);
     if (!Variable)
       return std::nullopt;
@@ -2907,9 +2922,29 @@ public:
     llvm::json::Object CallerOrigins;
     for (unsigned Index = 0; Index < Call->getNumArgs(); ++Index) {
       const Expr *Argument = Call->getArg(Index);
-      if (!Argument || !Argument->getType()->isPointerType())
+      if (!Argument)
         continue;
-      if (auto Origin = expressionOrigin(Argument))
+      auto Origin = expressionOrigin(Argument);
+      if (!Origin) {
+        const Expr *Bare = Argument->IgnoreParenCasts();
+        while (const auto *Cast = dyn_cast<ExplicitCastExpr>(Bare))
+          Bare = Cast->getSubExpr()->IgnoreParenCasts();
+        if (auto Constant = constantInteger(Bare, Context)) {
+          ValueOrigin ConstOrigin;
+          ConstOrigin.Kind = "constant";
+          ConstOrigin.Expression = text(Argument->getSourceRange(), true);
+          ConstOrigin.ExpressionNode = Argument;
+          Origin = std::move(ConstOrigin);
+        } else if (Argument->isNullPointerConstant(
+                       Context, Expr::NPC_ValueDependentIsNotNull)) {
+          ValueOrigin ConstOrigin;
+          ConstOrigin.Kind = "constant";
+          ConstOrigin.Expression = "0";
+          ConstOrigin.ExpressionNode = Argument;
+          Origin = std::move(ConstOrigin);
+        }
+      }
+      if (Origin)
         CallerOrigins[std::to_string(Index)] = origin(*Origin);
     }
     if (!CallerOrigins.empty())
@@ -3696,8 +3731,20 @@ private:
       return;
     }
     const auto *List = dyn_cast<InitListExpr>(Initializer);
-    if (!List)
+    if (!List) {
+      const Expr *CleanInit = Initializer->IgnoreParenCasts();
+      if (CleanInit->isNullPointerConstant(Context,
+                                           Expr::NPC_ValueDependentIsNotNull)) {
+        State.GlobalInitializers[compactText(Path)] = 0;
+        return;
+      }
+      if (const auto *TargetVar = referencedVar(CleanInit)) {
+        State.GlobalSymbolInitializers[compactText(Path)] =
+            TargetVar->getNameAsString();
+        return;
+      }
       return;
+    }
 
     if (const auto *Array = Context.getAsConstantArrayType(Type)) {
       QualType ElementType = Array->getElementType();
@@ -4337,29 +4384,66 @@ void applyDerivedControlFacts(llvm::json::Object &Function,
       return;
     auto Kind = Origin->getString("kind");
     auto Base = Origin->getString("base");
-    auto Field = Origin->getString("field");
-    if (!Kind || *Kind != "const_table_field" || !Base || !Field)
+    if (!Kind || !Base)
       return;
-    const std::string Prefix = Base->str() + "[";
-    const std::string Suffix = "]." + Field->str();
-    llvm::json::Object Values;
-    for (const auto &Entry : State.GlobalInitializers) {
-      const std::string &Path = Entry.first;
-      if (Path.rfind(Prefix, 0) != 0 || Path.size() <= Prefix.size() ||
-          Path.size() < Suffix.size() ||
-          Path.substr(Path.size() - Suffix.size()) != Suffix)
-        continue;
-      const size_t Begin = Prefix.size();
-      const size_t End = Path.size() - Suffix.size();
-      if (End <= Begin)
-        continue;
-      const std::string Index = Path.substr(Begin, End - Begin);
-      if (Index.find_first_not_of("0123456789") != std::string::npos)
-        continue;
-      Values[Index] = Entry.second;
+    if (*Kind == "const_table_field") {
+      auto Field = Origin->getString("field");
+      if (!Field)
+        return;
+      const std::string Prefix = Base->str() + "[";
+      const std::string Suffix = "]." + Field->str();
+      llvm::json::Object Values;
+      for (const auto &Entry : State.GlobalInitializers) {
+        const std::string &Path = Entry.first;
+        if (Path.rfind(Prefix, 0) != 0 || Path.size() <= Prefix.size() ||
+            Path.size() < Suffix.size() ||
+            Path.substr(Path.size() - Suffix.size()) != Suffix)
+          continue;
+        const size_t Begin = Prefix.size();
+        const size_t End = Path.size() - Suffix.size();
+        if (End <= Begin)
+          continue;
+        const std::string Index = Path.substr(Begin, End - Begin);
+        if (Index.find_first_not_of("0123456789") != std::string::npos)
+          continue;
+        Values[Index] = Entry.second;
+      }
+      if (!Values.empty())
+        (*Origin)["table_values"] = std::move(Values);
+    } else if (*Kind == "const_table_element") {
+      const std::string Prefix = Base->str() + "[";
+      llvm::json::Object Values;
+      for (const auto &Entry : State.GlobalInitializers) {
+        const std::string &Path = Entry.first;
+        if (Path.rfind(Prefix, 0) != 0 || Path.size() <= Prefix.size() ||
+            Path.empty() || Path.back() != ']')
+          continue;
+        const size_t Begin = Prefix.size();
+        const size_t End = Path.size() - 1;
+        if (End <= Begin)
+          continue;
+        const std::string Index = Path.substr(Begin, End - Begin);
+        if (Index.find_first_not_of("0123456789") != std::string::npos)
+          continue;
+        Values[Index] = Entry.second;
+      }
+      for (const auto &Entry : State.GlobalSymbolInitializers) {
+        const std::string &Path = Entry.first;
+        if (Path.rfind(Prefix, 0) != 0 || Path.size() <= Prefix.size() ||
+            Path.empty() || Path.back() != ']')
+          continue;
+        const size_t Begin = Prefix.size();
+        const size_t End = Path.size() - 1;
+        if (End <= Begin)
+          continue;
+        const std::string Index = Path.substr(Begin, End - Begin);
+        if (Index.find_first_not_of("0123456789") != std::string::npos)
+          continue;
+        Values[Index] = jsonText(Entry.second);
+      }
+      if (!Values.empty())
+        (*Origin)["table_values"] = std::move(Values);
     }
-    if (!Values.empty())
-      (*Origin)["table_values"] = std::move(Values);
   };
   for (llvm::StringRef Key : {"local_value_effects", "global_write_effects",
                               "return_effects"}) {
@@ -4371,6 +4455,19 @@ void applyDerivedControlFacts(llvm::json::Object &Function,
       if (!Effect)
         continue;
       annotateOrigin(Effect->getObject("origin"));
+    }
+  }
+  if (auto *Calls = Function.getArray("calls")) {
+    for (llvm::json::Value &Raw : *Calls) {
+      if (auto *Call = Raw.getAsObject()) {
+        if (auto *Ext = Call->getObject("extensions")) {
+          if (auto *Origins = Ext->getObject("caller_param_origins")) {
+            for (auto &Entry : *Origins) {
+              annotateOrigin(Entry.second.getAsObject());
+            }
+          }
+        }
+      }
     }
   }
 }

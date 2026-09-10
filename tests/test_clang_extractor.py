@@ -683,3 +683,46 @@ def test_standalone_emits_branch_guards_for_enclosed_call(tmp_path: Path):
     assert call.callee == "helper"
     assert call.guards == [{"bid": "b0", "then": True}]
 
+
+def test_standalone_emits_caller_param_origins_for_scalar_and_table_subscript(tmp_path: Path):
+    executable = default_clang_extractor()
+    if executable is None:
+        pytest.skip("repository standalone extractor is not built")
+    source = tmp_path / "call_origins.c"
+    source.write_text(
+        "typedef unsigned char u1;\n"
+        "typedef unsigned short u2;\n"
+        "static u1 g_buf1[2];\n"
+        "static u1 g_buf2[2];\n"
+        "struct Record { u2 block_id; u2 size; };\n"
+        "const struct Record tbl[2] = { { 10, 20 }, { 30, 40 } };\n"
+        "u1* const ptr_tbl[2] = { g_buf1, g_buf2 };\n"
+        "void copy_data(u1 *dst, const u1 *src, u2 size);\n"
+        "void target(u1 idx) {\n"
+        "  copy_data(ptr_tbl[idx], (const u1*)0, tbl[idx].size);\n"
+        "}\n",
+        encoding="ascii",
+    )
+
+    ir = ClangExtractor(executable).extract(
+        make_compile_context([source]), "target", cwd=tmp_path,
+    )
+
+    assert len(ir.calls) == 1
+    call = ir.calls[0]
+    assert call.callee == "copy_data"
+    origins = call.extensions.get("caller_param_origins", {})
+    assert "0" in origins
+    assert origins["0"]["kind"] == "const_table_element"
+    assert origins["0"]["base"] == "ptr_tbl"
+    assert origins["0"]["driver"] == "idx"
+    assert origins["0"]["table_values"] == {"0": "g_buf1", "1": "g_buf2"}
+    assert "1" in origins
+    assert origins["1"]["kind"] == "constant"
+    assert "2" in origins
+    assert origins["2"]["kind"] == "const_table_field"
+    assert origins["2"]["base"] == "tbl"
+    assert origins["2"]["field"] == "size"
+    assert origins["2"]["table_values"] == {"0": 20, "1": 40}
+
+

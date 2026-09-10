@@ -3,6 +3,7 @@ from __future__ import annotations
 
 from dataclasses import asdict
 from itertools import product
+import re
 from typing import Any
 
 from ut_agent.generation.boundary import (
@@ -824,6 +825,15 @@ def _control_env(values: dict[str, Any], ir: FunctionIR,
                 env[param.name] = 0
             elif ptr_val is not None and ptr_val != 0:
                 env.setdefault(pointer_address_key(param.name), 1)
+            pointee_val = None
+            for pkey in (f"*{param.name}", f"{param.name}[0]", pointer_value_key(param.name)):
+                if pkey in env:
+                    pointee_val = env[pkey]
+                    break
+            if pointee_val is not None:
+                env[pointer_value_key(param.name, f"{param.name}[0]")] = pointee_val
+                env[pointer_value_key(param.name, f"*{param.name}")] = pointee_val
+                env[pointer_value_key(param.name)] = pointee_val
 
     return env
 
@@ -1611,9 +1621,11 @@ def _pointer_initial_value(selected: dict[str, Any], param) -> Any | None:
     """Read the caller-owned pointee value when the AST exposed a read path."""
     name = str(param.name)
     for key in (
-        pointer_value_key(name),
+        f"*{name}",
+        f"{name}[0]",
         pointer_value_key(name, f"{name}[0]"),
         pointer_value_key(name, f"*{name}"),
+        pointer_value_key(name),
         name,
     ):
         try:
@@ -2052,11 +2064,100 @@ def _call_slot_environments(ir: FunctionIR, call: Any,
     return tuple(environments)
 
 
+def _call_base_slot(ir: FunctionIR, target_call: Any) -> int:
+    slot = 0
+    for call in sorted(ir.calls, key=lambda item: item.order):
+        if call.order == target_call.order:
+            break
+        if (call.callee or "").strip() == (target_call.callee or "").strip() \
+                and not _is_memory_helper(call) and not call.ptr_call:
+            slot += _call_site_capacity(call)
+    return slot
+
+
+def _resolve_call_param_value(ir: FunctionIR,
+                              param: Any,
+                              origin: Any,
+                              env: dict[str, Any],
+                              call_span: tuple[int, int] | None) -> Any | None:
+    if not isinstance(origin, dict):
+        return None
+    kind = str(origin.get("kind", ""))
+    if kind == "constant":
+        expr = str(origin.get("expression", "0")).strip()
+        try:
+            return int(expr, 0)
+        except ValueError:
+            return 0
+    if kind == "global":
+        driver = str(origin.get("driver", "")).strip()
+        if not driver:
+            return None
+        if param.is_ptr:
+            return driver
+        try:
+            return _lookup(env, driver)
+        except KeyError:
+            return 0
+    if kind in {"const_table_element", "const_table_field"}:
+        driver = str(origin.get("driver", "")).strip()
+        table_values = origin.get("table_values", {})
+        if isinstance(table_values, dict):
+            idx = None
+            if driver:
+                try:
+                    try:
+                        idx = int(_lookup(env, driver))
+                    except KeyError:
+                        idx = int(_local_value(ir, driver, env))
+                except (KeyError, TypeError, ValueError):
+                    idx = None
+            if idx is None:
+                raw_idx = str(origin.get("index", "")).strip()
+                match = re.search(r'\b\d+\b', raw_idx)
+                if match:
+                    try:
+                        idx = int(match.group(0))
+                    except ValueError:
+                        idx = None
+            if idx is not None:
+                val = table_values.get(str(idx))
+                if val is not None:
+                    return val
+        return None
+    if kind == "param":
+        driver = str(origin.get("driver", "")).strip()
+        if not driver:
+            return None
+        if param.is_ptr:
+            if env.get(pointer_address_key(driver)) == 0 or env.get(driver) == 0:
+                return 0
+            return pointer_address_key(driver)
+        try:
+            return _lookup(env, driver)
+        except KeyError:
+            return 0
+    if kind == "local":
+        driver = str(origin.get("driver", "")).strip()
+        if not driver:
+            return None
+        before = call_span[0] if call_span else None
+        return _local_value(ir, driver, env, before_offset=before)
+    if kind == "stub_return":
+        return _stub_return_value(ir, origin, env)
+    return None
+
+
 def _stub_pointer_output_values(ir: FunctionIR,
                                 selected: dict[str, Any]
                                 ) -> dict[str, Any]:
     values: dict[str, Any] = {}
-    for call in _stub_calls(ir):
+    for call in sorted(ir.calls, key=lambda item: item.order):
+        if _is_memory_helper(call) or call.ptr_call:
+            continue
+        callee = str(call.callee or "").strip()
+        if not callee:
+            continue
         output_keys = set(_semantic_call_output_columns(ir, call))
         if not output_keys:
             continue
@@ -2067,45 +2168,42 @@ def _stub_pointer_output_values(ir: FunctionIR,
         if slot_environments is None:
             continue
         call_span = _source_span(call)
-        if call_span is None:
-            continue
+        base_slot = _call_base_slot(ir, call)
         for index, param in enumerate(call.params):
-            if not param.is_ptr:
-                continue
-            info = call.pointer_arguments.get(str(index), {}) \
-                if isinstance(call.pointer_arguments, dict) else {}
-            if not isinstance(info, dict) or info.get("pointee_write"):
-                continue
-            fields = _semantic_call_param_fields(call, index)
             origin = origins.get(str(index), origins.get(index))
-            if not isinstance(origin, dict) \
-                    or origin.get("kind") != "local":
-                continue
-            root = str(origin.get("driver", "")).strip()
-            if not root or not fields:
-                continue
-            keys = [
-                call_param_key(str(call.callee), index, slot, field)
-                for field in fields
-                for slot in range(len(slot_environments))
-            ]
-            if not any(key in output_keys for key in keys):
-                continue
-            for slot, environment in enumerate(slot_environments):
-                for field in fields:
-                    key = call_param_key(
-                        str(call.callee), index, slot, field,
-                    )
+            fields = _semantic_call_param_fields(call, index) if param.is_ptr else []
+            if fields and isinstance(origin, dict) and origin.get("kind") == "local":
+                root = str(origin.get("driver", "")).strip()
+                if not root:
+                    continue
+                for local_slot, environment in enumerate(slot_environments):
+                    if _call_is_reachable(ir, call, environment) is False:
+                        continue
+                    slot = base_slot + local_slot
+                    for field in fields:
+                        key = call_param_key(callee, index, slot, field)
+                        if key not in output_keys:
+                            continue
+                        value = _local_field_value(
+                            ir, root, field, environment,
+                            before_offset=call_span[0] if call_span else None,
+                            exclude_call_offset=call_span[0] if call_span else None,
+                        )
+                        if value is not None:
+                            values[key] = value
+            else:
+                for local_slot, environment in enumerate(slot_environments):
+                    if _call_is_reachable(ir, call, environment) is False:
+                        continue
+                    slot = base_slot + local_slot
+                    key = call_param_key(callee, index, slot)
                     if key not in output_keys:
                         continue
-                    value = _local_field_value(
-                        ir, root, field, environment,
-                        before_offset=call_span[0],
-                        exclude_call_offset=call_span[0],
+                    value = _resolve_call_param_value(
+                        ir, param, origin, environment, call_span,
                     )
-                    if value is None:
-                        break
-                    values[key] = value
+                    if value is not None:
+                        values[key] = value
     return values
 
 
@@ -2234,8 +2332,18 @@ def _generic_expected(ir: FunctionIR, selected: dict[str, Any]) -> dict[str, Any
         if selected.get(param.name) == 0 or selected.get(pointer_address_key(param.name)) == 0:
             continue
         pointer_values = _pointer_output_values(ir, param, selected)
-        if pointer_values is not None:
+        if pointer_values:
             expected.update(pointer_values)
+        else:
+            # When no write effect fires on this path, an observable INOUT
+            # pointer retains its input pre-state value.
+            init_val = _pointer_initial_value(selected, param)
+            if init_val is not None:
+                output_effects = [effect for effect in _effect_records(param.write_effects)
+                                  if isinstance(effect, dict) and effect.get("path")]
+                for col in _pointer_output_columns(param, output_effects):
+                    expected[col] = init_val
+                expected[pointer_value_key(param.name)] = init_val
         value = _pointer_output_value(ir, param, selected)
         if value is not None:
             expected[pointer_value_key(param.name)] = value
