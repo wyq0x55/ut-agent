@@ -47,7 +47,9 @@ def _semantic_observation(function_ir: FunctionIR, obligation: Any,
         result["reason"] = "obligation branch is absent from FunctionIR"
         return result
     try:
-        env = engine._control_env(assignment, function_ir)
+        branch_span = engine._source_span(branch)
+        branch_offset = branch_span[0] if branch_span else None
+        env = engine._control_env(assignment, function_ir, before_offset=branch_offset)
         atom_values = [
             engine.evaluate_atom(atom, env, post_state) for atom in branch.atoms
         ]

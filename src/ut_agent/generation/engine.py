@@ -447,7 +447,14 @@ def _norm(value: str) -> str:
 
 def _lookup(env: dict[str, Any], name: str) -> Any:
     compact = _norm(name)
-    aliases = [compact, compact.lstrip("@*"), compact.split("/")[-1]]
+    without_prefix = compact[len("global:"):] if compact.startswith("global:") else compact
+    aliases = [
+        compact,
+        compact.lstrip("@*"),
+        compact.split("/")[-1],
+        without_prefix,
+        without_prefix.split("/")[-1],
+    ]
     # Exact typed paths take precedence over short/tail aliases.  Dynamic
     # array members can have both spaced and compact spellings in one
     # environment; resolving the tail first lets an unrelated fixed column
@@ -456,6 +463,12 @@ def _lookup(env: dict[str, Any], name: str) -> Any:
         for candidate in (alias, alias.rstrip("]")):
             if candidate in env:
                 return env[candidate]
+    # If the environment keys are qualified like "p_mem.c/xnl_mem_mod_data[0].u1_req_cat"
+    # match against the tail of the key.
+    target_tail = "/" + without_prefix.split("/")[-1]
+    for key, val in env.items():
+        if _norm(key).endswith(target_tail):
+            return val
     raise KeyError(name)
 
 
@@ -836,6 +849,23 @@ def _control_env(values: dict[str, Any], ir: FunctionIR,
                 env[pointer_value_key(param.name, f"*{param.name}")] = pointee_val
                 env[pointer_value_key(param.name)] = pointee_val
 
+    for control in ir.control_vars:
+        origin = _origin_record(control.value_origin)
+        path_parts = _split_access_path(control.var)
+        if path_parts and path_parts[1]:
+            base, indices, field = path_parts
+            driver = indices[0]
+            try:
+                idx = int(_lookup(env, str(driver)))
+                subscript = f"[{idx}]"
+                field_suffix = f".{field}" if field else ""
+                concrete_key = global_base_key(f"{base}{subscript}{field_suffix}")
+                val = env.get(control.var, env.get(_norm(control.var), env.get(control.name)))
+                if val is not None:
+                    env[concrete_key] = val
+            except (KeyError, TypeError, ValueError):
+                pass
+
     return env
 
 
@@ -984,8 +1014,11 @@ def branch_path_reachable(ir: FunctionIR, branch: Branch,
             required = not (
                 current.kind == "elseif" and current.chain_index > 0
             )
+        parent_span = _source_span(parent)
+        parent_offset = parent_span[0] if parent_span else None
+        parent_env = _control_env(env, ir, before_offset=parent_offset) if parent_offset is not None else env
         try:
-            if evaluate_branch(parent, env) != required:
+            if evaluate_branch(parent, parent_env) != required:
                 return False
         except (KeyError, TypeError, ValueError):
             return None
@@ -1333,13 +1366,16 @@ def _logical_status_variants(ir: FunctionIR, baseline: Any,
     else:
         # For the FALSE stub witness, retain the non-boundary status codes
         # that keep the other atom TRUE.
-        current = assignment.get(stub_control.name)
+        domains, _ = _generic_inputs(ir, baseline)
+        stub_key = _domain_key_for(ir, stub_control.var, domains, branch=branch) or stub_control.name
+        current = assignment.get(stub_key, assignment.get(stub_control.name))
         for value in stub_values:
             if value == current:
                 continue
             trial = dict(assignment)
+            trial[stub_key] = value
             trial[stub_control.name] = value
-            _clear_derived_bindings(trial, ir, {stub_control.name})
+            _clear_derived_bindings(trial, ir, {stub_control.name, stub_key})
             try:
                 env = _control_env(trial, ir, before_offset=branch_offset)
                 atom_values = [evaluate_atom(atom, env) for atom in branch.atoms]
@@ -1661,11 +1697,14 @@ def _guards_active(ir: FunctionIR, guards: Any, env: dict[str, Any],
         )
         if branch is None:
             return None
+        branch_span = _source_span(branch)
+        branch_offset = branch_span[0] if branch_span else None
+        guard_env = _control_env(env, ir, before_offset=branch_offset) if branch_offset is not None and not any(c.source == "local" for c in ir.control_vars) else env
         try:
-            path = branch_path_reachable(ir, branch, env)
+            path = branch_path_reachable(ir, branch, guard_env)
             if path is not True:
                 return path
-            active = evaluate_branch(branch, env)
+            active = evaluate_branch(branch, guard_env)
         except (KeyError, TypeError, ValueError):
             return None
         if active != bool(guard.get("then")):
@@ -2066,6 +2105,8 @@ def _call_slot_environments(ir: FunctionIR, call: Any,
 
 
 def _call_base_slot(ir: FunctionIR, target_call: Any) -> int:
+    if getattr(target_call, "via_macro", None):
+        return 0
     slot = 0
     for call in sorted(ir.calls, key=lambda item: item.order):
         if call.order == target_call.order:
@@ -2648,11 +2689,14 @@ def _call_is_reachable(ir: FunctionIR, call: Any,
             )
         if branch is None:
             return None
-        path = branch_path_reachable(ir, branch, env)
+        branch_span = _source_span(branch)
+        branch_offset = branch_span[0] if branch_span else None
+        guard_env = _control_env(env, ir, before_offset=branch_offset)
+        path = branch_path_reachable(ir, branch, guard_env)
         if path is not True:
             return path
         try:
-            if evaluate_branch(branch, env) != bool(guard.get("then")):
+            if evaluate_branch(branch, guard_env) != bool(guard.get("then")):
                 return False
         except (KeyError, TypeError, ValueError):
             return None

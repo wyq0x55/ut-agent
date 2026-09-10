@@ -1525,8 +1525,16 @@ def _mcdc_label(branch, intent: TestIntent, ir: FunctionIR) -> str:
     the same truth vector.  Keeping that distinction here reproduces the
     Golden convention without ever using the Golden text as a rule input.
     """
+    truth = _intent_truth_key(intent)
+    if truth is not None:
+        conditions, decision = truth
+        connective = branch.connective or "?"
+        vector = connective.join("T" if value else "F" for value in conditions)
+        return f"{vector}=>{'T' if decision else 'F'}"
     try:
-        env = _control_env(intent.inputs, ir)
+        branch_span = _source_span(branch)
+        branch_offset = branch_span[0] if branch_span else None
+        env = _control_env(intent.inputs, ir, before_offset=branch_offset)
         atom_values = [evaluate_atom(atom, env) for atom in branch.atoms]
         decision = evaluate_branch(branch, env)
     except (KeyError, TypeError, ValueError):
