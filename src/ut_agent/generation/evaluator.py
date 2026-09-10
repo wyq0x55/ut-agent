@@ -86,7 +86,9 @@ def evaluate_obligation(ir: FunctionIR, obligation: TestObligation,
                                 pre_state=dict(assignment), post_state=post_state,
                                 required_outputs=required, complete=complete)
     try:
-        env = engine._control_env(assignment, ir)
+        branch_span = engine._source_span(branch)
+        branch_offset = branch_span[0] if branch_span else None
+        env = engine._control_env(assignment, ir, before_offset=branch_offset)
         path = engine.branch_path_reachable(ir, branch, env)
         if path is not True:
             reason = (

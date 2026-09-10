@@ -21,6 +21,7 @@ from ut_agent.generation.semantic import (
     call_count_key,
     call_param_key,
     call_param_keys,
+    call_return_key,
     call_return_keys,
     call_capacity as _stub_capacity,
     global_base_key,
@@ -696,15 +697,15 @@ def _control_env(values: dict[str, Any], ir: FunctionIR,
                 and isinstance(item.get("origin"), dict)
                 and item.get("origin", {}).get("kind") == "stub_return"
             ]
+            if len(matching_effects) > 1:
+                value = None
             if before_offset is not None:
                 matching_effects = [
                     item for item in matching_effects
                     if int(item.get("source_offset", -1) or -1) <= before_offset
                 ]
-            for effect in reversed(matching_effects):
-                if _guards_active(ir, effect.get("guards", []), env, effect.get("source_offset")) is True:
-                    origin = effect.get("origin")
-                    break
+            if matching_effects:
+                origin = matching_effects[-1].get("origin")
         if isinstance(origin, dict) and origin.get("kind") == "local_from_global":
             # The automatic local is only an alias for the external global
             # recorded by Clang.  Always resolve the alias from that driver
@@ -2489,8 +2490,11 @@ def validate_intent(ir: FunctionIR, intent: TestIntent, *,
                     # Kept only for the historical intent API.  Formal
                     # generation never uses expected values to prove a
                     # source decision.
+                    branch_span = _source_span(branch)
+                    branch_offset = branch_span[0] if branch_span else None
+                    branch_env = _control_env(intent.inputs, ir, before_offset=branch_offset)
                     actual = evaluate_branch(
-                        branch, env, _expanded_env(intent.expected)
+                        branch, branch_env, _expanded_env(intent.expected)
                     )
                 if actual != obligation.outcome:
                     errors.append(
@@ -2941,6 +2945,34 @@ def _generic_inputs(ir: FunctionIR,
         domains[call_param_key(callee, index, slot, field or None)] = sorted(
             entry["values"],
         )
+    for control in ir.control_vars:
+        origin = _origin_record(control.value_origin)
+        effects = [
+            item for item in _local_value_effects(ir)
+            if _norm(str(item.get("name", ""))) == _norm(control.name)
+            and isinstance(item.get("origin"), dict)
+            and item.get("origin", {}).get("kind") == "stub_return"
+        ]
+        if not effects and isinstance(origin, dict) and origin.get("kind") == "stub_return":
+            effects = [{"origin": origin}]
+        if not effects:
+            continue
+        if len(effects) <= 1:
+            continue
+        entry = candidates.get(control.var) or candidates.get(control.name)
+        if not entry or not entry.get("values"):
+            continue
+        for effect in effects:
+            eff_origin = effect.get("origin", {})
+            callee = str(eff_origin.get("callee", ""))
+            if not callee:
+                continue
+            slot = _stub_return_slot(
+                ir, callee, eff_origin.get("call_order"), eff_origin.get("call_offset"),
+            )
+            field = str(eff_origin.get("field") or "").strip().lstrip(".")
+            slot_key = call_return_key(callee, slot, field or None)
+            domains[slot_key] = sorted(entry["values"])
     fixed: dict[str, Any] = {}
     for cv in ir.control_vars:
         if cv.constant_value is not None:
@@ -2951,7 +2983,12 @@ def _generic_inputs(ir: FunctionIR,
             # array/table access and never appears in a branch predicate.
             # Materialize it here so validation and CSV rendering cannot
             # mistake an omitted parameter for an unresolved local.
-            fixed.setdefault(param.name, 0)
+            eq_boundaries = [
+                a.boundary for b in ir.branches for a in b.atoms
+                if a.op == "==" and a.var == param.name and isinstance(a.boundary, (int, float))
+            ]
+            default_val = eq_boundaries[0] if eq_boundaries else 0
+            fixed.setdefault(param.name, default_val)
             continue
         # The valid-pointer proof value is semantic.  The WinAMS adapter
         # converts the corresponding address key to its target address.
@@ -3183,15 +3220,51 @@ def _generic_intents(
 
 
 def _domain_key_for(ir: FunctionIR, expression: str,
-                    domains: dict[str, list[Any]]) -> str | None:
+                    domains: dict[str, list[Any]],
+                    branch: Branch | None = None) -> str | None:
     wanted = _norm(expression)
     for control in ir.control_vars:
         if wanted in {_norm(control.name), _norm(control.var)}:
+            origin = _origin_record(control.value_origin)
+            effects = [
+                item for item in _local_value_effects(ir)
+                if _norm(str(item.get("name", ""))) == _norm(control.name)
+                and isinstance(item.get("origin"), dict)
+                and item.get("origin", {}).get("kind") == "stub_return"
+            ]
+            if not effects and isinstance(origin, dict) and origin.get("kind") == "stub_return":
+                effects = [{"origin": origin}]
+            if effects:
+                branch_offset = None
+                if branch is not None:
+                    branch_span = _source_span(branch)
+                    if branch_span is not None:
+                        branch_offset = branch_span[0]
+                chosen_origin = None
+                if branch_offset is not None:
+                    visible = [
+                        item for item in effects
+                        if int(item.get("source_offset", -1) or -1) <= branch_offset
+                    ]
+                    if visible:
+                        chosen_origin = visible[-1].get("origin")
+                if chosen_origin is None and effects:
+                    chosen_origin = effects[0].get("origin")
+                if isinstance(chosen_origin, dict):
+                    callee = str(chosen_origin.get("callee", ""))
+                    if callee:
+                        slot = _stub_return_slot(
+                            ir, callee, chosen_origin.get("call_order"),
+                            chosen_origin.get("call_offset"),
+                        )
+                        field = str(chosen_origin.get("field") or "").strip().lstrip(".")
+                        candidate = call_return_key(callee, slot, field or None)
+                        if candidate in domains:
+                            return candidate
             if control.name in domains:
                 return control.name
             if control.var in domains:
                 return control.var
-            origin = _origin_record(control.value_origin)
             if isinstance(origin, dict) and origin.get("kind") == "const_table_field":
                 driver = str(origin.get("driver", ""))
                 for candidate in ir.control_vars:
@@ -3238,7 +3311,7 @@ def _targeted_domain_values(ir: FunctionIR, branch: Branch,
     """
     atoms = [
         atom for atom in branch.atoms
-        if _domain_key_for(ir, atom.var, domains) == key
+        if _domain_key_for(ir, atom.var, domains, branch=branch) == key
     ]
     boundaries = {
         atom.boundary for atom in atoms if atom.boundary is not None
@@ -3547,6 +3620,19 @@ def _local_value_guard_requirements(
     return tuple(requirements)
 
 
+def _descendant_branch_ids(ir: FunctionIR, branch: Branch) -> set[str]:
+    """Return all branch IDs strictly nested under branch."""
+    descendants: set[str] = set()
+    frontier = [branch.bid]
+    while frontier:
+        pid = frontier.pop()
+        for other in ir.branches:
+            if other.parent_bid == pid and other.bid not in descendants:
+                descendants.add(other.bid)
+                frontier.append(other.bid)
+    return descendants
+
+
 def _apply_branch_target(ir: FunctionIR, domains: dict[str, list[Any]],
                          raw: dict[str, Any], branch: Branch,
                          outcome: bool) -> None:
@@ -3556,7 +3642,7 @@ def _apply_branch_target(ir: FunctionIR, domains: dict[str, list[Any]],
         if atom_index < 0 or atom_index >= len(branch.atoms):
             continue
         atom = branch.atoms[atom_index]
-        key = _domain_key_for(ir, atom.var, domains)
+        key = _domain_key_for(ir, atom.var, domains, branch=branch)
         if key is None:
             for guard_branch, guard_required in _local_guard_requirements(
                     ir, atom, expected):
@@ -3564,14 +3650,25 @@ def _apply_branch_target(ir: FunctionIR, domains: dict[str, list[Any]],
                     ir, domains, raw, guard_branch, guard_required,
                 )
             continue
+        branch_span = _source_span(branch)
+        branch_offset = branch_span[0] if branch_span else None
+        env = _control_env(raw, ir, before_offset=branch_offset)
+        try:
+            if (evaluate_atom(atom, env) == expected
+                    and all(evaluate_atom(prev_atom, env) == prev_exp
+                            for prev_atom, prev_exp in applied)):
+                applied.append((atom, expected))
+                continue
+        except (KeyError, TypeError, ValueError):
+            pass
         chosen = None
         for value in _targeted_domain_values(ir, branch, key, domains):
             trial = dict(raw)
             trial[key] = value
-            env = _control_env(trial, ir)
+            trial_env = _control_env(trial, ir, before_offset=branch_offset)
             try:
-                if (evaluate_atom(atom, env) == expected
-                        and all(evaluate_atom(prev_atom, env) == prev_exp
+                if (evaluate_atom(atom, trial_env) == expected
+                        and all(evaluate_atom(prev_atom, trial_env) == prev_exp
                                 for prev_atom, prev_exp in applied)):
                     chosen = value
                     break
@@ -3590,25 +3687,32 @@ def _targeted_branch_candidate(ir: FunctionIR,
     raw = dict(fixed)
     branch_keys = {
         key for atom in branch.atoms
-        if (key := _domain_key_for(ir, atom.var, domains)) is not None
+        if (key := _domain_key_for(ir, atom.var, domains, branch=branch)) is not None
     }
     for key in sorted(domains):
         values = _targeted_domain_values(ir, branch, key, domains) \
             if key in branch_keys else domains[key]
         if values:
-            raw[key] = values[0]
+            if key in branch_keys or key not in raw or raw[key] not in values:
+                raw[key] = values[0]
 
     if not _apply_switch_path_target(ir, domains, raw, branch):
         return None
     ancestors = {parent.bid for parent, _ in _ancestor_requirements(ir, branch)}
+    descendants = _descendant_branch_ids(ir, branch)
     for other in ir.branches:
-        if other.bid != branch.bid and other.bid not in ancestors and other.kind not in {"switch", "for"}:
+        if (other.bid != branch.bid
+                and other.bid not in ancestors
+                and other.bid not in descendants
+                and other.kind not in {"switch", "for"}):
             _apply_branch_target(ir, domains, raw, other, False)
     for parent, required in _ancestor_requirements(ir, branch):
         _apply_branch_target(ir, domains, raw, parent, required)
     _apply_branch_target(ir, domains, raw, branch, outcome)
 
-    env = _control_env(raw, ir)
+    branch_span = _source_span(branch)
+    branch_offset = branch_span[0] if branch_span else None
+    env = _control_env(raw, ir, before_offset=branch_offset)
     try:
         return (
             env if branch_path_reachable(ir, branch, env) is True
@@ -3634,23 +3738,28 @@ def _targeted_condition_candidate(ir: FunctionIR,
     raw = dict(fixed)
     branch_keys = {
         key for atom in branch.atoms
-        if (key := _domain_key_for(ir, atom.var, domains)) is not None
+        if (key := _domain_key_for(ir, atom.var, domains, branch=branch)) is not None
     }
     for key in sorted(domains):
         values = (_targeted_domain_values(ir, branch, key, domains)
                   if key in branch_keys else domains[key])
         if values:
-            raw[key] = values[0]
+            if key in branch_keys or key not in raw or raw[key] not in values:
+                raw[key] = values[0]
     if not _apply_switch_path_target(ir, domains, raw, branch):
         return None
     ancestors = {parent.bid for parent, _ in _ancestor_requirements(ir, branch)}
+    descendants = _descendant_branch_ids(ir, branch)
     for other in ir.branches:
-        if other.bid != branch.bid and other.bid not in ancestors and other.kind not in {"switch", "for"}:
+        if (other.bid != branch.bid
+                and other.bid not in ancestors
+                and other.bid not in descendants
+                and other.kind not in {"switch", "for"}):
             _apply_branch_target(ir, domains, raw, other, False)
     for parent, required in _ancestor_requirements(ir, branch):
         _apply_branch_target(ir, domains, raw, parent, required)
     atom = branch.atoms[condition_index]
-    key = _domain_key_for(ir, atom.var, domains)
+    key = _domain_key_for(ir, atom.var, domains, branch=branch)
     if key is None:
         for guard_branch, guard_required in _local_guard_requirements(
                 ir, atom, bool(outcome)):
@@ -3736,19 +3845,27 @@ def _targeted_mcdc_candidate(ir: FunctionIR,
     # need their Cartesian product; only a conflicting repeated/path control
     # needs the bounded fallback below.
     raw = dict(fixed)
+    branch_keys = {
+        key for atom in branch.atoms
+        if (key := _domain_key_for(ir, atom.var, domains, branch=branch)) is not None
+    }
     for key in sorted(domains):
-        if domains[key]:
+        if (key in branch_keys or key not in raw or raw[key] not in domains[key]) and domains[key]:
             raw[key] = domains[key][0]
     if not _apply_switch_path_target(ir, domains, raw, branch):
         return None
     ancestors = {parent.bid for parent, _ in path}
+    descendants = _descendant_branch_ids(ir, branch)
     for other in ir.branches:
-        if other.bid != branch.bid and other.bid not in ancestors and other.kind not in {"switch", "for"}:
+        if (other.bid != branch.bid
+                and other.bid not in ancestors
+                and other.bid not in descendants
+                and other.kind not in {"switch", "for"}):
             _apply_branch_target(ir, domains, raw, other, False)
     applied: list[tuple[Any, bool]] = []
     failed_key: str | None = None
     for owner, atom, expected in requirements:
-        key = _domain_key_for(ir, atom.var, domains)
+        key = _domain_key_for(ir, atom.var, domains, branch=owner)
         if key is None:
             # A parent path may be controlled by an extractor-proven constant
             # local.  It is not an input dimension, but it still belongs in
@@ -3792,13 +3909,13 @@ def _targeted_mcdc_candidate(ir: FunctionIR,
     relevant: set[str] = set()
     if failed_key is None:
         for _owner, atom, _expected in requirements:
-            key = _domain_key_for(ir, atom.var, domains)
+            key = _domain_key_for(ir, atom.var, domains, branch=_owner)
             if key is not None:
                 relevant.add(key)
     else:
         include = False
         for _owner, atom, _expected in requirements:
-            key = _domain_key_for(ir, atom.var, domains)
+            key = _domain_key_for(ir, atom.var, domains, branch=_owner)
             if key == failed_key:
                 include = True
             if include and key is not None:
@@ -3849,7 +3966,7 @@ def _targeted_generic_candidates(ir: FunctionIR,
         index = obligation.condition_index
         if index is not None and 0 <= index < len(branch.atoms):
             atom = branch.atoms[index]
-            key = _domain_key_for(ir, atom.var, domains)
+            key = _domain_key_for(ir, atom.var, domains, branch=branch)
             value = obligation.boundary_value
             control = next(
                 (item for item in ir.control_vars

@@ -53,8 +53,10 @@ def validate_mcdc_pairs(ir: FunctionIR,
         if branch is None or index is None or index >= len(branch.atoms):
             errors.append(f"MC/DC pair {pair_id} 缺少 typed branch/atom")
             continue
+        branch_span = engine._source_span(branch)
+        branch_offset = branch_span[0] if branch_span else None
         try:
-            envs = [engine._control_env(item.inputs, ir)
+            envs = [engine._control_env(item.inputs, ir, before_offset=branch_offset)
                     for item in (first, second)]
             atom_values = [
                 [engine.evaluate_atom(atom, env) for atom in branch.atoms]

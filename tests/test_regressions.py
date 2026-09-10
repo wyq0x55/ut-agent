@@ -88,3 +88,49 @@ def test_clang_recovers_multiline_macro_condition_without_comments(tmp_path):
     assert [(atom.var, atom.boundary) for atom in branch.atoms] == [
         ("left", 2), ("right", 2),
     ]
+
+
+def test_targeted_branch_excludes_descendants_and_uses_param_equality_default():
+    """Solve candidate must exclude descendants when setting collateral branches to False,
+    and scalar parameters must default to their equality boundary if present."""
+    from ut_agent.generation.engine import (
+        _descendant_branch_ids,
+        _generic_inputs,
+        _targeted_branch_candidate,
+    )
+    from ut_agent.ir import Atom, Branch, ControlVar, FunctionIR, Param
+
+    ir = FunctionIR(name="test_func", file="test.c", line=1, ret_type="int")
+    ir.params = [Param(name="mode", type="int")]
+    ir.control_vars = [
+        ControlVar(name="mode", var="mode", var_type="int", source="param")
+    ]
+    b1 = Branch(
+        bid="b1", parent_bid="", line=1, kind="if", connective=None,
+        atoms=[
+            Atom(
+                var="mode", var_type="int", op="==", boundary=1,
+                boundary_name=None, text="mode == 1",
+            )
+        ],
+    )
+    b2 = Branch(
+        bid="b2", parent_bid="b1", line=2, kind="if", connective=None,
+        atoms=[
+            Atom(
+                var="mode", var_type="int", op="!=", boundary=1,
+                boundary_name=None, text="mode != 1",
+            )
+        ],
+    )
+    ir.branches = [b1, b2]
+
+    domains, fixed = _generic_inputs(ir)
+    assert fixed.get("mode") == 1
+    descendants = _descendant_branch_ids(ir, b1)
+    assert "b2" in descendants
+    cand = _targeted_branch_candidate(ir, domains, fixed, b1, True)
+    assert cand is not None
+    assert cand["mode"] == 1
+
+
