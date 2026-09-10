@@ -2107,6 +2107,26 @@ def _resolve_call_param_value(ir: FunctionIR,
             return None
         if param.is_ptr:
             return driver
+        before = call_span[0] if call_span else None
+        if before is not None:
+            for effect in reversed(_effect_records(ir.global_write_effects)):
+                if not isinstance(effect, dict):
+                    continue
+                path = str(effect.get("path", "")).strip()
+                if path == driver:
+                    try:
+                        off = int(effect.get("source_offset", -1))
+                    except (TypeError, ValueError):
+                        off = -1
+                    if 0 <= off <= before:
+                        if _guards_active(ir, effect.get("guards", []), env, off) is True:
+                            val = effect.get("constant_value")
+                            if val is not None:
+                                return val
+                            val = _global_effect_value(ir, effect, env)
+                            if val is not None:
+                                return val
+                            break
         try:
             return _lookup(env, driver)
         except KeyError:
