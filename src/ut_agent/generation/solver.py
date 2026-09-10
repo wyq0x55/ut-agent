@@ -130,18 +130,13 @@ def solve_obligation(ir: FunctionIR, obligation: TestObligation,
         engine._control_env({**fixed, **dict(zip(keys, combo))}, ir)
         for combo in product(*(domains[key] for key in keys))
     )
-    if ir.branches and (cardinality > limit or obligation.kind == "boundary"):
-        # A typed boundary obligation fixes one extractor-proven atom value;
-        # unrelated controls do not need a Cartesian-product replay even when
-        # the total domain happens to fit under the global safety guard.
-        # Preserve the complete search as a fallback if the reduced witness
-        # cannot prove branch reachability with its first representatives.
+    if ir.branches:
         targeted = engine._targeted_generic_candidates(
             ir, domains, fixed, obligation
         )
         first = next(targeted, None)
         if first is not None:
-            candidates = chain((first,), targeted)
+            candidates = chain((first,), targeted, () if cardinality > limit else full_candidates)
         elif cardinality > limit:
             candidates = ()
         else:

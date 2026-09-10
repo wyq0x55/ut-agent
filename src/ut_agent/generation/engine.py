@@ -2084,7 +2084,19 @@ def _resolve_call_param_value(ir: FunctionIR,
         return None
     kind = str(origin.get("kind", ""))
     if kind == "constant":
+        tree = origin.get("expression_tree")
+        if isinstance(tree, dict):
+            curr = tree
+            while isinstance(curr, dict) and curr.get("kind") in {"cast", "paren"}:
+                curr = curr.get("operand", curr.get("sub_expr"))
+            if isinstance(curr, dict) and curr.get("kind") == "constant":
+                val = curr.get("value")
+                if val is not None:
+                    return int(val)
         expr = str(origin.get("expression", "0")).strip()
+        match = re.search(r'\b\d+\b', expr)
+        if match:
+            return int(match.group(0))
         try:
             return int(expr, 0)
         except ValueError:
@@ -2926,11 +2938,17 @@ def _generic_inputs(ir: FunctionIR,
         fixed[param.name] = 1
         fixed[pointer_address_key(param.name)] = 1
         # Address columns and dereferenced value columns are distinct
-        # target variables.  A generic row starts with a deterministic zero
+        # target variables.  A generic row starts with a deterministic
         # pointee; AST write effects may replace it in the expected half.
-        fixed[pointer_value_key(param.name)] = 0
-        fixed[pointer_value_key(param.name, f"{param.name}[0]")] = 0
-        fixed[pointer_value_key(param.name, f"*{param.name}")] = 0
+        pointee_default = (
+            255 if (param.is_written
+                    and getattr(param.type_info, "pointee_info", None)
+                    and getattr(param.type_info.pointee_info, "bit_width", None) == 8)
+            else 0
+        )
+        fixed[pointer_value_key(param.name)] = pointee_default
+        fixed[pointer_value_key(param.name, f"{param.name}[0]")] = pointee_default
+        fixed[pointer_value_key(param.name, f"*{param.name}")] = pointee_default
     for memory in ir.memory_vars:
         if memory.input_value is not None:
             fixed[memory.name] = memory.input_value
@@ -3513,6 +3531,7 @@ def _apply_branch_target(ir: FunctionIR, domains: dict[str, list[Any]],
                          raw: dict[str, Any], branch: Branch,
                          outcome: bool) -> None:
     """Apply a deterministic truth target without asserting full-path truth."""
+    applied: list[tuple[Atom, bool]] = []
     for atom_index, expected in _branch_target_atoms(branch, outcome):
         if atom_index < 0 or atom_index >= len(branch.atoms):
             continue
@@ -3531,13 +3550,16 @@ def _apply_branch_target(ir: FunctionIR, domains: dict[str, list[Any]],
             trial[key] = value
             env = _control_env(trial, ir)
             try:
-                if evaluate_atom(atom, env) == expected:
+                if (evaluate_atom(atom, env) == expected
+                        and all(evaluate_atom(prev_atom, env) == prev_exp
+                                for prev_atom, prev_exp in applied)):
                     chosen = value
                     break
             except (KeyError, TypeError, ValueError):
                 continue
         if chosen is not None:
             raw[key] = chosen
+            applied.append((atom, expected))
 
 
 def _targeted_branch_candidate(ir: FunctionIR,
@@ -3558,6 +3580,10 @@ def _targeted_branch_candidate(ir: FunctionIR,
 
     if not _apply_switch_path_target(ir, domains, raw, branch):
         return None
+    ancestors = {parent.bid for parent, _ in _ancestor_requirements(ir, branch)}
+    for other in ir.branches:
+        if other.bid != branch.bid and other.bid not in ancestors and other.kind not in {"switch", "for"}:
+            _apply_branch_target(ir, domains, raw, other, False)
     for parent, required in _ancestor_requirements(ir, branch):
         _apply_branch_target(ir, domains, raw, parent, required)
     _apply_branch_target(ir, domains, raw, branch, outcome)
@@ -3597,6 +3623,10 @@ def _targeted_condition_candidate(ir: FunctionIR,
             raw[key] = values[0]
     if not _apply_switch_path_target(ir, domains, raw, branch):
         return None
+    ancestors = {parent.bid for parent, _ in _ancestor_requirements(ir, branch)}
+    for other in ir.branches:
+        if other.bid != branch.bid and other.bid not in ancestors and other.kind not in {"switch", "for"}:
+            _apply_branch_target(ir, domains, raw, other, False)
     for parent, required in _ancestor_requirements(ir, branch):
         _apply_branch_target(ir, domains, raw, parent, required)
     atom = branch.atoms[condition_index]
@@ -3691,6 +3721,10 @@ def _targeted_mcdc_candidate(ir: FunctionIR,
             raw[key] = domains[key][0]
     if not _apply_switch_path_target(ir, domains, raw, branch):
         return None
+    ancestors = {parent.bid for parent, _ in path}
+    for other in ir.branches:
+        if other.bid != branch.bid and other.bid not in ancestors and other.kind not in {"switch", "for"}:
+            _apply_branch_target(ir, domains, raw, other, False)
     applied: list[tuple[Any, bool]] = []
     failed_key: str | None = None
     for owner, atom, expected in requirements:
@@ -3833,6 +3867,10 @@ def _targeted_generic_candidates(ir: FunctionIR,
                 trial = dict(raw)
                 if not _apply_switch_path_target(ir, domains, trial, branch):
                     return
+                ancestors = {parent.bid for parent, _ in _ancestor_requirements(ir, branch)}
+                for other in ir.branches:
+                    if other.bid != branch.bid and other.bid not in ancestors and other.kind not in {"switch", "for"}:
+                        _apply_branch_target(ir, domains, trial, other, False)
                 for parent, required in _ancestor_requirements(ir, branch):
                     _apply_branch_target(ir, domains, trial, parent, required)
                 trial[key] = value

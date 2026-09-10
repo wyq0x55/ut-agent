@@ -305,8 +305,20 @@ def normalize_golden_csv(path: Path) -> dict[str, Any]:
     stub_columns = _stub_columns(all_columns)
     varying_input_columns = {
         col for col in parsed["input_columns"]
-        if len({s["inputs"].get(col) for s in parsed["scenarios"]}) > 1
+        if len({v for s in parsed["scenarios"] if (v := s["inputs"].get(col)) not in ("", None)}) > 1
     }
+    branch_varying_inputs: dict[int, set[str]] = {}
+    for item in parsed["scenarios"]:
+        b_idx = item.get("branch_index")
+        if b_idx is not None:
+            branch_varying_inputs.setdefault(b_idx, set())
+    for b_idx in branch_varying_inputs:
+        b_scenarios = [s for s in parsed["scenarios"] if s.get("branch_index") == b_idx]
+        for col in parsed["input_columns"]:
+            vals = {v for s in b_scenarios if (v := s["inputs"].get(col)) not in ("", None)}
+            if len(vals) > 1:
+                branch_varying_inputs[b_idx].add(col)
+
     cases = []
     viewpoint_labels: list[str] = []
     for item in parsed["scenarios"]:
@@ -314,18 +326,19 @@ def normalize_golden_csv(path: Path) -> dict[str, Any]:
         label = normalize_label(item["label"] or item["case_label"])
         if label:
             viewpoint_labels.append(label)
+        b_idx = item.get("branch_index")
+        b_varying = branch_varying_inputs.get(b_idx, varying_input_columns) if b_idx is not None else varying_input_columns
         strict_inputs = {
             key: item["inputs"].get(key)
             for key in parsed["input_columns"]
             if kind == "switch_case"
-            or (key.startswith("@") and item["input_value_classes"].get(key) != "pointer-address")
-            or (key in stub_columns and ("amin_return" in key.lower() or key in varying_input_columns) and item["input_value_classes"].get(key) != "pointer-address")
-            or (key in varying_input_columns and item["input_value_classes"].get(key) != "pointer-address")
+            or (key.startswith("@") and "[" not in key and item["input_value_classes"].get(key) != "pointer-address")
+            or (key in b_varying and item["input_value_classes"].get(key) != "pointer-address")
         }
         vector = truth_vector(label)
         stub_values = {
             key: item["inputs"].get(key) for key in stub_columns
-            if "amin_return" in key.lower() or key in varying_input_columns
+            if key in b_varying
         }
         pre_state = {
             key: value for key, value in item["inputs"].items()
