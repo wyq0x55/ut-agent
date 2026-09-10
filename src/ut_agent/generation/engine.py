@@ -649,7 +649,8 @@ def _expanded_env(values: dict[str, Any]) -> dict[str, Any]:
     return env
 
 
-def _control_env(values: dict[str, Any], ir: FunctionIR) -> dict[str, Any]:
+def _control_env(values: dict[str, Any], ir: FunctionIR,
+                 before_offset: int | None = None) -> dict[str, Any]:
     """Add source-derived aliases for the shared branch evaluator.
 
     The C++ extractor records when an automatic control is produced by a
@@ -687,6 +688,22 @@ def _control_env(values: dict[str, Any], ir: FunctionIR) -> dict[str, Any]:
             except KeyError:
                 continue
         origin = _origin_record(control.value_origin)
+        if isinstance(origin, dict) and origin.get("kind") == "stub_return":
+            matching_effects = [
+                item for item in _local_value_effects(ir)
+                if _norm(str(item.get("name", ""))) == _norm(control.name)
+                and isinstance(item.get("origin"), dict)
+                and item.get("origin", {}).get("kind") == "stub_return"
+            ]
+            if before_offset is not None:
+                matching_effects = [
+                    item for item in matching_effects
+                    if int(item.get("source_offset", -1) or -1) <= before_offset
+                ]
+            for effect in reversed(matching_effects):
+                if _guards_active(ir, effect.get("guards", []), env, effect.get("source_offset")) is True:
+                    origin = effect.get("origin")
+                    break
         if isinstance(origin, dict) and origin.get("kind") == "local_from_global":
             # The automatic local is only an alias for the external global
             # recorded by Clang.  Always resolve the alias from that driver
@@ -784,7 +801,6 @@ def _control_env(values: dict[str, Any], ir: FunctionIR) -> dict[str, Any]:
         else:
             env.setdefault(_norm(control.var), value)
             env.setdefault(control.name, value)
-        origin = _origin_record(control.value_origin)
         if origin is not None and origin.get("kind") == "stub_return":
             callee = str(origin.get("callee", ""))
             if callee:
@@ -1176,11 +1192,16 @@ def _repeated_or_variants(ir: FunctionIR, baseline: Any,
         target_values = [outside[0], outside[-1]]
 
     variants: list[dict[str, Any]] = []
+    branch_offset = getattr(getattr(getattr(branch, "provenance", None), "expansion", None), "offset", None)
+    try:
+        branch_offset = int(branch_offset)
+    except (TypeError, ValueError):
+        branch_offset = None
     for value in target_values:
         trial = dict(assignment)
         trial[controls[0].name] = value
         _clear_derived_bindings(trial, ir, {controls[0].name})
-        env = _control_env(trial, ir)
+        env = _control_env(trial, ir, before_offset=branch_offset)
         try:
             atom_values = [evaluate_atom(atom, env) for atom in atoms]
             expected_others = False
@@ -1269,6 +1290,12 @@ def _logical_status_variants(ir: FunctionIR, baseline: Any,
     if selected_index != stub_index:
         return tuple(variants)
 
+    branch_offset = getattr(getattr(getattr(branch, "provenance", None), "expansion", None), "offset", None)
+    try:
+        branch_offset = int(branch_offset)
+    except (TypeError, ValueError):
+        branch_offset = None
+
     if bool(obligation.outcome):
         # Keep the stub TRUE and retain additional categorical values for the
         # global field that still makes its comparison atom TRUE.
@@ -1278,7 +1305,7 @@ def _logical_status_variants(ir: FunctionIR, baseline: Any,
             trial = dict(assignment)
             trial[field_key] = value
             try:
-                env = _control_env(trial, ir)
+                env = _control_env(trial, ir, before_offset=branch_offset)
                 atom_values = [evaluate_atom(atom, env) for atom in branch.atoms]
                 valid = (
                     atom_values[selected_index] is bool(obligation.outcome)
@@ -1303,7 +1330,7 @@ def _logical_status_variants(ir: FunctionIR, baseline: Any,
             trial[stub_control.name] = value
             _clear_derived_bindings(trial, ir, {stub_control.name})
             try:
-                env = _control_env(trial, ir)
+                env = _control_env(trial, ir, before_offset=branch_offset)
                 atom_values = [evaluate_atom(atom, env) for atom in branch.atoms]
                 valid = (
                     atom_values[selected_index] is bool(obligation.outcome)
@@ -1633,6 +1660,13 @@ def _guards_active(ir: FunctionIR, guards: Any, env: dict[str, Any],
     return True
 
 
+def _call_site_capacity(call: Any) -> int:
+    try:
+        return max(1, int(call.max_occurrences))
+    except (TypeError, ValueError):
+        return 1
+
+
 def _stub_return_slot(ir: FunctionIR, callee: str, call_order: Any,
                       call_offset: Any = None) -> int:
     """Map a Clang call order/offset to the visible target return slot."""
@@ -1675,7 +1709,7 @@ def _stub_return_slot(ir: FunctionIR, callee: str, call_order: Any,
             continue
         if call.order >= target_order:
             break
-        slot += _stub_capacity(ir, call)
+        slot += _call_site_capacity(call)
     return slot
 
 
@@ -1743,7 +1777,7 @@ def _stub_param_value(ir: FunctionIR, origin: dict[str, Any],
         if item.order >= call.order:
             break
         if (item.callee or "") == callee:
-            slot += _stub_capacity(ir, item)
+            slot += _call_site_capacity(item)
     field = str(origin.get("field", "")).strip().lstrip(".")
     candidates = (
         (call_param_key(callee, index, slot, field),
@@ -3438,6 +3472,11 @@ def _targeted_condition_candidate(ir: FunctionIR,
     """Construct a witness for one condition while preserving its path."""
     if condition_index < 0 or condition_index >= len(branch.atoms):
         return None
+    branch_offset = getattr(getattr(getattr(branch, "provenance", None), "expansion", None), "offset", None)
+    try:
+        branch_offset = int(branch_offset)
+    except (TypeError, ValueError):
+        branch_offset = None
     raw = dict(fixed)
     branch_keys = {
         key for atom in branch.atoms
@@ -3460,7 +3499,7 @@ def _targeted_condition_candidate(ir: FunctionIR,
             _apply_branch_target(
                 ir, domains, raw, guard_branch, guard_required,
             )
-        env = _control_env(raw, ir)
+        env = _control_env(raw, ir, before_offset=branch_offset)
         try:
             if (evaluate_atom(atom, env) == outcome
                     and branch_path_reachable(ir, branch, env) is True):
@@ -3471,7 +3510,7 @@ def _targeted_condition_candidate(ir: FunctionIR,
     for value in _targeted_domain_values(ir, branch, key, domains):
         trial = dict(raw)
         trial[key] = value
-        env = _control_env(trial, ir)
+        env = _control_env(trial, ir, before_offset=branch_offset)
         try:
             if (evaluate_atom(atom, env) == outcome
                     and branch_path_reachable(ir, branch, env) is True):
@@ -3497,6 +3536,11 @@ def _targeted_mcdc_candidate(ir: FunctionIR,
             or condition_index < 0
             or condition_index >= len(branch.atoms)):
         return None
+    branch_offset = getattr(getattr(getattr(branch, "provenance", None), "expansion", None), "offset", None)
+    try:
+        branch_offset = int(branch_offset)
+    except (TypeError, ValueError):
+        branch_offset = None
     path = _ancestor_requirements(ir, branch)
     expected_truths = _mcdc_expected_truths(
         branch, condition_index, bool(outcome)
@@ -3548,7 +3592,7 @@ def _targeted_mcdc_candidate(ir: FunctionIR,
             # local.  It is not an input dimension, but it still belongs in
             # the path proof; reject only when its fixed value contradicts
             # the required outcome.
-            env = _control_env(raw, ir)
+            env = _control_env(raw, ir, before_offset=branch_offset)
             try:
                 if evaluate_atom(atom, env) != expected:
                     return None
@@ -3560,7 +3604,7 @@ def _targeted_mcdc_candidate(ir: FunctionIR,
         for value in _targeted_domain_values(ir, owner, key, domains):
             trial = dict(raw)
             trial[key] = value
-            env = _control_env(trial, ir)
+            env = _control_env(trial, ir, before_offset=branch_offset)
             try:
                 if (evaluate_atom(atom, env) == expected
                         and all(evaluate_atom(previous, env) == wanted
@@ -3575,7 +3619,7 @@ def _targeted_mcdc_candidate(ir: FunctionIR,
         raw[key] = chosen
         applied.append((atom, expected))
     else:
-        env = _control_env(raw, ir)
+        env = _control_env(raw, ir, before_offset=branch_offset)
         if matches(env):
             return env
 
@@ -3607,7 +3651,7 @@ def _targeted_mcdc_candidate(ir: FunctionIR,
     for combo in product(*values):
         trial = dict(raw)
         trial.update(dict(zip(keys, combo)))
-        env = _control_env(trial, ir)
+        env = _control_env(trial, ir, before_offset=branch_offset)
         if matches(env):
             return env
     return None
@@ -3630,6 +3674,11 @@ def _targeted_generic_candidates(ir: FunctionIR,
     )
     if branch is None:
         return
+    branch_offset = getattr(getattr(getattr(branch, "provenance", None), "expansion", None), "offset", None)
+    try:
+        branch_offset = int(branch_offset)
+    except (TypeError, ValueError):
+        branch_offset = None
     if obligation.kind == "boundary":
         # Boundary obligations constrain one typed atom; they do not require
         # replaying the full Cartesian product of every unrelated control.
@@ -3657,7 +3706,7 @@ def _targeted_generic_candidates(ir: FunctionIR,
                         _apply_branch_target(
                             ir, domains, trial, guard_branch, guard_required,
                         )
-                    env = _control_env(trial, ir)
+                    env = _control_env(trial, ir, before_offset=branch_offset)
                     try:
                         if (branch_path_reachable(ir, branch, env) is True
                                 and _lookup(env, atom.var) == value):
@@ -3679,7 +3728,7 @@ def _targeted_generic_candidates(ir: FunctionIR,
                 for parent, required in _ancestor_requirements(ir, branch):
                     _apply_branch_target(ir, domains, trial, parent, required)
                 trial[key] = value
-                env = _control_env(trial, ir)
+                env = _control_env(trial, ir, before_offset=branch_offset)
                 try:
                     if branch_path_reachable(ir, branch, env) is True:
                         yield env
@@ -3704,7 +3753,7 @@ def _targeted_generic_candidates(ir: FunctionIR,
                         trial = dict(fixed)
                         trial.update(dict(zip(keys, combo)))
                         trial[key] = value
-                        env = _control_env(trial, ir)
+                        env = _control_env(trial, ir, before_offset=branch_offset)
                         try:
                             if (branch_path_reachable(ir, branch, env) is True
                                     and _lookup(env, atom.var) == value):

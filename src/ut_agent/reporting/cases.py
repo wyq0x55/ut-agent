@@ -203,6 +203,7 @@ def _identity(
         "kind": kind,
         "viewpoint": viewpoint,
         "label": label,
+        "raw_label": semantic.get("raw_label") or semantic.get("label") or obligation.get("case_label") or obligation.get("description"),
         "outcome": outcome,
         "branch_id": obligation.get("branch_id", semantic.get("branch_id")),
         "condition_index": obligation.get(
@@ -346,6 +347,7 @@ def normalize_golden_cases(
             "truth_vector": vector,
             "identity": {
                 "kind": kind, "viewpoint": kind, "label": label,
+                "raw_label": raw.get("raw_label", raw.get("label")),
                 "outcome": raw.get("outcome"),
                 "branch_index": raw.get("branch_index"),
                 "case_label": raw.get("case_label"),
@@ -491,6 +493,10 @@ def _identity_score(
     golden_label = str(golden.get("label", ""))
     if generated_label and golden_label:
         score += 55 if generated_label == golden_label else -25
+    raw_gen = str(generated.get("identity", {}).get("raw_label") or generated.get("label") or "")
+    raw_gold = str(golden.get("identity", {}).get("raw_label") or golden.get("label") or "")
+    if raw_gen and raw_gold and _compact(raw_gen) == _compact(raw_gold):
+        score += 15
     truth = _truth_equal(generated.get("truth_vector"), golden.get("truth_vector"))
     if truth is True:
         score += 80

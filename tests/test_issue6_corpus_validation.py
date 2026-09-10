@@ -1222,6 +1222,22 @@ def test_issue6_free_representative_values_are_not_exact_value_matches(tmp_path:
     assert result["gaps"] == []
 
 
+def test_issue6_invariant_global_placeholder_is_free_representative_not_strict_input(tmp_path: Path):
+    csv_text = (
+        'mod,"file.c/init_fn","init_fn",1,1,,,,CPP,,,"",0\n'
+        '#COMMENT,"file.c/g_buf[0]","file.c/g_buf[0]"\n'
+        ';$L$,TRUE\n'
+        ',255,0\n'
+        ';$L$,FALSE\n'
+        ',255,0\n'
+    )
+    golden_path = tmp_path / "golden.csv"
+    golden_path.write_text(csv_text, encoding="cp932")
+    normalized = normalize_golden_csv(golden_path)
+    for case in normalized["cases"]:
+        assert "file.c/g_buf[0]" not in case["required_input_values"]
+
+
 def test_issue6_normalizes_mcdc_labels_to_truth_vectors():
     assert normalize_label("組合せ(F || T => F(2))") == "F||T=>F"
     assert label_kind("組合せ(F || T => F(2))") == "condition_combination"

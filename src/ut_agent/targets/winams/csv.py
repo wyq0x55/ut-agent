@@ -2053,16 +2053,17 @@ def render_intents_csv(ir: FunctionIR, result: GenerationResult, *,
                          and item.obligation.kind == "mcdc"],
                         ir,
                     )
-                    emitted_truth: set[tuple[tuple[bool, ...], bool]] = set()
+                    emitted_truth: dict[tuple[tuple[bool, ...], bool], int] = {}
                     for item in logical_items:
                         truth = _intent_truth_key(item)
+                        count = emitted_truth.get(truth, 0) + 1
+                        emitted_truth[truth] = count
                         label_text = _mcdc_label(branch, item, ir)
                         # The first witness for a truth vector gets the base
                         # combination label; additional representative values
                         # remain explicit but are marked as combinations.
-                        if truth in emitted_truth:
-                            label_text = f"組合せ({label_text})"
-                        emitted_truth.add(truth)
+                        if count > 1:
+                            label_text = f"組合せ({label_text}({count - 1}))"
                         out.append(f";$L$,{label_text}")
                         out.append(data_line(item))
                 else:

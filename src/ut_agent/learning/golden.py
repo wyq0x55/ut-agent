@@ -125,6 +125,12 @@ def parse_golden_csv(path: Path) -> dict[str, Any]:
         output_columns = comments[input_count:input_count + output_count]
         inputs = dict(zip(input_columns, cells[:input_count]))
         expected = dict(zip(output_columns, cells[input_count:]))
+        input_classes = {
+            key: _value_class(value) for key, value in inputs.items()
+        }
+        expected_classes = {
+            key: _value_class(value) for key, value in expected.items()
+        }
         scenarios.append({
             "case_id": f"U{len(scenarios) + 1:03d}",
             "branch_index": current_branch,
@@ -132,6 +138,7 @@ def parse_golden_csv(path: Path) -> dict[str, Any]:
             "kind": "case" if current_case else "scenario",
             "case_label": current_case,
             "label": current_vector_label,
+            "raw_label": current_vector_label,
             "inputs": inputs,
             "expected": expected,
             "raw_inputs": dict(zip(
@@ -140,9 +147,9 @@ def parse_golden_csv(path: Path) -> dict[str, Any]:
             "raw_expected": dict(zip(
                 output_columns, row[1 + input_count:1 + input_count + output_count],
             )),
-            "value_classes": {
-                key: _value_class(value) for key, value in {**inputs, **expected}.items()
-            },
+            "input_value_classes": input_classes,
+            "expected_value_classes": expected_classes,
+            "value_classes": {**expected_classes, **input_classes},
         })
     return {
         "input_count": input_count,
@@ -296,6 +303,10 @@ def normalize_golden_csv(path: Path) -> dict[str, Any]:
     parsed = parse_golden_csv(Path(path))
     all_columns = parsed["input_columns"] + parsed["output_columns"]
     stub_columns = _stub_columns(all_columns)
+    varying_input_columns = {
+        col for col in parsed["input_columns"]
+        if len({s["inputs"].get(col) for s in parsed["scenarios"]}) > 1
+    }
     cases = []
     viewpoint_labels: list[str] = []
     for item in parsed["scenarios"]:
@@ -307,8 +318,9 @@ def normalize_golden_csv(path: Path) -> dict[str, Any]:
             key: item["inputs"].get(key)
             for key in parsed["input_columns"]
             if kind == "switch_case"
-            or (key.startswith("@") and item["value_classes"].get(key) != "pointer-address" and "[" not in key)
-            or item["value_classes"].get(key) not in {"literal", "pointer-address"}
+            or (key.startswith("@") and item["input_value_classes"].get(key) != "pointer-address")
+            or (key in stub_columns and item["input_value_classes"].get(key) != "pointer-address")
+            or (key in varying_input_columns and item["input_value_classes"].get(key) != "pointer-address")
         }
         vector = truth_vector(label)
         stub_values = {
@@ -323,6 +335,7 @@ def normalize_golden_csv(path: Path) -> dict[str, Any]:
             "branch_index": item["branch_index"],
             "kind": kind,
             "label": label,
+            "raw_label": item.get("raw_label", item.get("label")),
             "outcome": item["outcome"],
             "truth_vector": vector,
             "inputs": dict(item["inputs"]),
