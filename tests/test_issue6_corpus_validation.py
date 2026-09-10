@@ -29,6 +29,7 @@ from ut_agent.reporting import (
     CALIBRATION_CLASSIFICATIONS,
     STANDARD_GAP_CATEGORIES,
     EQUIVALENT_REPRESENTATIVE,
+    EXACT_SEMANTIC_MATCH,
     EXTRA_GENERATED,
     PARTIAL_MATCH,
     build_corpus_validation_report,
@@ -1051,6 +1052,28 @@ def test_issue6_case_matching_separates_free_values_from_required_values():
     golden[0]["required_input_values"] = {"x": 1}
     partial = match_semantic_cases(generated, golden)
     assert partial["counts"] == {PARTIAL_MATCH: 1}
+
+
+def test_issue6_case_matching_differentiates_scalar_parameter_candidates():
+    def make_case(case_id: str, param_val: int) -> dict:
+        return {
+            "case_id": case_id, "kind": "branch_outcome", "label": "FALSE",
+            "outcome": False, "truth_vector": None, "identity": {"branch_index": 0},
+            "inputs": {"@id": param_val}, "expected": {"return": 0},
+            "required_input_values": {"@id": param_val}, "required_expected_values": {"return": 0},
+            "stub": {"columns": [], "values": {}},
+            "oracle": {"columns": ["return"], "values": {"return": 0}},
+        }
+
+    generated = [make_case("gen-1", 1), make_case("gen-2", 2), make_case("gen-3", 3)]
+    golden = [make_case("gold-1", 1), make_case("gold-2", 2), make_case("gold-3", 3)]
+    result = match_semantic_cases(generated, golden)
+    assert result["counts"] == {EXACT_SEMANTIC_MATCH: 3}
+    matched_pairs = [
+        (rec["golden_case_id"], rec["generated_case_id"])
+        for rec in result["records"] if rec["match_type"] == EXACT_SEMANTIC_MATCH
+    ]
+    assert sorted(matched_pairs) == [("gold-1", "gen-1"), ("gold-2", "gen-2"), ("gold-3", "gen-3")]
 
 
 def test_issue12_gate_failure_skips_unadjudicable_case_differences():

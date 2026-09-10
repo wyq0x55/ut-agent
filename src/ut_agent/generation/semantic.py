@@ -298,6 +298,20 @@ def _global_columns(ir, obj: dict[str, Any], *, writable: bool) -> list[str]:
                     and bit.get("is_bitfield")
                 ):
                     field_paths.append(storage)
+        if obj.get("write") and not obj.get("read"):
+            def first_field_access(path: str) -> tuple[int, int, int]:
+                matches = [
+                    (int(item.get("line", 0) or 0), int(item.get("offset", 0) or 0), idx)
+                    for idx, item in enumerate(raw_accesses)
+                    if isinstance(item, dict) and (
+                        path == str(item.get("path", "")).lstrip(".")
+                        or path.startswith(str(item.get("path", "")).lstrip(".") + ".")
+                        or str(item.get("path", "")).lstrip(".").startswith(path + ".")
+                    )
+                ]
+                return min(matches, default=(2**31 - 1, 2**63 - 1, len(field_paths)))
+
+            field_paths.sort(key=first_field_access)
     sizes: list[int] = []
     for raw_size in obj.get("array_sizes", ()):
         try:

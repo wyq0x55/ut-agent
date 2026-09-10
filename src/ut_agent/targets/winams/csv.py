@@ -17,6 +17,7 @@ from ut_agent.generation.semantic import (
     call_count_key,
     call_param_key,
     call_return_key,
+    global_key,
     global_object_columns as semantic_global_object_columns,
     output_columns as semantic_call_output_columns,
     param_columns as semantic_call_param_columns,
@@ -964,6 +965,38 @@ def _winams_global_columns(
             for indexes in index_tuples]
 
 
+def _winams_global_pairs(
+    ir: FunctionIR, obj: dict, *, direction: str = ""
+) -> list[tuple[str, str]]:
+    columns = _winams_global_columns(ir, obj, direction=direction)
+    name = str(obj["name"])
+    is_const = bool(obj.get("is_const", False))
+    is_volatile = bool(obj.get("is_volatile", False))
+    if is_const and is_volatile:
+        prefix = ""
+    else:
+        source_file = str(obj.get("source_file") or Path(ir.file).name)
+        suffix = Path(source_file).suffix.lower()
+        prefix = "" if suffix in {".h", ".hh", ".hpp", ".hxx"} \
+            else f"{Path(source_file).name}/"
+    base = f"{prefix}{name}"
+    pairs: list[tuple[str, str]] = []
+    for col in columns:
+        if not col.startswith(base):
+            pairs.append((col, col))
+            continue
+        tail = col[len(base):]
+        indexes = tuple(int(x) for x in re.findall(r"\[(\d+)\]", tail))
+        field = tail.rsplit("]", 1)[-1].lstrip(".") if "]" in tail else tail.lstrip(".")
+        if field:
+            pairs.append((col, global_key(name, indexes, field)))
+        elif indexes:
+            pairs.append((col, global_key(name, indexes)))
+        else:
+            pairs.append((col, global_key(name)))
+    return pairs
+
+
 def _winams_global_column_line(
     obj: dict, column: str, fallback: int, *, direction: str = ""
 ) -> int:
@@ -1216,18 +1249,15 @@ def _winams_columns(ir: FunctionIR) -> WinAMSProjection:
                 # on either CSV side.
                 if name == "u1s_iarb_pi_dat_ad_all_fix":
                     continue
-                columns = _winams_global_columns(ir, obj, direction="input")
-                if columns:
+                pairs = _winams_global_pairs(ir, obj, direction="input")
+                if pairs:
                     global_object_bases.add(name)
                 object_line = (
                     read_only_global_anchor
                     if name in grouped_global_names
                     else _winams_global_input_anchor(obj, line)
                 )
-                semantic_columns = semantic_global_object_columns(
-                    ir, obj, writable=False,
-                )
-                for column, key in zip(columns, semantic_columns):
+                for column, key in pairs:
                     # WinAMS registers a structure/array as one controllable
                     # object at its first AST access, then expands fields in
                     # declaration order.  A write-only non-union object is
@@ -1376,11 +1406,9 @@ def _winams_columns(ir: FunctionIR) -> WinAMSProjection:
                 if obj.get("provenance")
                 else ir.line + 1_000_000
             )
-            target_columns = _winams_global_columns(ir, obj, direction="output")
-            semantic_columns = semantic_global_object_columns(
-                ir, obj, writable=True,
-            )
-            for column, key in zip(target_columns, semantic_columns):
+            for column, key in _winams_global_pairs(
+                ir, obj, direction="output"
+            ):
                 add_branch_output(
                     column,
                     # Write-only non-union fields retain their individual

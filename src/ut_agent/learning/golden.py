@@ -307,6 +307,7 @@ def normalize_golden_csv(path: Path) -> dict[str, Any]:
             key: item["inputs"].get(key)
             for key in parsed["input_columns"]
             if kind == "switch_case"
+            or (key.startswith("@") and item["value_classes"].get(key) != "pointer-address" and "[" not in key)
             or item["value_classes"].get(key) not in {"literal", "pointer-address"}
         }
         vector = truth_vector(label)

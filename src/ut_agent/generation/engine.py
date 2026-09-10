@@ -1195,6 +1195,7 @@ def _repeated_or_variants(ir: FunctionIR, baseline: Any,
         except (KeyError, TypeError, ValueError):
             independent = False
         if independent:
+            trial.update(env)
             variants.append(trial)
     return tuple(variants) or (dict(assignment),)
 
@@ -1289,6 +1290,7 @@ def _logical_status_variants(ir: FunctionIR, baseline: Any,
             except (KeyError, TypeError, ValueError):
                 valid = False
             if valid:
+                trial.update(env)
                 variants.append(trial)
     else:
         # For the FALSE stub witness, retain the non-boundary status codes
@@ -1313,6 +1315,7 @@ def _logical_status_variants(ir: FunctionIR, baseline: Any,
             except (KeyError, TypeError, ValueError):
                 valid = False
             if valid:
+                trial.update(env)
                 variants.append(trial)
     return tuple(variants)
 

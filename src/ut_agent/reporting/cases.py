@@ -448,10 +448,10 @@ def _score_with_indexes(
     them for every rejected candidate makes an otherwise diagnostic-only pass
     disproportionately expensive.
     """
-    score = (_identity_score(generated, golden)
-             if identity_score is None else identity_score)
-    if score == -10_000:
-        return score
+    base = (_identity_score(generated, golden)
+            if identity_score is None else identity_score)
+    if base == -10_000:
+        return base
     input_matches, input_mismatches = _required_score_counts(
         generated.get("inputs", {}), golden.get("required_input_values", {}),
         generated_input_index,
@@ -460,20 +460,21 @@ def _score_with_indexes(
         generated.get("expected", {}),
         golden.get("required_expected_values", {}), generated_expected_index,
     )
-    score += min(20, input_matches + expected_matches)
-    score -= min(30, input_mismatches + expected_mismatches)
+    score = base * 10_000
+    score += (input_matches + expected_matches) * 10
+    score -= (input_mismatches + expected_mismatches)
     generated_stub = generated.get("stub", {})
     golden_stub = golden.get("stub", {})
     if generated_stub.get("columns") == golden_stub.get("columns"):
-        score += 10
+        score += 50
     elif golden_stub.get("columns"):
-        score -= 10
+        score -= 50
     generated_oracle = generated.get("oracle", {})
     golden_oracle = golden.get("oracle", {})
     if generated_oracle.get("columns") == golden_oracle.get("columns"):
-        score += 10
+        score += 50
     elif golden_oracle.get("columns"):
-        score -= 10
+        score -= 50
     return score
 
 
@@ -716,11 +717,10 @@ def match_semantic_cases(
                 if case is None:
                     continue
                 identity_score = _identity_score(case, golden_case)
-                # The remaining components (required values, stub columns,
-                # and oracle columns) can add at most 20 + 10 + 10.  A
-                # strict comparison preserves exact best-score ties, which
-                # must remain AMBIGUOUS_MATCH rather than be silently chosen.
-                if identity_score + 40 < best_score:
+                # Identity score dominates as the primary category.  The
+                # value/oracle components act as fine-grained secondary rank
+                # so true differences in required matches are not flattened.
+                if identity_score * 10_000 + 5_000 < best_score:
                     continue
                 input_index, expected_index = candidate_indexes[candidate_key]
                 score = _score_with_indexes(
