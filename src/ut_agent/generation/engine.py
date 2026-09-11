@@ -2247,6 +2247,11 @@ def _resolve_call_param_value(ir: FunctionIR,
                     except (TypeError, ValueError):
                         off = -1
                     if 0 <= off <= before:
+                        eff_origin = effect.get("origin")
+                        if (isinstance(eff_origin, dict)
+                                and eff_origin.get("kind") == "stub_return"
+                                and eff_origin.get("call_offset") == before):
+                            continue
                         if _guards_active(ir, effect.get("guards", []), env, off) is True:
                             val = effect.get("constant_value")
                             if val is not None:
@@ -2994,6 +2999,19 @@ def _scenario_intents(ir: FunctionIR, rule: Rule) -> list[TestIntent]:
     return out
 
 
+def _observable_pre_and_post_values(type_name: str | None) -> tuple[int, int]:
+    """Return distinct pre-state input and post-state return values for observable mutation."""
+    name = str(type_name or "").strip().lower()
+    signed = name.startswith("s") or "signed" in name
+    if any(k in name for k in ("u1", "s1", "uint8", "sint8", "char", "boolean", "bool")):
+        return (128, 255) if not signed else (64, 127)
+    if any(k in name for k in ("u2", "s2", "uint16", "sint16", "short")):
+        return (32768, 65535) if not signed else (16384, 32767)
+    if any(k in name for k in ("u4", "s4", "uint32", "sint32", "long", "int")):
+        return (0x80000000, 0xFFFFFFFF) if not signed else (0x40000000, 0x7FFFFFFF)
+    return 128, 255
+
+
 def _generic_inputs(ir: FunctionIR,
                     baseline: Any | None = None
                     ) -> tuple[dict[str, list[Any]], dict[str, Any]]:
@@ -3169,6 +3187,32 @@ def _generic_inputs(ir: FunctionIR,
     stub_input_columns, stub_return_columns = _semantic_call_columns(ir)
     for column in (*stub_input_columns, *stub_return_columns):
         fixed[column] = 0
+    # Observable state mutation: when a global variable is written by a stub return,
+    # supply distinct representative pre-state and return values so the mutation is observable.
+    for effect in _effect_records(ir.global_write_effects):
+        if not isinstance(effect, dict):
+            continue
+        origin = effect.get("origin")
+        if not isinstance(origin, dict) or origin.get("kind") != "stub_return":
+            continue
+        callee = str(origin.get("callee", "")).strip()
+        path = str(effect.get("path", "")).strip()
+        if not callee or not path:
+            continue
+        call = next((c for c in ir.calls if c.callee == callee), None)
+        ret_type = getattr(call, "ret_type", None) if call else None
+        pre_val, post_val = _observable_pre_and_post_values(ret_type)
+        slot = _stub_return_slot(
+            ir, callee, origin.get("call_order"), origin.get("call_offset"),
+        )
+        field = str(origin.get("field") or "").strip().lstrip(".")
+        ret_key = call_return_key(callee, slot, field or None)
+        fixed[ret_key] = post_val
+        for key in (path, global_base_key(path)):
+            fixed[key] = pre_val
+        for col in _global_input_columns(ir):
+            if _norm(col) in {_norm(path), _norm(global_base_key(path))} or _norm(col).endswith("/" + _norm(path)):
+                fixed[col] = pre_val
     return domains, fixed
 
 

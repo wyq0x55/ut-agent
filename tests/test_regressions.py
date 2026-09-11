@@ -281,4 +281,47 @@ def test_branch_target_atom_alternatives_for_and_false():
     assert [(1, False)] in alts
 
 
+def test_stub_return_assignment_preserves_observable_pre_state_argument():
+    """When a global is updated via 'g = stub(g)', its argument must resolve to pre-state, not post-state."""
+    from ut_agent.generation.engine import (
+        _generic_inputs,
+        _resolve_call_param_value,
+    )
+    from ut_agent.ir import CallSite, Effect, FunctionIR, GlobalObject, Param, TypeInfo
+
+    u8 = TypeInfo(canonical_type="unsigned char", kind="integer", bit_width=8, signed=False, min_value=0, max_value=255)
+    call = CallSite(
+        order=1, callee="calc_stub", line=10, ret_type="u1", return_used=True,
+        params=[Param(name="arg", type="u1", type_info=u8)],
+        extensions={
+            "call_capacity": 1,
+            "caller_param_origins": {
+                "0": {"kind": "global", "driver": "g_cnt"},
+            },
+        },
+    )
+    g_obj = GlobalObject(name="g_cnt", read=True, write=True)
+    write_eff = Effect(
+        name=None, path="g_cnt", source_offset=100, operator="=",
+        origin={"kind": "stub_return", "callee": "calc_stub", "call_offset": 120},
+    )
+    ir = FunctionIR(
+        name="test_fn", file="test.c", line=1, ret_type="void",
+        calls=[call],
+        global_objects=[g_obj],
+        global_write_effects=[write_eff],
+        globals_used=["g_cnt"],
+    )
+    domains, fixed = _generic_inputs(ir)
+    assert fixed.get("g_cnt") == 128
+    assert fixed.get("call:calc_stub:return:0") == 255
+
+    env = dict(fixed)
+    arg_val = _resolve_call_param_value(
+        ir, call.params[0], {"kind": "global", "driver": "g_cnt"}, env, (120, 150),
+    )
+    assert arg_val == 128
+
+
+
 
