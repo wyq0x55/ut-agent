@@ -323,5 +323,46 @@ def test_stub_return_assignment_preserves_observable_pre_state_argument():
     assert arg_val == 128
 
 
+def test_normalize_label_handles_circled_digits_and_extension_prefix():
+    """Japanese circled digits and 拡張(...) prefix must normalize to canonical branch label."""
+    from ut_agent.learning.golden import normalize_label
+
+    assert normalize_label("拡張(FALSE①)") == "FALSE"
+    assert normalize_label("拡張(FALSE②)") == "FALSE"
+    assert normalize_label("組合せ(TRUE(1))") == "TRUE"
+    assert normalize_label("FALSE①") == "FALSE"
+
+
+def test_derive_obligations_preserves_boundaries_for_global_array_element_locals():
+    """A local derived from global_array_element must retain typed status boundary points."""
+    from ut_agent.baseline import load_baseline
+    from ut_agent.generation.obligation import derive_obligations
+    from ut_agent.ir import Atom, Branch, ControlVar, Effect, FunctionIR, GlobalObject, TypeInfo
+
+    baseline = load_baseline("config/baselines/psd-rebuild/1.1.yaml")
+    u8 = TypeInfo(canonical_type="unsigned char", kind="integer", bit_width=8, signed=False, min_value=0, max_value=255)
+    b0 = Branch(
+        bid="b0", kind="if", line=1,
+        atoms=[Atom(var="flag", var_type="u1", op="==", boundary=1, boundary_name="U1G_DAT_ON", text="1 == flag", type_info=u8)],
+    )
+    cv = ControlVar(
+        name="flag", var="flag", source="local", type_info=u8, branch_ids=["b0"],
+        value_origin={"kind": "global_array_element", "base": "g_arr", "index": "idx"},
+    )
+    eff = Effect(name="flag", constant_value=0, source_offset=10, operator="=")
+    g_obj = GlobalObject(name="g_arr", read=True, write=False, array_sizes=[1])
+    ir = FunctionIR(
+        name="test_fn", file="test.c", line=1, ret_type="void",
+        branches=[b0], control_vars=[cv], global_objects=[g_obj],
+        local_value_effects=[eff], globals_used=["g_arr"],
+    )
+    obligations = derive_obligations(ir, baseline)
+    boundary_points = {o.boundary_value for o in obligations if o.kind == "boundary"}
+    # Must retain boundary points (e.g. 2, 255) rather than being filtered to only {0}
+    assert 2 in boundary_points
+    assert 255 in boundary_points
+
+
+
 
 

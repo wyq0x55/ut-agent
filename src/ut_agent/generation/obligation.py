@@ -294,8 +294,9 @@ def derive_obligations(ir: FunctionIR, baseline: TestBaseline,
                 type_info = atom.type_info
                 if type_info is None:
                     type_info = control.type_info if control else None
-                if control is not None and control.source == "stub":
-                    # Stub return codes are categorical executable values,
+                origin_kind = getattr(control.value_origin, "kind", None) if control else None
+                if control is not None and (control.source == "stub" or origin_kind in {"stub_return", "global_array_element"}):
+                    # Stub return codes and status-like results are categorical executable values,
                     # even when their ABI type is an unsigned byte.  Keep
                     # obligation derivation aligned with control_candidates.
                     points = typed_status_points(
@@ -313,15 +314,15 @@ def derive_obligations(ir: FunctionIR, baseline: TestBaseline,
                     )
                 if control is not None:
                     origin = control.value_origin
-                    if (origin is not None
-                            and origin.kind == "const_table_field"
-                            and isinstance(origin.table_values, dict)):
+                    origin_kind = origin.get("kind") if isinstance(origin, dict) else getattr(origin, "kind", None) if origin else None
+                    table_values = origin.get("table_values") if isinstance(origin, dict) else getattr(origin, "table_values", None) if origin else None
+                    if (origin_kind == "const_table_field" and isinstance(table_values, dict)):
                         # A derived local is executable only at values present
                         # in the extractor-proven table relation.  Do not turn
                         # a typed scalar boundary into a fabricated local
                         # value that the table can never produce.
                         table_domain = set()
-                        for raw_value in origin.table_values.values():
+                        for raw_value in table_values.values():
                             try:
                                 table_domain.add(int(raw_value))
                             except (TypeError, ValueError):
@@ -332,17 +333,21 @@ def derive_obligations(ir: FunctionIR, baseline: TestBaseline,
                                 if point in table_domain
                             )
                     if control.source == "local":
-                        local_domain = {
-                            effect.constant_value
-                            for effect in ir.local_value_effects
-                            if effect.name == control.name
-                            and effect.constant_value is not None
-                        }
-                        if local_domain:
-                            points = tuple(
-                                point for point in points
-                                if point in local_domain
-                            )
+                        if origin_kind not in {
+                            "global_array_element", "local_from_global",
+                            "stub_return", "stub_param",
+                        }:
+                            local_domain = {
+                                effect.constant_value
+                                for effect in ir.local_value_effects
+                                if effect.name == control.name
+                                and effect.constant_value is not None
+                            }
+                            if local_domain:
+                                points = tuple(
+                                    point for point in points
+                                    if point in local_domain
+                                )
                 points = tuple(
                     point for point in points
                     if not _boundary_conflicts_with_parent(

@@ -218,10 +218,18 @@ def ordered_semantic_csv_signature(path: Path) -> dict[str, Any]:
 def normalize_label(label: str | None) -> str:
     """Normalize presentation-only label noise without changing its meaning."""
     value = "".join(str(label or "").split())
+    circled_digits = {
+        '①': '1', '②': '2', '③': '3', '④': '4', '⑤': '5',
+        '⑥': '6', '⑦': '7', '⑧': '8', '⑨': '9', '⑩': '10',
+        '⑪': '11', '⑫': '12', '⑬': '13', '⑭': '14', '⑮': '15',
+        '⑯': '16', '⑰': '17', '⑱': '18', '⑲': '19', '⑳': '20',
+    }
+    for char, digit in circled_digits.items():
+        value = value.replace(char, f"({digit})")
     value = re.sub(r"\((\d+)\)$", "", value)
-    if value.startswith("組合せ(") and value.endswith(")"):
-        value = value[len("組合せ("):-1]
-        value = re.sub(r"\((\d+)\)$", "", value)
+    if (value.startswith("組合せ(") or value.startswith("拡張(")) and value.endswith(")"):
+        inner = value[value.find("(") + 1:-1]
+        value = re.sub(r"\((\d+)\)$", "", inner)
     return value
 
 
