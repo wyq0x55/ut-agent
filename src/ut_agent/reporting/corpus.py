@@ -7,6 +7,7 @@ Golden CSVs; it never supplies Golden data to the generator or oracle.
 from __future__ import annotations
 
 import csv
+import concurrent.futures
 import hashlib
 import json
 import os
@@ -1023,6 +1024,301 @@ def _without_paths(value: Any) -> Any:
     return value
 
 
+@dataclass(frozen=True)
+class UnitValidationResult:
+    row_number: int
+    function_report: dict[str, Any]
+    gaps: tuple[dict[str, Any], ...]
+    events: tuple[dict[str, Any], ...]
+
+
+def _process_single_unit_validation(
+    unit: Any,
+    manifest: ProjectCorpusManifest,
+    project_evidence: dict[str, Any],
+    pair_budget: int | None,
+    bytes_budget: int | None,
+    project_id: str,
+    run_id: str,
+) -> UnitValidationResult:
+    events: list[dict[str, Any]] = []
+    progress = ProgressRecorder(
+        project=project_id,
+        run_id=run_id,
+        collector=events,
+    )
+    golden_path = golden_for_unit(manifest, unit)
+    golden = None
+    golden_error = None
+    golden_file_status = "PRESENT" if golden_path is not None else "MISSING"
+    golden_inspection_status = "NOT_INSPECTED"
+    generated_error = None
+    generation_status = str(getattr(
+        unit, "generation_status", getattr(unit, "status", "UNKNOWN")
+    ))
+    with progress.stage(
+        unit.row.function, "intent_normalization",
+        {"intent_manifest": str(unit.intent_manifest)},
+    ) as timing:
+        if generation_status != "VALIDATED":
+            generated_manifest = _generation_gate_manifest(unit)
+            timing["status"] = str(generated_manifest.get("details_status", "SUMMARY_ONLY"))
+        else:
+            try:
+                generated_manifest = _read_json(
+                    Path(unit.intent_manifest).with_name(
+                        "test-intents-summary.json"
+                    )
+                )
+            except (OSError, UnicodeError, ValueError, json.JSONDecodeError) as exc:
+                generated_error = str(exc)
+                try:
+                    generated_manifest = normalize_generated_manifest(
+                        unit.intent_manifest
+                    )
+                    generated_error = None
+                except (OSError, UnicodeError, ValueError, json.JSONDecodeError) as fallback:
+                    generated_error = f"summary: {exc}; full manifest: {fallback}"
+                    generated_manifest = {
+                        "status": generation_status, "intent_count": None,
+                        "validated_intent_count": None, "obligation_kinds": None,
+                        "outcomes": None, "boundary_classes": None, "pair_count": None,
+                        "solve_statuses": None, "evaluation_count": None,
+                        "evaluation_complete_count": None, "input_keys": None,
+                        "expected_keys": None, "stub_keys": None, "issues": [],
+                    }
+            timing["metadata"].update({
+                "details_status": generated_manifest.get("details_status", "SUMMARY_ONLY"),
+                "intent_count": generated_manifest.get("intent_count"),
+                "solve_statuses": generated_manifest.get("solve_statuses"),
+            })
+    matching_budget = None
+    csv_only_intent_payload = False
+    if generation_status == "VALIDATED" and golden_path is not None:
+        try:
+            golden_row_upper_bound = _physical_csv_row_upper_bound(golden_path)
+        except OSError as exc:
+            golden_error = str(exc)
+            golden_row_upper_bound = 0
+        intent_count = generated_manifest.get("intent_count")
+        effective_pair_budget = (
+            pair_budget if pair_budget is not None else SEMANTIC_MATCH_PAIR_BUDGET
+        )
+        effective_bytes_budget = (
+            bytes_budget if bytes_budget is not None else SEMANTIC_MATCH_INTENT_BYTES_BUDGET
+        )
+        pair_upper_bound = (
+            int(intent_count) * golden_row_upper_bound
+            if isinstance(intent_count, int) else None
+        )
+        if (effective_pair_budget and pair_upper_bound is not None
+                and pair_upper_bound > effective_pair_budget):
+            matching_budget = {
+                "status": "MATCHING_BUDGET_EXCEEDED",
+                "pair_budget": effective_pair_budget,
+                "candidate_pairs_upper_bound": pair_upper_bound,
+                "generated_intent_count": intent_count,
+                "golden_physical_row_upper_bound": golden_row_upper_bound,
+                "budget_basis": "physical_csv_row_upper_bound",
+            }
+    else:
+        effective_bytes_budget = (
+            bytes_budget if bytes_budget is not None else SEMANTIC_MATCH_INTENT_BYTES_BUDGET
+        )
+    if (generation_status == "VALIDATED" and matching_budget is None
+            and effective_bytes_budget
+            and Path(unit.intent_manifest).is_file()
+            and Path(unit.intent_manifest).stat().st_size
+            > effective_bytes_budget):
+        csv_only_intent_payload = True
+        generated_manifest = dict(generated_manifest)
+        generated_manifest.update({
+            "details_status": "CSV_ONLY_INTENT_BYTES_BUDGET",
+            "intent_payload_bytes": Path(unit.intent_manifest).stat().st_size,
+            "intent_payload_bytes_budget": effective_bytes_budget,
+        })
+    with progress.stage(
+        unit.row.function, "golden_parse",
+        {"path": str(golden_path) if golden_path else None},
+    ) as timing:
+        if (generation_status == "VALIDATED" and matching_budget is None
+                and golden_path is not None and golden_error is None):
+            golden, golden_error = _safe_normalize(golden_path)
+            golden_inspection_status = "PARSED" if golden is not None else "PARSE_FAILED"
+        elif golden_path is None:
+            golden_inspection_status = "NOT_APPLICABLE_MISSING"
+            timing["status"] = "SKIPPED"
+            timing["metadata"]["reason"] = "golden_file_missing_or_ambiguous"
+        else:
+            golden_inspection_status = "NOT_INSPECTED"
+            timing["status"] = "SKIPPED"
+            timing["metadata"]["reason"] = (
+                "generation_gate" if generation_status != "VALIDATED"
+                else "matching_budget"
+            )
+        timing["metadata"].update({
+            "file_status": golden_file_status,
+            "inspection_status": golden_inspection_status,
+        })
+    if (generation_status == "VALIDATED" and matching_budget is None
+            and not csv_only_intent_payload and generated_error is None):
+        try:
+            generated_manifest = normalize_generated_manifest(
+                unit.intent_manifest
+            )
+        except (OSError, UnicodeError, ValueError, json.JSONDecodeError) as exc:
+            generated_error = str(exc)
+    actual_csv = None
+    actual_error = None
+    if (generation_status == "VALIDATED" and matching_budget is None
+            and unit.testcsv.is_file()):
+        actual_csv, actual_error = _safe_normalize(unit.testcsv)
+    generated_cases: list[dict[str, Any]] = []
+    if (generation_status == "VALIDATED" and matching_budget is None
+            and not csv_only_intent_payload and generated_error is None):
+        with progress.stage(
+            unit.row.function, "intent_normalization_full",
+            {"intent_manifest": str(unit.intent_manifest)},
+        ) as timing:
+            try:
+                generated_cases = normalize_generated_cases(unit.intent_manifest)
+                timing["metadata"]["case_count"] = len(generated_cases)
+            except (OSError, UnicodeError, ValueError, json.JSONDecodeError) as exc:
+                generated_error = str(exc)
+    else:
+        with progress.stage(
+            unit.row.function, "intent_normalization_full",
+            {"intent_manifest": str(unit.intent_manifest)},
+        ) as timing:
+            timing["status"] = "SKIPPED"
+            timing["metadata"]["reason"] = (
+                "generation_gate" if generation_status != "VALIDATED"
+                else "matching_budget_or_summary_error"
+            )
+    golden_cases: list[dict[str, Any]] = []
+    if (generation_status == "VALIDATED" and matching_budget is None
+            and golden is not None):
+        golden_cases = normalize_golden_cases(
+            golden, source_path=golden_path,
+        )
+    generated_csv_cases: list[dict[str, Any]] | None = None
+    if (generation_status == "VALIDATED" and matching_budget is None
+            and actual_csv is not None):
+        generated_csv_cases = normalize_golden_cases(
+            actual_csv, source_path=unit.testcsv,
+        )
+    with progress.stage(
+        unit.row.function, "case_matching",
+        {"golden_path": str(golden_path) if golden_path else None},
+    ) as timing:
+        comparison = compare_function_semantics(
+            function=unit.row.function,
+            generated_manifest=generated_manifest,
+            generated_csv=actual_csv,
+            golden=golden,
+            actual_csv_path=unit.testcsv,
+            golden_csv_path=golden_path,
+            generated_cases=generated_cases,
+            generated_csv_cases=generated_csv_cases,
+            golden_cases=golden_cases,
+            matching_budget=matching_budget,
+            project_evidence=project_evidence,
+        )
+        matching = comparison.get("case_matching") or {}
+        if matching.get("status") in {
+                "SKIPPED_GENERATION_GATE", "NOT_COMPARED", "MATCHING_BUDGET_EXCEEDED"}:
+            timing["status"] = "SKIPPED"
+            timing["metadata"]["reason"] = matching.get("status")
+        timing["metadata"].update({
+            "equivalence": comparison.get("equivalence"),
+            "candidate_pairs": matching.get("candidate_pairs_upper_bound"),
+            "matched_case_count": matching.get("matched_case_count"),
+        })
+    if csv_only_intent_payload and comparison.get("case_matching") is None:
+        comparison["case_matching"] = {
+            "status": "NOT_INSPECTED_CSV_ONLY",
+            "reason": "full intent payload exceeded the declared byte budget",
+        }
+    if generated_error:
+        comparison["gaps"].insert(0, _gap(
+            function=unit.row.function, category="SUITE_GAP",
+            owner_layer=_CATEGORY_OWNERS["SUITE_GAP"],
+            dimension="generation_manifest",
+            detail=f"生成 intent manifest 无法解析: {generated_error}",
+            evidence={"error": generated_error},
+        ))
+    if golden_error:
+        comparison["gaps"] = [_gap(
+            function=unit.row.function, category="GOLDEN_ERROR",
+            owner_layer=_CATEGORY_OWNERS["GOLDEN_ERROR"],
+            dimension="golden_file",
+            detail=f"Golden 解析失败: {golden_error}",
+            evidence={"golden_path": str(golden_path)},
+        )]
+        comparison["equivalence"] = "GOLDEN_INVALID"
+    if actual_error and generated_manifest.get("status") == "VALIDATED":
+        comparison["gaps"].append(_gap(
+            function=unit.row.function, category="PROJECTION_GAP",
+            owner_layer=_CATEGORY_OWNERS["PROJECTION_GAP"],
+            dimension="projection",
+            detail=f"生成 TestCsv 解析失败: {actual_error}",
+            evidence={"actual_path": str(unit.testcsv)},
+        ))
+    golden_status = (
+        "VALID" if golden is not None else
+        "GOLDEN_INVALID" if golden_error else
+        "PRESENT_NOT_INSPECTED" if golden_path is not None else
+        "GOLDEN_MISSING"
+    )
+    target_rel_str = (
+        unit.row.target_rel.as_posix()
+        if hasattr(unit.row.target_rel, "as_posix")
+        else str(unit.row.target_rel).replace("\\", "/")
+    )
+    report_item = {
+        "row": unit.row.row_number,
+        "function": unit.row.function,
+        "source": str(unit.row.source_path),
+        "target_rel": target_rel_str,
+        "generated": {
+            "status": unit.status,
+            "testcsv": str(unit.testcsv),
+            "intent_manifest": str(unit.intent_manifest),
+            "semantics": generated_manifest,
+            "csv_semantics": actual_csv,
+        },
+        "golden": {
+            "status": golden_status,
+            "availability": golden_file_status,
+            "status_code": golden_status,
+            "file_status": golden_file_status,
+            "inspection_status": golden_inspection_status,
+            "path": str(golden_path) if golden_path else None,
+            "semantics": golden,
+            "error": golden_error,
+        },
+        "comparison": comparison,
+    }
+    return UnitValidationResult(
+        row_number=int(getattr(unit.row, "row_number", 0)),
+        function_report=report_item,
+        gaps=tuple(comparison["gaps"]),
+        events=tuple(events),
+    )
+
+
+def _resolve_validation_workers(jobs: int | None, task_count: int) -> int:
+    if task_count <= 1:
+        return 1
+    if jobs is not None:
+        if jobs <= 0:
+            count = os.cpu_count() or 4
+            return max(1, min(count, task_count))
+        return max(1, min(jobs, task_count))
+    count = os.cpu_count() or 4
+    return max(1, min(count, task_count))
+
+
 def build_corpus_validation_report(
     manifest: ProjectCorpusManifest,
     context: Any,
@@ -1034,6 +1330,7 @@ def build_corpus_validation_report(
     blocked: tuple[dict[str, Any], ...] = (),
     pair_budget: int | None = None,
     bytes_budget: int | None = None,
+    jobs: int | None = None,
 ) -> dict[str, Any]:
     """Build a machine-readable all-functions generation/compare report."""
     progress = ProgressRecorder(
@@ -1107,257 +1404,51 @@ def build_corpus_validation_report(
                 "case_matching": {"status": "NOT_COMPARED"}, "gaps": [blocked_gap],
             },
         })
-    for unit in sorted(units, key=lambda item: (
-            int(getattr(item.row, "row_number", 0)), str(item.row.function))):
-        processed_rows.add(int(getattr(unit.row, "row_number", 0)))
-        golden_path = golden_for_unit(manifest, unit)
-        golden = None
-        golden_error = None
-        golden_file_status = "PRESENT" if golden_path is not None else "MISSING"
-        golden_inspection_status = "NOT_INSPECTED"
-        generated_error = None
-        generation_status = str(getattr(
-            unit, "generation_status", getattr(unit, "status", "UNKNOWN")
-        ))
-        with progress.stage(
-            unit.row.function, "intent_normalization",
-            {"intent_manifest": str(unit.intent_manifest)},
-        ) as timing:
-            if generation_status != "VALIDATED":
-                generated_manifest = _generation_gate_manifest(unit)
-                timing["status"] = str(generated_manifest.get("details_status", "SUMMARY_ONLY"))
-            else:
-                try:
-                    generated_manifest = _read_json(
-                        Path(unit.intent_manifest).with_name(
-                            "test-intents-summary.json"
-                        )
-                    )
-                except (OSError, UnicodeError, ValueError, json.JSONDecodeError) as exc:
-                    generated_error = str(exc)
-                    try:
-                        generated_manifest = normalize_generated_manifest(
-                            unit.intent_manifest
-                        )
-                        generated_error = None
-                    except (OSError, UnicodeError, ValueError, json.JSONDecodeError) as fallback:
-                        generated_error = f"summary: {exc}; full manifest: {fallback}"
-                        generated_manifest = {
-                            "status": generation_status, "intent_count": None,
-                            "validated_intent_count": None, "obligation_kinds": None,
-                            "outcomes": None, "boundary_classes": None, "pair_count": None,
-                            "solve_statuses": None, "evaluation_count": None,
-                            "evaluation_complete_count": None, "input_keys": None,
-                            "expected_keys": None, "stub_keys": None, "issues": [],
-                        }
-                timing["metadata"].update({
-                    "details_status": generated_manifest.get("details_status", "SUMMARY_ONLY"),
-                    "intent_count": generated_manifest.get("intent_count"),
-                    "solve_statuses": generated_manifest.get("solve_statuses"),
-                })
-        matching_budget = None
-        csv_only_intent_payload = False
-        if generation_status == "VALIDATED" and golden_path is not None:
-            try:
-                golden_row_upper_bound = _physical_csv_row_upper_bound(golden_path)
-            except OSError as exc:
-                golden_error = str(exc)
-                golden_row_upper_bound = 0
-            intent_count = generated_manifest.get("intent_count")
-            effective_pair_budget = (
-                pair_budget if pair_budget is not None else SEMANTIC_MATCH_PAIR_BUDGET
-            )
-            effective_bytes_budget = (
-                bytes_budget if bytes_budget is not None else SEMANTIC_MATCH_INTENT_BYTES_BUDGET
-            )
-            pair_upper_bound = (
-                int(intent_count) * golden_row_upper_bound
-                if isinstance(intent_count, int) else None
-            )
-            if (effective_pair_budget and pair_upper_bound is not None
-                    and pair_upper_bound > effective_pair_budget):
-                matching_budget = {
-                    "status": "MATCHING_BUDGET_EXCEEDED",
-                    "pair_budget": effective_pair_budget,
-                    "candidate_pairs_upper_bound": pair_upper_bound,
-                    "generated_intent_count": intent_count,
-                    "golden_physical_row_upper_bound": golden_row_upper_bound,
-                    "budget_basis": "physical_csv_row_upper_bound",
-                }
-        else:
-            effective_bytes_budget = (
-                bytes_budget if bytes_budget is not None else SEMANTIC_MATCH_INTENT_BYTES_BUDGET
-            )
-        if (generation_status == "VALIDATED" and matching_budget is None
-                and effective_bytes_budget
-                and Path(unit.intent_manifest).is_file()
-                and Path(unit.intent_manifest).stat().st_size
-                > effective_bytes_budget):
-            csv_only_intent_payload = True
-            generated_manifest = dict(generated_manifest)
-            generated_manifest.update({
-                "details_status": "CSV_ONLY_INTENT_BYTES_BUDGET",
-                "intent_payload_bytes": Path(unit.intent_manifest).stat().st_size,
-                "intent_payload_bytes_budget": effective_bytes_budget,
-            })
-        with progress.stage(
-            unit.row.function, "golden_parse",
-            {"path": str(golden_path) if golden_path else None},
-        ) as timing:
-            if (generation_status == "VALIDATED" and matching_budget is None
-                    and golden_path is not None and golden_error is None):
-                golden, golden_error = _safe_normalize(golden_path)
-                golden_inspection_status = "PARSED" if golden is not None else "PARSE_FAILED"
-            elif golden_path is None:
-                golden_inspection_status = "NOT_APPLICABLE_MISSING"
-                timing["status"] = "SKIPPED"
-                timing["metadata"]["reason"] = "golden_file_missing_or_ambiguous"
-            else:
-                golden_inspection_status = "NOT_INSPECTED"
-                timing["status"] = "SKIPPED"
-                timing["metadata"]["reason"] = (
-                    "generation_gate" if generation_status != "VALIDATED"
-                    else "matching_budget"
+    sorted_units = sorted(units, key=lambda item: (
+        int(getattr(item.row, "row_number", 0)), str(item.row.function)
+    ))
+    workers = _resolve_validation_workers(jobs, len(sorted_units))
+    validation_results: list[UnitValidationResult] = []
+
+    if workers == 1:
+        for unit in sorted_units:
+            validation_results.append(
+                _process_single_unit_validation(
+                    unit=unit,
+                    manifest=manifest,
+                    project_evidence=project_evidence,
+                    pair_budget=pair_budget,
+                    bytes_budget=bytes_budget,
+                    project_id=manifest.project_id,
+                    run_id=Path(output_root).name,
                 )
-            timing["metadata"].update({
-                "file_status": golden_file_status,
-                "inspection_status": golden_inspection_status,
-            })
-        if (generation_status == "VALIDATED" and matching_budget is None
-                and not csv_only_intent_payload and generated_error is None):
-            try:
-                generated_manifest = normalize_generated_manifest(
-                    unit.intent_manifest
-                )
-            except (OSError, UnicodeError, ValueError, json.JSONDecodeError) as exc:
-                generated_error = str(exc)
-        actual_csv = None
-        actual_error = None
-        if (generation_status == "VALIDATED" and matching_budget is None
-                and unit.testcsv.is_file()):
-            actual_csv, actual_error = _safe_normalize(unit.testcsv)
-        generated_cases: list[dict[str, Any]] = []
-        if (generation_status == "VALIDATED" and matching_budget is None
-                and not csv_only_intent_payload and generated_error is None):
-            with progress.stage(
-                unit.row.function, "intent_normalization_full",
-                {"intent_manifest": str(unit.intent_manifest)},
-            ) as timing:
-                try:
-                    generated_cases = normalize_generated_cases(unit.intent_manifest)
-                    timing["metadata"]["case_count"] = len(generated_cases)
-                except (OSError, UnicodeError, ValueError, json.JSONDecodeError) as exc:
-                    generated_error = str(exc)
-        else:
-            with progress.stage(
-                unit.row.function, "intent_normalization_full",
-                {"intent_manifest": str(unit.intent_manifest)},
-            ) as timing:
-                timing["status"] = "SKIPPED"
-                timing["metadata"]["reason"] = (
-                    "generation_gate" if generation_status != "VALIDATED"
-                    else "matching_budget_or_summary_error"
-                )
-        golden_cases: list[dict[str, Any]] = []
-        if (generation_status == "VALIDATED" and matching_budget is None
-                and golden is not None):
-            golden_cases = normalize_golden_cases(
-                golden, source_path=golden_path,
             )
-        generated_csv_cases: list[dict[str, Any]] | None = None
-        if (generation_status == "VALIDATED" and matching_budget is None
-                and actual_csv is not None):
-            generated_csv_cases = normalize_golden_cases(
-                actual_csv, source_path=unit.testcsv,
+    else:
+        tasks = [
+            (
+                unit,
+                manifest,
+                project_evidence,
+                pair_budget,
+                bytes_budget,
+                manifest.project_id,
+                Path(output_root).name,
             )
-        with progress.stage(
-            unit.row.function, "case_matching",
-            {"golden_path": str(golden_path) if golden_path else None},
-        ) as timing:
-            comparison = compare_function_semantics(
-                function=unit.row.function,
-                generated_manifest=generated_manifest,
-                generated_csv=actual_csv,
-                golden=golden,
-                actual_csv_path=unit.testcsv,
-                golden_csv_path=golden_path,
-                generated_cases=generated_cases,
-                generated_csv_cases=generated_csv_cases,
-                golden_cases=golden_cases,
-                matching_budget=matching_budget,
-                project_evidence=project_evidence,
-            )
-            matching = comparison.get("case_matching") or {}
-            if matching.get("status") in {
-                    "SKIPPED_GENERATION_GATE", "NOT_COMPARED", "MATCHING_BUDGET_EXCEEDED"}:
-                timing["status"] = "SKIPPED"
-                timing["metadata"]["reason"] = matching.get("status")
-            timing["metadata"].update({
-                "equivalence": comparison.get("equivalence"),
-                "candidate_pairs": matching.get("candidate_pairs_upper_bound"),
-                "matched_case_count": matching.get("matched_case_count"),
-            })
-        if csv_only_intent_payload and comparison.get("case_matching") is None:
-            comparison["case_matching"] = {
-                "status": "NOT_INSPECTED_CSV_ONLY",
-                "reason": "full intent payload exceeded the declared byte budget",
-            }
-        if generated_error:
-            comparison["gaps"].insert(0, _gap(
-                function=unit.row.function, category="SUITE_GAP",
-                owner_layer=_CATEGORY_OWNERS["SUITE_GAP"],
-                dimension="generation_manifest",
-                detail=f"生成 intent manifest 无法解析: {generated_error}",
-                evidence={"error": generated_error},
-            ))
-        if golden_error:
-            comparison["gaps"] = [_gap(
-                function=unit.row.function, category="GOLDEN_ERROR",
-                owner_layer=_CATEGORY_OWNERS["GOLDEN_ERROR"],
-                dimension="golden_file",
-                detail=f"Golden 解析失败: {golden_error}",
-                evidence={"golden_path": str(golden_path)},
-            )]
-            comparison["equivalence"] = "GOLDEN_INVALID"
-        if actual_error and generated_manifest.get("status") == "VALIDATED":
-            comparison["gaps"].append(_gap(
-                function=unit.row.function, category="PROJECTION_GAP",
-                owner_layer=_CATEGORY_OWNERS["PROJECTION_GAP"],
-                dimension="projection",
-                detail=f"生成 TestCsv 解析失败: {actual_error}",
-                evidence={"actual_path": str(unit.testcsv)},
-            ))
-        golden_status = (
-            "VALID" if golden is not None else
-            "GOLDEN_INVALID" if golden_error else
-            "PRESENT_NOT_INSPECTED" if golden_path is not None else
-            "GOLDEN_MISSING"
-        )
-        all_gaps.extend(comparison["gaps"])
-        function_reports.append({
-            "row": unit.row.row_number,
-            "function": unit.row.function,
-            "source": str(unit.row.source_path),
-            "target_rel": unit.row.target_rel.as_posix(),
-            "generated": {
-                "status": unit.status,
-                "testcsv": str(unit.testcsv),
-                "intent_manifest": str(unit.intent_manifest),
-                "semantics": generated_manifest,
-                "csv_semantics": actual_csv,
-            },
-            "golden": {
-                "status": golden_status,
-                "availability": golden_file_status,
-                "status_code": golden_status,
-                "file_status": golden_file_status,
-                "inspection_status": golden_inspection_status,
-                "path": str(golden_path) if golden_path else None,
-                "semantics": golden,
-                "error": golden_error,
-            },
-            "comparison": comparison,
-        })
+            for unit in sorted_units
+        ]
+        with concurrent.futures.ProcessPoolExecutor(max_workers=workers) as executor:
+            futures = [executor.submit(_process_single_unit_validation, *task) for task in tasks]
+            for future in concurrent.futures.as_completed(futures):
+                validation_results.append(future.result())
+
+    # 确定性保证：严格按 row_number 升序排序
+    validation_results.sort(key=lambda item: item.row_number)
+
+    for item in validation_results:
+        processed_rows.add(item.row_number)
+        progress.record_events(item.events)
+        all_gaps.extend(item.gaps)
+        function_reports.append(item.function_report)
 
     extraction_report_data: dict[str, Any] = {}
     extraction_report = Path(output_root) / "index-generation-report.json"

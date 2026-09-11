@@ -367,7 +367,16 @@ def _global_output_values(ir: FunctionIR, selected: dict[str, Any]) -> dict[str,
             # array element selected by the loop index.
             targets: list[tuple[str, dict[str, Any]]] = [(column, env)]
             path_parts = _split_access_path(str(effect.get("path", "")))
-            if path_parts and path_parts[1]:
+            open_bracket = column.find("[")
+            close_bracket = column.find("]", open_bracket)
+            has_concrete_index = False
+            if open_bracket != -1 and close_bracket != -1:
+                try:
+                    int(column[open_bracket + 1:close_bracket], 0)
+                    has_concrete_index = True
+                except ValueError:
+                    has_concrete_index = False
+            if not has_concrete_index and path_parts and path_parts[1]:
                 index_expression = path_parts[1][0]
                 try:
                     index_value = int(index_expression, 0)
@@ -388,8 +397,6 @@ def _global_output_values(ir: FunctionIR, selected: dict[str, Any]) -> dict[str,
                             limit = 0
                         if limit:
                             targets = []
-                            open_bracket = column.find("[")
-                            close_bracket = column.find("]", open_bracket)
                             for index in range(limit):
                                 target = (
                                     column[:open_bracket + 1]

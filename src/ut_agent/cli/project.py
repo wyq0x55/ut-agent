@@ -58,6 +58,7 @@ def run_index(args) -> int:
         extractor_timeout=args.extract_timeout,
         check_golden=args.check_golden,
         project_context=project_context,
+        jobs=getattr(args, "jobs", None),
     )
     statuses: dict[str, int] = {}
     for unit in units:
@@ -154,6 +155,7 @@ def run_validate_corpus(args) -> int:
                 extractor_timeout=args.extract_timeout,
                 check_golden=False,
                 project_context=context,
+                jobs=getattr(args, "jobs", None),
             )
     report = build_corpus_validation_report(
         corpus_manifest, context, units,
@@ -163,6 +165,7 @@ def run_validate_corpus(args) -> int:
         blocked=blocked,
         pair_budget=getattr(args, "pair_budget", None),
         bytes_budget=getattr(args, "bytes_budget", None),
+        jobs=getattr(args, "jobs", None),
     )
     report_path = write_corpus_validation_report(
         report, output_root / "corpus-validation-report.json"

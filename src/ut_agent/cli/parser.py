@@ -65,6 +65,10 @@ def build_parser() -> argparse.ArgumentParser:
     index.add_argument("-D", "--define", action="append", default=[], metavar="NAME=VALUE")
     index.add_argument("--rules")
     index.add_argument("--clang-extractor", default=None)
+    index.add_argument(
+        "-j", "--jobs", type=int, default=None,
+        help="并发 worker 进程数 (默认自动检测 CPU 核心数，1 为单进程串行)",
+    )
 
     corpus = sub.add_parser(
         "validate-corpus",
@@ -82,6 +86,10 @@ def build_parser() -> argparse.ArgumentParser:
     corpus.add_argument("-D", "--define", action="append", default=[], metavar="NAME=VALUE")
     corpus.add_argument("--rules")
     corpus.add_argument("--clang-extractor", default=None)
+    corpus.add_argument(
+        "-j", "--jobs", type=int, default=None,
+        help="并发 worker 进程数 (默认自动检测 CPU 核心数，1 为单进程串行)",
+    )
     corpus.add_argument("--pair-budget", type=int, default=None, help="语义匹配对上限 (默认 4096，0 为无上限)")
     corpus.add_argument("--bytes-budget", type=int, default=None, help="intent 载荷字节预算 (默认 1MB，0 为无上限)")
 

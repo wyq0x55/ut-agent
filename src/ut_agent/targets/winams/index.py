@@ -7,13 +7,17 @@ TestCsv is read only by the optional comment comparison step.
 from __future__ import annotations
 
 import csv
+import concurrent.futures
 import hashlib
 import json
+import os
 import re
 from collections import Counter
 from dataclasses import dataclass
 from pathlib import Path
-from typing import TYPE_CHECKING, Sequence
+from typing import Any, TYPE_CHECKING, Sequence
+
+from ut_agent.ir import FunctionIR
 
 from ut_agent.toolchain import (
     ClangExtractor,
@@ -56,6 +60,201 @@ class GeneratedIndexUnit:
     intent_manifest: Path
     status: str
     error: str | None = None
+
+
+@dataclass(frozen=True)
+class TargetExecutionResult:
+    unit: GeneratedIndexUnit
+    comparison: dict[str, object] | None
+    events: tuple[dict[str, Any], ...]
+
+
+def _generate_single_target(
+    row: IndexRow,
+    ir: FunctionIR,
+    output_root: Path,
+    project_context: ResolvedProjectContext | None,
+    rule_pack: Any | None,
+    call_max: int,
+    check_golden: bool,
+    reference_base: Path,
+    project_id: str,
+    run_id: str,
+) -> TargetExecutionResult:
+    """Generate one indexed function and emit its WinAMS artifacts."""
+    events: list[dict[str, Any]] = []
+    progress = ProgressRecorder(
+        project=project_id,
+        run_id=run_id,
+        collector=events,
+    )
+    output_dir = output_root / row.target_rel
+    testcsv = output_dir / "TestCsv" / f"{row.function}.csv"
+    stub = output_dir / "AMSTB_SrcFile.c"
+    ir_json = output_dir / "function-ir.json"
+    intent_manifest = output_dir / "test-intents.json"
+    intent_summary = output_dir / "test-intents-summary.json"
+    generation_status = "FAILED"
+    generation_document: dict[str, object] | None = None
+    csv_text = ""
+    csv_intent_count: int | None = None
+    error: str | None = None
+    try:
+        with progress.stage(
+            row.function,
+            "single_function_generation",
+            {"row": row.row_number, "source": str(row.source_path)},
+        ) as timing:
+            if project_context is not None:
+                suite = generate_suite(ir, project_context)
+                generation_status = suite.status
+                generated_intents = suite.intents
+                validated_intents = suite.validated_intents
+                issues = suite.issues
+            else:
+                generation = generate_intents(ir, rule_pack)
+                generation_status = generation.status
+                generated_intents = generation.intents
+                validated_intents = generation.validated_intents
+                issues = generation.issues
+            csv_intent_count = len(validated_intents)
+            timing["status"] = generation_status
+            timing["metadata"].update({
+                "obligation_count": len(generated_intents),
+                "intent_count": len(generated_intents),
+                "validated_intent_count": csv_intent_count,
+                "issues": list(issues),
+            })
+        with progress.stage(
+            row.function, "suite_conversion", {"row": row.row_number}
+        ) as timing:
+            generation_document = (
+                suite.to_dict() if project_context is not None
+                else generation.to_dict()
+            )
+            timing["metadata"].update({
+                "intent_count": len(generation_document.get("intents", [])),
+                "solve_count": len(generation_document.get("solve_results", [])),
+                "evaluation_count": len(generation_document.get("evaluations", [])),
+            })
+        generation_document.update({
+            "csv_written": True,
+            "csv_kind": (
+                "validated" if generation_status == "VALIDATED"
+                else "partial_candidate"
+            ),
+            "csv_intent_count": csv_intent_count,
+        })
+        with progress.stage(
+            row.function, "csv_projection", {"row": row.row_number}
+        ) as timing:
+            if project_context is not None:
+                csv_text = csv_render.render_suite_csv(
+                    ir, suite,
+                    source_label=f"{row.source_name}/{row.function}",
+                    title=f"{row.function} 単体テスト",
+                )
+            else:
+                csv_text = csv_render.render_intents_csv(
+                    ir,
+                    generation,
+                    source_label=f"{row.source_name}/{row.function}",
+                    title=f"{row.function} 単体テスト",
+                )
+            timing["metadata"].update({
+                "csv_row_count": csv_text.count("\n"),
+                "csv_char_count": len(csv_text),
+            })
+        with progress.stage(
+            row.function, "artifact_serialization_write", {"row": row.row_number}
+        ) as timing:
+            stub.parent.mkdir(parents=True, exist_ok=True)
+            _write_cp932(testcsv, csv_text)
+            stub.write_text(
+                stub_generate.render_stub_c(
+                    ir, call_max, extra_includes=_direct_includes(row.source_path)
+                ),
+                encoding="utf-8",
+                newline="\n",
+            )
+            ir_json.write_text(
+                json.dumps(ir.to_dict(), ensure_ascii=False, indent=2) + "\n",
+                encoding="utf-8",
+                newline="\n",
+            )
+            intent_manifest.write_text(
+                json.dumps(generation_document, ensure_ascii=False, indent=2) + "\n",
+                encoding="utf-8",
+                newline="\n",
+            )
+            artifact_identity = {
+                "testcsv": hashlib.sha256(testcsv.read_bytes()).hexdigest(),
+                "stub": hashlib.sha256(stub.read_bytes()).hexdigest(),
+                "function_ir": hashlib.sha256(ir_json.read_bytes()).hexdigest(),
+                "intent_manifest": hashlib.sha256(intent_manifest.read_bytes()).hexdigest(),
+            }
+            summary = _intent_summary(generation_document)
+            summary["artifact_identity"] = artifact_identity
+            intent_summary.write_text(
+                json.dumps(summary, ensure_ascii=False, indent=2) + "\n",
+                encoding="utf-8",
+                newline="\n",
+            )
+            define_var = output_dir / "DefineVar.dat"
+            _write_cp932(define_var, render_define_var(entries_from_ir(ir)))
+            (output_dir / "WinAMS.INI").write_text(
+                render_winams_ini(define_var), encoding="utf-8", newline="\n"
+            )
+            timing["metadata"].update({
+                "artifact_bytes": {
+                    "testcsv": testcsv.stat().st_size,
+                    "function_ir": ir_json.stat().st_size,
+                    "intent_manifest": intent_manifest.stat().st_size,
+                    "intent_summary": intent_summary.stat().st_size,
+                },
+            })
+    except Exception as exc:
+        error = f"{type(exc).__name__}: {exc}"
+    unit = GeneratedIndexUnit(
+        row=row,
+        output_dir=output_dir,
+        testcsv=testcsv,
+        stub=stub,
+        ir_json=ir_json,
+        intent_manifest=intent_manifest,
+        status=generation_status,
+        error=error,
+    )
+    comparison = None
+    if check_golden:
+        expected = (
+            reference_base / row.target_base_rel / row.target_rel
+            / "TestCsv" / f"{row.function}.csv"
+        )
+        comparison = compare_comment_rows(testcsv, expected)
+        comparison.update({
+            "row": row.row_number,
+            "function": row.function,
+            "actual_path": str(testcsv),
+            "expected_path": str(expected),
+        })
+    return TargetExecutionResult(
+        unit=unit,
+        comparison=comparison,
+        events=tuple(events),
+    )
+
+
+def _resolve_workers(jobs: int | None, task_count: int) -> int:
+    if task_count <= 1:
+        return 1
+    if jobs is not None:
+        if jobs <= 0:
+            count = os.cpu_count() or 4
+            return max(1, min(count, task_count))
+        return max(1, min(jobs, task_count))
+    count = os.cpu_count() or 4
+    return max(1, min(count, task_count))
 
 
 def _intent_summary(document: dict[str, object]) -> dict[str, object]:
@@ -333,6 +532,7 @@ def generate_project_from_index(
     extractor_timeout: float = 600.0,
     check_golden: bool = False,
     project_context: ResolvedProjectContext | None = None,
+    jobs: int | None = None,
 ) -> tuple[GeneratedIndexUnit, ...]:
     """Generate every indexed target after one standalone C++ invocation."""
     index_csv = Path(index_csv).resolve()
@@ -400,162 +600,59 @@ def generate_project_from_index(
             )
         return ()
     rule_pack = load_rule_pack(Path(rules_path).resolve() if rules_path else None)
-    units: list[GeneratedIndexUnit] = []
-    comparisons: list[dict[str, object]] = []
     reference_base = Path(reference_root).resolve() if reference_root else index_csv.parent.parent
 
-    for row in rows:
-        ir = extracted[(row.source_path, row.function)]
-        output_dir = output_root / row.target_rel
-        testcsv = output_dir / "TestCsv" / f"{row.function}.csv"
-        stub = output_dir / "AMSTB_SrcFile.c"
-        ir_json = output_dir / "function-ir.json"
-        intent_manifest = output_dir / "test-intents.json"
-        intent_summary = output_dir / "test-intents-summary.json"
-        generation_status = "FAILED"
-        generation_document: dict[str, object] | None = None
-        csv_text = ""
-        csv_intent_count: int | None = None
-        error: str | None = None
-        try:
-            with progress.stage(
-                row.function,
-                "single_function_generation",
-                {"row": row.row_number, "source": str(row.source_path)},
-            ) as timing:
-                if project_context is not None:
-                    suite = generate_suite(ir, project_context)
-                    generation_status = suite.status
-                    generated_intents = suite.intents
-                    validated_intents = suite.validated_intents
-                    issues = suite.issues
-                else:
-                    generation = generate_intents(ir, rule_pack)
-                    generation_status = generation.status
-                    generated_intents = generation.intents
-                    validated_intents = generation.validated_intents
-                    issues = generation.issues
-                csv_intent_count = len(validated_intents)
-                timing["status"] = generation_status
-                timing["metadata"].update({
-                    "obligation_count": len(generated_intents),
-                    "intent_count": len(generated_intents),
-                    "validated_intent_count": csv_intent_count,
-                    "issues": list(issues),
-                })
-            with progress.stage(
-                row.function, "suite_conversion", {"row": row.row_number}
-            ) as timing:
-                generation_document = (
-                    suite.to_dict() if project_context is not None
-                    else generation.to_dict()
+    workers = _resolve_workers(jobs, len(rows))
+    results: list[TargetExecutionResult] = []
+
+    if workers == 1:
+        for row in rows:
+            ir = extracted[(row.source_path, row.function)]
+            results.append(
+                _generate_single_target(
+                    row=row,
+                    ir=ir,
+                    output_root=output_root,
+                    project_context=project_context,
+                    rule_pack=rule_pack,
+                    call_max=call_max,
+                    check_golden=check_golden,
+                    reference_base=reference_base,
+                    project_id=project_id,
+                    run_id=output_root.name,
                 )
-                timing["metadata"].update({
-                    "intent_count": len(generation_document.get("intents", [])),
-                    "solve_count": len(generation_document.get("solve_results", [])),
-                    "evaluation_count": len(generation_document.get("evaluations", [])),
-                })
-            generation_document.update({
-                "csv_written": True,
-                "csv_kind": (
-                    "validated" if generation_status == "VALIDATED"
-                    else "partial_candidate"
-                ),
-                "csv_intent_count": csv_intent_count,
-            })
-            with progress.stage(
-                row.function, "csv_projection", {"row": row.row_number}
-            ) as timing:
-                if project_context is not None:
-                    csv_text = csv_render.render_suite_csv(
-                        ir, suite,
-                        source_label=f"{row.source_name}/{row.function}",
-                        title=f"{row.function} 単体テスト",
-                    )
-                else:
-                    csv_text = csv_render.render_intents_csv(
-                        ir,
-                        generation,
-                        source_label=f"{row.source_name}/{row.function}",
-                        title=f"{row.function} 単体テスト",
-                    )
-                timing["metadata"].update({
-                    "csv_row_count": csv_text.count("\n"),
-                    "csv_char_count": len(csv_text),
-                })
-            with progress.stage(
-                row.function, "artifact_serialization_write", {"row": row.row_number}
-            ) as timing:
-                stub.parent.mkdir(parents=True, exist_ok=True)
-                _write_cp932(testcsv, csv_text)
-                stub.write_text(
-                    stub_generate.render_stub_c(
-                        ir, call_max, extra_includes=_direct_includes(row.source_path)
-                    ),
-                    encoding="utf-8",
-                    newline="\n",
-                )
-                ir_json.write_text(
-                    json.dumps(ir.to_dict(), ensure_ascii=False, indent=2) + "\n",
-                    encoding="utf-8",
-                    newline="\n",
-                )
-                intent_manifest.write_text(
-                    json.dumps(generation_document, ensure_ascii=False, indent=2) + "\n",
-                    encoding="utf-8",
-                    newline="\n",
-                )
-                artifact_identity = {
-                    "testcsv": hashlib.sha256(testcsv.read_bytes()).hexdigest(),
-                    "stub": hashlib.sha256(stub.read_bytes()).hexdigest(),
-                    "function_ir": hashlib.sha256(ir_json.read_bytes()).hexdigest(),
-                    "intent_manifest": hashlib.sha256(intent_manifest.read_bytes()).hexdigest(),
-                }
-                summary = _intent_summary(generation_document)
-                summary["artifact_identity"] = artifact_identity
-                intent_summary.write_text(
-                    json.dumps(summary, ensure_ascii=False, indent=2) + "\n",
-                    encoding="utf-8",
-                    newline="\n",
-                )
-                define_var = output_dir / "DefineVar.dat"
-                _write_cp932(define_var, render_define_var(entries_from_ir(ir)))
-                (output_dir / "WinAMS.INI").write_text(
-                    render_winams_ini(define_var), encoding="utf-8", newline="\n"
-                )
-                timing["metadata"].update({
-                    "artifact_bytes": {
-                        "testcsv": testcsv.stat().st_size,
-                        "function_ir": ir_json.stat().st_size,
-                        "intent_manifest": intent_manifest.stat().st_size,
-                        "intent_summary": intent_summary.stat().st_size,
-                    },
-                })
-        except Exception as exc:
-            error = f"{type(exc).__name__}: {exc}"
-        units.append(GeneratedIndexUnit(
-            row=row,
-            output_dir=output_dir,
-            testcsv=testcsv,
-            stub=stub,
-            ir_json=ir_json,
-            intent_manifest=intent_manifest,
-            status=generation_status,
-            error=error,
-        ))
-        if check_golden:
-            expected = (
-                reference_base / row.target_base_rel / row.target_rel
-                / "TestCsv" / f"{row.function}.csv"
             )
-            item = compare_comment_rows(testcsv, expected)
-            item.update({
-                "row": row.row_number,
-                "function": row.function,
-                "actual_path": str(testcsv),
-                "expected_path": str(expected),
-            })
-            comparisons.append(item)
+    else:
+        tasks = [
+            (
+                row,
+                extracted[(row.source_path, row.function)],
+                output_root,
+                project_context,
+                rule_pack,
+                call_max,
+                check_golden,
+                reference_base,
+                project_id,
+                output_root.name,
+            )
+            for row in rows
+        ]
+        with concurrent.futures.ProcessPoolExecutor(max_workers=workers) as executor:
+            futures = [executor.submit(_generate_single_target, *task) for task in tasks]
+            for future in concurrent.futures.as_completed(futures):
+                results.append(future.result())
+
+    # 确定性保证：严格按原始 row_number 升序排序
+    results.sort(key=lambda item: int(item.unit.row.row_number))
+
+    units: list[GeneratedIndexUnit] = []
+    comparisons: list[dict[str, object]] = []
+    for result in results:
+        progress.record_events(result.events)
+        units.append(result.unit)
+        if result.comparison is not None:
+            comparisons.append(result.comparison)
 
     report = {
         "index_csv": str(index_csv),

@@ -22,17 +22,41 @@ def _now() -> str:
 class ProgressRecorder:
     """Append-only JSONL stage events for one orchestration run."""
 
-    def __init__(self, path: Path, *, project: str, run_id: str | None = None) -> None:
-        self.path = Path(path)
-        self.path.parent.mkdir(parents=True, exist_ok=True)
+    def __init__(
+        self,
+        path: Path | None = None,
+        *,
+        project: str,
+        run_id: str | None = None,
+        collector: list[dict[str, Any]] | None = None,
+    ) -> None:
+        self.path = Path(path) if path is not None else None
+        if self.path is not None:
+            self.path.parent.mkdir(parents=True, exist_ok=True)
         self.project = project
-        self.run_id = run_id or self.path.parent.name
+        self.run_id = run_id or (self.path.parent.name if self.path is not None else "default")
         self.pid = os.getpid()
+        self.collector = collector
 
     def _append(self, event: dict[str, Any]) -> None:
-        with self.path.open("a", encoding="utf-8", newline="\n") as stream:
-            stream.write(json.dumps(event, ensure_ascii=False, sort_keys=True) + "\n")
-            stream.flush()
+        if self.collector is not None:
+            self.collector.append(event)
+        if self.path is not None:
+            with self.path.open("a", encoding="utf-8", newline="\n") as stream:
+                stream.write(json.dumps(event, ensure_ascii=False, sort_keys=True) + "\n")
+                stream.flush()
+
+    def record_events(self, events: Any) -> None:
+        """Append externally collected events (e.g. from worker processes)."""
+        if not events:
+            return
+        for event in events:
+            if self.collector is not None:
+                self.collector.append(event)
+            if self.path is not None:
+                with self.path.open("a", encoding="utf-8", newline="\n") as stream:
+                    stream.write(json.dumps(event, ensure_ascii=False, sort_keys=True) + "\n")
+                    stream.flush()
 
     @contextmanager
     def stage(
