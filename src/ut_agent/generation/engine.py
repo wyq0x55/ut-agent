@@ -665,7 +665,8 @@ def _expanded_env(values: dict[str, Any]) -> dict[str, Any]:
 
 
 def _control_env(values: dict[str, Any], ir: FunctionIR,
-                 before_offset: int | None = None) -> dict[str, Any]:
+                 before_offset: int | None = None,
+                 seen: set[str] | None = None) -> dict[str, Any]:
     """Add source-derived aliases for the shared branch evaluator.
 
     The C++ extractor records when an automatic control is produced by a
@@ -789,6 +790,8 @@ def _control_env(values: dict[str, Any], ir: FunctionIR,
                 # The source offset prevents a later branch assignment from
                 # being used to prove an earlier condition.
                 if control.source == "local":
+                    if seen is not None and control.name in seen:
+                        continue
                     provenance = getattr(control, "provenance", None)
                     expansion = getattr(provenance, "expansion", None)
                     offset = getattr(expansion, "offset", None)
@@ -797,7 +800,9 @@ def _control_env(values: dict[str, Any], ir: FunctionIR,
                     except (TypeError, ValueError):
                         offset = None
                     value = _local_value(
-                        ir, control.name, env, before_offset=offset,
+                        ir, control.name, env,
+                        seen=seen,
+                        before_offset=offset,
                     )
                 if value is None:
                     continue
@@ -971,7 +976,8 @@ def evaluate_branch(branch: Branch, env: dict[str, Any],
 
 
 def branch_path_reachable(ir: FunctionIR, branch: Branch,
-                          env: dict[str, Any]) -> bool | None:
+                          env: dict[str, Any],
+                          seen: set[str] | None = None) -> bool | None:
     """Check extractor-proven enclosing branch conditions.
 
     ``parent_bid`` is a semantic nesting fact, not a renderer hint.  A
@@ -1016,7 +1022,7 @@ def branch_path_reachable(ir: FunctionIR, branch: Branch,
             )
         parent_span = _source_span(parent)
         parent_offset = parent_span[0] if parent_span else None
-        parent_env = _control_env(env, ir, before_offset=parent_offset) if parent_offset is not None else env
+        parent_env = _control_env(env, ir, before_offset=parent_offset, seen=seen) if parent_offset is not None else env
         try:
             if evaluate_branch(parent, parent_env) != required:
                 return False
@@ -1681,7 +1687,8 @@ def _write_effect_value(ir: FunctionIR, effect: dict[str, Any],
 
 
 def _guards_active(ir: FunctionIR, guards: Any, env: dict[str, Any],
-                   offset: Any = None) -> bool | None:
+                   offset: Any = None,
+                   seen: set[str] | None = None) -> bool | None:
     """Evaluate an extractor guard list without treating unknown as false."""
     if offset is not None:
         switch_path = _switch_offset_reachable(ir, offset, env)
@@ -1699,9 +1706,9 @@ def _guards_active(ir: FunctionIR, guards: Any, env: dict[str, Any],
             return None
         branch_span = _source_span(branch)
         branch_offset = branch_span[0] if branch_span else None
-        guard_env = _control_env(env, ir, before_offset=branch_offset) if branch_offset is not None and not any(c.source == "local" for c in ir.control_vars) else env
+        guard_env = _control_env(env, ir, before_offset=branch_offset, seen=seen) if branch_offset is not None and not any(c.source == "local" for c in ir.control_vars) else env
         try:
-            path = branch_path_reachable(ir, branch, guard_env)
+            path = branch_path_reachable(ir, branch, guard_env, seen=seen)
             if path is not True:
                 return path
             active = evaluate_branch(branch, guard_env)
@@ -1929,7 +1936,7 @@ def _local_value(ir: FunctionIR, name: str, env: dict[str, Any],
                  seen: set[str] | None = None,
                  before_offset: int | None = None) -> Any | None:
     """Resolve a local through the AST-recorded assignment chain."""
-    seen = set() if seen is None else seen
+    seen = set() if seen is None else set(seen)
     if name in seen:
         return None
     seen.add(name)
@@ -1952,6 +1959,7 @@ def _local_value(ir: FunctionIR, name: str, env: dict[str, Any],
         active = _guards_active(
             ir, effect.get("guards", []), env,
             effect.get("source_offset"),
+            seen=seen,
         )
         if active is not True:
             continue

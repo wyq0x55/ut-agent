@@ -134,3 +134,45 @@ def test_targeted_branch_excludes_descendants_and_uses_param_equality_default():
     assert cand["mode"] == 1
 
 
+def test_local_value_guard_evaluation_avoids_recursion_cycle():
+    """Evaluating guards on local value effects must not cause unbounded recursion."""
+    from ut_agent.generation.engine import _control_env
+    from ut_agent.ir import Atom, Branch, ControlVar, Effect, FunctionIR, TypeInfo
+
+    u8 = TypeInfo(
+        canonical_type="unsigned char", kind="integer", bit_width=8,
+        signed=False, min_value=0, max_value=255,
+    )
+    b0 = Branch(
+        bid="b0", kind="if", line=1,
+        atoms=[Atom(
+            var="flag", var_type="unsigned char", op="==", boundary=1,
+            boundary_name=None, text="flag == 1", type_info=u8,
+        )],
+    )
+    b1 = Branch(
+        bid="b1", kind="if", parent_bid="b0", line=2,
+        atoms=[Atom(
+            var="local_v", var_type="unsigned char", op="==", boundary=1,
+            boundary_name=None, text="local_v == 1", type_info=u8,
+        )],
+    )
+    ir = FunctionIR(
+        name="test_cycle", file="test.c", line=1, ret_type="void",
+        branches=[b0, b1],
+        control_vars=[
+            ControlVar(name="flag", var="flag", source="global", type_info=u8),
+            ControlVar(name="local_v", var="local_v", source="local", type_info=u8),
+        ],
+        local_value_effects=[
+            Effect(
+                name="local_v", source_offset=100, constant_value=1,
+                guards=[{"bid": "b1", "then": True}],
+            ),
+        ],
+    )
+    env = _control_env({"flag": 1}, ir)
+    assert isinstance(env, dict)
+    assert env["flag"] == 1
+
+
