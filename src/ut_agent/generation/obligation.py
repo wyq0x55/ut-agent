@@ -295,13 +295,23 @@ def derive_obligations(ir: FunctionIR, baseline: TestBaseline,
                 if type_info is None:
                     type_info = control.type_info if control else None
                 origin_kind = getattr(control.value_origin, "kind", None) if control else None
+                origin_driver = (
+                    getattr(control.value_origin, "driver", None)
+                    or (control.value_origin.get("driver") if isinstance(control.value_origin, dict) else None)
+                ) if control and control.value_origin else None
+                all_names = [name for name in (
+                    control.name if control else None,
+                    control.var if control else None,
+                    origin_driver,
+                    atom.boundary_name,
+                ) if name]
                 is_status = (
                     control is not None
                     and (
                         control.source == "stub"
                         or origin_kind in {"stub_return", "stub_param", "global_array_element"}
                         or (type_info and getattr(type_info, "is_const", False))
-                        or (control.name and any(term in control.name.lower() for term in ("valid", "_flg", "_flag", "sts_valid")))
+                        or any(any(term in n.lower() for term in ("valid", "_flg", "_flag", "sts", "fail", "rsl", "mode", "cmd")) for n in all_names)
                     )
                 )
                 if is_status:
