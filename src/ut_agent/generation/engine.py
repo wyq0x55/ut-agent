@@ -1213,6 +1213,21 @@ def _remap_derived_candidates(ir: FunctionIR, candidates: dict) -> None:
             candidates.pop(control.name, None)
             candidates.pop(control.var, None)
             continue
+        if origin.get("kind") == "stub_param":
+            callee = str(origin.get("callee", "")).strip()
+            try:
+                param_idx = int(origin.get("index", 0))
+            except (TypeError, ValueError):
+                param_idx = 0
+            driver_name = call_param_key(callee, param_idx, 0)
+            source = candidates.get(control.name) or candidates.get(control.var)
+            if callee and source:
+                target = candidates.setdefault(
+                    driver_name,
+                    {"cv": control, "values": set(), "enum": {}},
+                )
+                target["values"].update(source.get("values", set()))
+            continue
         if origin.get("kind") != "const_table_field":
             continue
         table_values = origin.get("table_values", {})
@@ -1959,7 +1974,7 @@ def _stub_param_value(ir: FunctionIR, origin: dict[str, Any],
             break
         if (item.callee or "") == callee:
             slot += _call_site_capacity(item)
-    field = str(origin.get("field", "")).strip().lstrip(".")
+    field = str(origin.get("field") or "").strip().lstrip(".")
     candidates = (
         (call_param_key(callee, index, slot, field),
          *call_param_keys(callee, index, slot))
@@ -3145,7 +3160,7 @@ def _generic_inputs(ir: FunctionIR,
         slot = _stub_return_slot(
             ir, callee, origin.get("call_order"), origin.get("call_offset"),
         )
-        field = str(origin.get("field", "")).strip().lstrip(".")
+        field = str(origin.get("field") or "").strip().lstrip(".")
         domains[call_param_key(callee, index, slot, field or None)] = sorted(
             entry["values"],
         )
@@ -3237,26 +3252,63 @@ def _generic_inputs(ir: FunctionIR,
         if not isinstance(effect, dict):
             continue
         origin = effect.get("origin")
-        if not isinstance(origin, dict) or origin.get("kind") != "stub_return":
+        if not isinstance(origin, dict):
             continue
-        callee = str(origin.get("callee", "")).strip()
+        kind = origin.get("kind")
         path = str(effect.get("path", "")).strip()
-        if not callee or not path:
+        if not path:
             continue
-        call = next((c for c in ir.calls if c.callee == callee), None)
-        ret_type = getattr(call, "ret_type", None) if call else None
-        pre_val, post_val = _observable_pre_and_post_values(ret_type)
-        slot = _stub_return_slot(
-            ir, callee, origin.get("call_order"), origin.get("call_offset"),
-        )
-        field = str(origin.get("field") or "").strip().lstrip(".")
-        ret_key = call_return_key(callee, slot, field or None)
-        fixed[ret_key] = post_val
-        for key in (path, global_base_key(path)):
-            fixed[key] = pre_val
-        for col in _global_input_columns(ir):
-            if _norm(col) in {_norm(path), _norm(global_base_key(path))} or _norm(col).endswith("/" + _norm(path)):
-                fixed[col] = pre_val
+        if kind == "stub_return":
+            callee = str(origin.get("callee", "")).strip()
+            if not callee:
+                continue
+            call = next((c for c in ir.calls if c.callee == callee), None)
+            ret_type = getattr(call, "ret_type", None) if call else None
+            pre_val, post_val = _observable_pre_and_post_values(ret_type)
+            slot = _stub_return_slot(
+                ir, callee, origin.get("call_order"), origin.get("call_offset"),
+            )
+            field = str(origin.get("field") or "").strip().lstrip(".")
+            ret_key = call_return_key(callee, slot, field or None)
+            fixed[ret_key] = post_val
+            for key in (path, global_base_key(path)):
+                fixed[key] = pre_val
+            for col in _global_input_columns(ir):
+                if _norm(col) in {_norm(path), _norm(global_base_key(path))} or _norm(col).endswith("/" + _norm(path)):
+                    fixed[col] = pre_val
+        elif kind == "local":
+            driver = str(origin.get("driver", "")).strip()
+            if not driver:
+                continue
+            callee = None
+            param_idx = 0
+            pointee_type = None
+            for c in ir.calls:
+                ext = getattr(c, "extensions", None)
+                ext_origins = ext.get("caller_param_origins", {}) if isinstance(ext, dict) else {}
+                for p_i, p in enumerate(c.params):
+                    if p.is_ptr:
+                        orig = ext_origins.get(str(p_i), ext_origins.get(p_i, {}))
+                        if isinstance(orig, dict) and orig.get("driver") == driver:
+                            callee = c.callee
+                            param_idx = p_i
+                            pointee_type = p.type_info.pointee_type if p.type_info else None
+                            break
+                if callee:
+                    break
+            if callee:
+                pre_val, post_val = _observable_pre_and_post_values(pointee_type)
+                pre_val = 0
+                fixed[driver] = post_val
+                fixed[_norm(driver)] = post_val
+                param_key = call_param_key(callee, param_idx, 0)
+                fixed[param_key] = post_val
+                fixed[f"{param_key}:pointee"] = post_val
+                for key in (path, global_base_key(path)):
+                    fixed[key] = pre_val
+                for col in _global_input_columns(ir):
+                    if _norm(col) in {_norm(path), _norm(global_base_key(path))} or _norm(col).endswith("/" + _norm(path)):
+                        fixed[col] = pre_val
     return domains, fixed
 
 
@@ -3524,7 +3576,7 @@ def _domain_key_for(ir: FunctionIR, expression: str,
                         ir, callee, origin.get("call_order"),
                         origin.get("call_offset"),
                     )
-                    field = str(origin.get("field", "")).strip().lstrip(".")
+                    field = str(origin.get("field") or "").strip().lstrip(".")
                     candidate = call_param_key(
                         callee, index, slot, field or None,
                     )

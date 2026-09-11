@@ -240,7 +240,7 @@ def derive_obligations(ir: FunctionIR, baseline: TestBaseline,
                     boundary_value=(default_point
                                     if case.is_default else None),
                 ))
-            if include_default and has_default and control is not None:
+            if include_default and has_default and control is not None and control.source != "local":
                 for point_index, point in enumerate(default_points[1:], 1):
                     default_label = next(
                         (_case_label(case) for case in branch.cases
@@ -295,7 +295,16 @@ def derive_obligations(ir: FunctionIR, baseline: TestBaseline,
                 if type_info is None:
                     type_info = control.type_info if control else None
                 origin_kind = getattr(control.value_origin, "kind", None) if control else None
-                if control is not None and (control.source == "stub" or origin_kind in {"stub_return", "global_array_element"}):
+                is_status = (
+                    control is not None
+                    and (
+                        control.source == "stub"
+                        or origin_kind in {"stub_return", "stub_param", "global_array_element"}
+                        or (type_info and getattr(type_info, "is_const", False))
+                        or (control.name and any(term in control.name.lower() for term in ("valid", "_flg", "_flag", "sts_valid")))
+                    )
+                )
+                if is_status:
                     # Stub return codes and status-like results are categorical executable values,
                     # even when their ABI type is an unsigned byte.  Keep
                     # obligation derivation aligned with control_candidates.

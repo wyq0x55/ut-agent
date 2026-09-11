@@ -1745,6 +1745,17 @@ def _intent_value(
         candidates.append(tail.rsplit("@", 1)[-1])
     if comment.endswith("@@"):
         candidates.append("ret")
+    if "PTROUT" in comment:
+        m = re.search(r"PTROUT(\d+)_([A-Za-z0-9_]+)\[(\d+)\]", comment)
+        if m:
+            p_idx, callee, slot = int(m.group(1)), m.group(2), int(m.group(3))
+            for k in (
+                f"call:{callee}:param:{p_idx}:{slot}",
+                f"call:{callee}:param:{p_idx}:{slot}:pointee",
+                f"call:{callee}:param:{p_idx}",
+            ):
+                if k in values:
+                    return values[k]
     for candidate in candidates:
         if candidate in values:
             return values[candidate]
@@ -1815,6 +1826,8 @@ def _render_intent_value(
             address = _pointer_address_value(value, ir)
     if address is not None:
         if "PTROUT" in comment:
+            if isinstance(value, (int, float)):
+                return str(int(value))
             if isinstance(value, str):
                 if value.startswith("param:") or value.endswith(":address") or value in addrs:
                     val_addr = _pointer_address_value(value, ir)

@@ -51,9 +51,9 @@ def pointer_blank_addresses(ir) -> dict[str, int]:
                 current += 0x300
                 key = f"call:{callee}:param:{p_idx}:{slot}"
                 addresses[key] = addr
-                col_name = f"AMSTB_SrcFile.c/AMSTB_{callee}@PTROUT{p_idx:02d}_{callee}[{slot}]"
-                addresses[col_name] = addr
-                addresses[f"PTROUT{p_idx:02d}_{callee}[{slot}]"] = addr
+                arg_col = f"AMSTB_SrcFile.c/AMSTB_{callee}@ARG{p_idx:02d}_{callee}[{slot}]"
+                addresses[arg_col] = addr
+                addresses[f"ARG{p_idx:02d}_{callee}[{slot}]"] = addr
     return addresses
 
 

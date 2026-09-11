@@ -397,6 +397,22 @@ def test_repeated_or_variants_generates_multi_variable_boundary_variants():
     assert variants[3] == {"sw1": 255, "sw2": 255}
 
 
+def test_render_intent_value_preserves_numeric_ptrout():
+    """PTROUT columns with numeric values must render as decimal numbers, not pointer addresses."""
+    from ut_agent.targets.winams.csv import _render_intent_value
+    from ut_agent.ir import FunctionIR
+
+    ir = FunctionIR(name="test_fn", file="test.c", line=1, ret_type="void")
+    comment = "AMSTB_SrcFile.c/AMSTB_stub@PTROUT00_stub[0]"
+    rendered = _render_intent_value(255, comment=comment, ir=ir)
+    assert rendered in ("255", "0xff")
+    assert rendered != "0x5400"
+    rendered_zero = _render_intent_value(0, comment=comment, ir=ir)
+    assert rendered_zero in ("0", "0x0")
+    assert rendered_zero != "0x5400"
+
+
+
 
 
 
