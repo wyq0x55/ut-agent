@@ -455,9 +455,28 @@ def _norm(value: str) -> str:
 def _lookup(env: dict[str, Any], name: str) -> Any:
     compact = _norm(name)
     without_prefix = compact[len("global:"):] if compact.startswith("global:") else compact
+    if compact.startswith("*"):
+        base = compact[1:].lstrip("@")
+        deref_aliases = [
+            compact,
+            f"*{base}",
+            f"{base}[0]",
+            f"@{base}[0]",
+            pointer_value_key(base),
+            pointer_value_key(base, f"{base}[0]"),
+            pointer_value_key(base, f"*{base}"),
+        ]
+        for alias in deref_aliases:
+            if alias in env:
+                return env[alias]
+        target_tail = "/" + f"*{base}".split("/")[-1]
+        for key, val in env.items():
+            if _norm(key).endswith(target_tail) or _norm(key).endswith("/" + f"{base}[0]"):
+                return val
+        raise KeyError(name)
     aliases = [
         compact,
-        compact.lstrip("@*"),
+        compact.lstrip("@"),
         compact.split("/")[-1],
         without_prefix,
         without_prefix.split("/")[-1],
@@ -568,11 +587,33 @@ def _eval_expression_tree(ir: FunctionIR, tree: Any,
         )
     if kind == "unary":
         op = str(tree.get("op", ""))
+        if op == "*":
+            operand = tree.get("operand")
+            operand_path = _expression_reference_path(operand)
+            if operand_path:
+                try:
+                    return _lookup(env, f"*{operand_path}")
+                except KeyError:
+                    pass
+            if isinstance(operand, dict) and operand.get("kind") == "reference":
+                ref_name = str(operand.get("name", "")).strip()
+                if ref_name:
+                    for key in (
+                        f"*{ref_name}",
+                        f"{ref_name}[0]",
+                        f"@{ref_name}[0]",
+                        pointer_value_key(ref_name),
+                        pointer_value_key(ref_name, f"{ref_name}[0]"),
+                        pointer_value_key(ref_name, f"*{ref_name}"),
+                    ):
+                        if key in env:
+                            return env[key]
+            return None
         value = _eval_expression_tree(ir, tree.get("operand"), env, seen)
         if value is None:
             return None
         try:
-            if op in {"*", "&", "+"}:
+            if op in {"&", "+"}:
                 return value
             if op == "-":
                 return -int(value)
@@ -693,6 +734,17 @@ def _control_env(values: dict[str, Any], ir: FunctionIR,
                     env[control.name] = val
                 except KeyError:
                     pass
+        if isinstance(origin, dict) and origin.get("kind") == "global_array_element":
+            base = str(origin.get("base", "")).strip()
+            if base:
+                for candidate in (global_key(base, (0,)), f"{base}[0]"):
+                    try:
+                        val = _lookup(env, candidate)
+                        env[_norm(control.var)] = val
+                        env[control.name] = val
+                        break
+                    except KeyError:
+                        pass
     for control in ir.control_vars:
         value = None
         for key in (control.var, control.name):
@@ -852,11 +904,14 @@ def _control_env(values: dict[str, Any], ir: FunctionIR,
             elif ptr_val is not None and ptr_val != 0:
                 env.setdefault(pointer_address_key(param.name), 1)
             pointee_val = None
-            for pkey in (f"*{param.name}", f"{param.name}[0]", pointer_value_key(param.name)):
+            for pkey in (f"*{param.name}", f"{param.name}[0]", f"@{param.name}[0]", pointer_value_key(param.name)):
                 if pkey in env:
                     pointee_val = env[pkey]
                     break
             if pointee_val is not None:
+                env[f"*{param.name}"] = pointee_val
+                env[f"{param.name}[0]"] = pointee_val
+                env[f"@{param.name}[0]"] = pointee_val
                 env[pointer_value_key(param.name, f"{param.name}[0]")] = pointee_val
                 env[pointer_value_key(param.name, f"*{param.name}")] = pointee_val
                 env[pointer_value_key(param.name)] = pointee_val
@@ -1130,6 +1185,22 @@ def _remap_derived_candidates(ir: FunctionIR, candidates: dict) -> None:
             driver_name = str(origin.get("driver", "")).strip()
             source = candidates.get(control.name) or candidates.get(control.var)
             if not driver_name or not source:
+                candidates.pop(control.name, None)
+                candidates.pop(control.var, None)
+                continue
+            target = candidates.setdefault(
+                driver_name,
+                {"cv": control, "values": set(), "enum": {}},
+            )
+            target["values"].update(source.get("values", set()))
+            candidates.pop(control.name, None)
+            candidates.pop(control.var, None)
+            continue
+        if origin.get("kind") == "global_array_element":
+            base = str(origin.get("base", "")).strip()
+            driver_name = global_key(base, (0,))
+            source = candidates.get(control.name) or candidates.get(control.var)
+            if not base or not source:
                 candidates.pop(control.name, None)
                 candidates.pop(control.var, None)
                 continue
@@ -2954,11 +3025,23 @@ def _generic_inputs(ir: FunctionIR,
             driver = str(origin.get("driver", "")).strip()
             if driver:
                 allowed.add(driver)
+        if isinstance(origin, dict) and origin.get("kind") == "global_array_element":
+            base = str(origin.get("base", "")).strip()
+            if base:
+                allowed.add(global_key(base, (0,)))
+                allowed.add(f"{base}[0]")
     unresolved = [
         cv.name for cv in ir.control_vars
         if cv.constant_value is None
         and cv.name not in loop_locals
-        and not (cv.source == "local" and cv.name in derivable_locals)
+        and not (
+            cv.source == "local"
+            and (
+                cv.name in derivable_locals
+                or (isinstance(_origin_record(cv.value_origin), dict)
+                    and _origin_record(cv.value_origin).get("kind") == "global_array_element")
+            )
+        )
         and cv.source not in (
             "param", "global", "local_from_global", "stub", "derived"
         )
@@ -3057,8 +3140,7 @@ def _generic_inputs(ir: FunctionIR,
         # target variables.  A generic row starts with a deterministic
         # pointee; AST write effects may replace it in the expected half.
         pointee_default = (
-            255 if (param.is_written
-                    and getattr(param.type_info, "pointee_info", None)
+            255 if (getattr(param.type_info, "pointee_info", None)
                     and getattr(param.type_info.pointee_info, "bit_width", None) == 8)
             else 0
         )
@@ -3335,6 +3417,11 @@ def _domain_key_for(ir: FunctionIR, expression: str,
                 for candidate in domains:
                     if _norm(candidate) == driver:
                         return candidate
+            if isinstance(origin, dict) and origin.get("kind") == "global_array_element":
+                base = _norm(str(origin.get("base", "")))
+                for candidate in domains:
+                    if _norm(candidate) in {global_key(base, (0,)), f"{base}[0]"}:
+                        return candidate
             if isinstance(origin, dict) and origin.get("kind") == "stub_param":
                 callee = str(origin.get("callee", ""))
                 try:
@@ -3381,6 +3468,63 @@ def _targeted_domain_values(ir: FunctionIR, branch: Branch,
         if value not in boundaries and value not in values
     )
     return values or list(domains.get(key, []))
+
+
+def _condition_target_atom_alternatives(tree: Any, outcome: bool) -> list[list[tuple[int, bool]]]:
+    if not isinstance(tree, dict):
+        return []
+    if tree.get("kind") == "atom":
+        try:
+            return [[(int(tree["index"]), outcome)]]
+        except (KeyError, TypeError, ValueError):
+            return []
+    if tree.get("kind") != "logical":
+        return []
+    children = tree.get("children")
+    if not isinstance(children, list) or not children:
+        return []
+    op = tree.get("op")
+    if op == "&&":
+        if outcome:
+            combined = [
+                item for child in children
+                for item in _condition_target_atoms(child, True)
+            ]
+            return [combined] if combined else []
+        return [
+            alt for child in children
+            for alt in _condition_target_atom_alternatives(child, False)
+        ]
+    if op == "||":
+        if outcome:
+            return [
+                alt for child in children
+                for alt in _condition_target_atom_alternatives(child, True)
+            ]
+        combined = [
+            item for child in children
+            for item in _condition_target_atoms(child, False)
+        ]
+        return [combined] if combined else []
+    return []
+
+
+def _branch_target_atom_alternatives(branch: Branch, outcome: bool) -> list[list[tuple[int, bool]]]:
+    if branch.condition_tree is not None:
+        alts = _condition_target_atom_alternatives(branch.condition_tree, outcome)
+        if alts:
+            return alts
+    atoms = list(branch.atoms)
+    connective = branch.connective or "single"
+    if connective == "&&":
+        if outcome:
+            return [[(i, True) for i in range(len(atoms))]]
+        return [[(i, False)] for i in range(len(atoms))]
+    if connective == "||":
+        if outcome:
+            return [[(i, True)] for i in range(len(atoms))]
+        return [[(i, False) for i in range(len(atoms))]]
+    return [[(0, outcome)]] if atoms else []
 
 
 def _condition_target_atoms(tree: Any, outcome: bool) -> list[tuple[int, bool]]:
@@ -3692,16 +3836,42 @@ def _descendant_branch_ids(ir: FunctionIR, branch: Branch) -> set[str]:
     return descendants
 
 
+def _is_descendant_on_active_path(ir: FunctionIR, branch: Branch, outcome: bool, other: Branch) -> bool:
+    """Check whether descendant 'other' lies on the active path when 'branch' takes 'outcome'."""
+    by_id = {item.bid: item for item in ir.branches}
+    curr = other
+    visited: set[str] = set()
+    while curr.parent_bid:
+        if curr.bid in visited:
+            return False
+        visited.add(curr.bid)
+        parent = by_id.get(curr.parent_bid)
+        if parent is None:
+            return False
+        if curr.parent_bid == branch.bid:
+            return curr.parent_outcome is None or curr.parent_outcome == outcome
+        if curr.parent_outcome is not None and curr.parent_outcome is not False:
+            return False
+        curr = parent
+    return False
+
+
 def _apply_branch_target(ir: FunctionIR, domains: dict[str, list[Any]],
                          raw: dict[str, Any], branch: Branch,
-                         outcome: bool) -> None:
+                         outcome: bool,
+                         target_atoms: list[tuple[int, bool]] | None = None,
+                         preserve_scalar_params: bool = False) -> None:
     """Apply a deterministic truth target without asserting full-path truth."""
     applied: list[tuple[Atom, bool]] = []
-    for atom_index, expected in _branch_target_atoms(branch, outcome):
+    targets = target_atoms if target_atoms is not None else _branch_target_atoms(branch, outcome)
+    scalar_params = {p.name for p in ir.params if not p.is_ptr}
+    for atom_index, expected in targets:
         if atom_index < 0 or atom_index >= len(branch.atoms):
             continue
         atom = branch.atoms[atom_index]
         key = _domain_key_for(ir, atom.var, domains, branch=branch)
+        if preserve_scalar_params and key in scalar_params and key in raw:
+            continue
         if key is None:
             for guard_branch, guard_required in _local_guard_requirements(
                     ir, atom, expected):
@@ -3759,26 +3929,29 @@ def _targeted_branch_candidate(ir: FunctionIR,
         return None
     ancestors = {parent.bid for parent, _ in _ancestor_requirements(ir, branch)}
     descendants = _descendant_branch_ids(ir, branch)
-    for other in ir.branches:
-        if (other.bid != branch.bid
-                and other.bid not in ancestors
-                and other.bid not in descendants
-                and other.kind not in {"switch", "for"}):
-            _apply_branch_target(ir, domains, raw, other, False)
-    for parent, required in _ancestor_requirements(ir, branch):
-        _apply_branch_target(ir, domains, raw, parent, required)
-    _apply_branch_target(ir, domains, raw, branch, outcome)
-
     branch_span = _source_span(branch)
     branch_offset = branch_span[0] if branch_span else None
-    env = _control_env(raw, ir, before_offset=branch_offset)
-    try:
-        return (
-            env if branch_path_reachable(ir, branch, env) is True
-            and evaluate_branch(branch, env) == outcome else None
-        )
-    except (KeyError, TypeError, ValueError):
-        return None
+    for target_alts in _branch_target_atom_alternatives(branch, outcome):
+        trial_raw = dict(raw)
+        for other in ir.branches:
+            if (other.bid != branch.bid
+                    and other.bid not in ancestors
+                    and other.kind not in {"switch", "for"}):
+                if other.bid in descendants and not _is_descendant_on_active_path(ir, branch, outcome, other):
+                    continue
+                _apply_branch_target(ir, domains, trial_raw, other, False, preserve_scalar_params=True)
+        for parent, required in _ancestor_requirements(ir, branch):
+            _apply_branch_target(ir, domains, trial_raw, parent, required)
+        _apply_branch_target(ir, domains, trial_raw, branch, outcome, target_atoms=target_alts)
+
+        env = _control_env(trial_raw, ir, before_offset=branch_offset)
+        try:
+            if (branch_path_reachable(ir, branch, env) is True
+                    and evaluate_branch(branch, env) == outcome):
+                return env
+        except (KeyError, TypeError, ValueError):
+            continue
+    return None
 
 
 def _targeted_condition_candidate(ir: FunctionIR,
@@ -3812,9 +3985,10 @@ def _targeted_condition_candidate(ir: FunctionIR,
     for other in ir.branches:
         if (other.bid != branch.bid
                 and other.bid not in ancestors
-                and other.bid not in descendants
                 and other.kind not in {"switch", "for"}):
-            _apply_branch_target(ir, domains, raw, other, False)
+            if other.bid in descendants and not _is_descendant_on_active_path(ir, branch, True, other):
+                continue
+            _apply_branch_target(ir, domains, raw, other, False, preserve_scalar_params=True)
     for parent, required in _ancestor_requirements(ir, branch):
         _apply_branch_target(ir, domains, raw, parent, required)
     atom = branch.atoms[condition_index]
@@ -3918,9 +4092,10 @@ def _targeted_mcdc_candidate(ir: FunctionIR,
     for other in ir.branches:
         if (other.bid != branch.bid
                 and other.bid not in ancestors
-                and other.bid not in descendants
                 and other.kind not in {"switch", "for"}):
-            _apply_branch_target(ir, domains, raw, other, False)
+            if other.bid in descendants and not _is_descendant_on_active_path(ir, branch, True, other):
+                continue
+            _apply_branch_target(ir, domains, raw, other, False, preserve_scalar_params=True)
     applied: list[tuple[Any, bool]] = []
     failed_key: str | None = None
     for owner, atom, expected in requirements:
@@ -4166,9 +4341,12 @@ def _targeted_generic_candidates(ir: FunctionIR,
     # A mixed connective or an expression with multiple controls may not be
     # constructible by the simple proof above.  Search the reduced relevant
     # product only, with a hard deterministic cap.
+    ancestors = _ancestor_requirements(ir, branch)
     relevant = sorted({
-        key for atom in branch.atoms
-        if (key := _domain_key_for(ir, atom.var, domains)) is not None
+        candidate
+        for item in (*ancestors, (branch, obligation.outcome))
+        for atom in item[0].atoms
+        if (candidate := _domain_key_for(ir, atom.var, domains)) is not None
     })
     reduced = [
         _targeted_domain_values(ir, branch, key, domains) for key in relevant
@@ -4182,7 +4360,8 @@ def _targeted_generic_candidates(ir: FunctionIR,
         trial.update(dict(zip(relevant, combo)))
         env = _control_env(trial, ir)
         try:
-            if evaluate_branch(branch, env) == obligation.outcome:
+            if (branch_path_reachable(ir, branch, env) is True
+                    and evaluate_branch(branch, env) == obligation.outcome):
                 yield env
                 return
         except (KeyError, TypeError, ValueError):

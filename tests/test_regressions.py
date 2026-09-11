@@ -176,3 +176,109 @@ def test_local_value_guard_evaluation_avoids_recursion_cycle():
     assert env["flag"] == 1
 
 
+def test_pointer_dereference_lookup_and_evaluation_does_not_decay_to_address():
+    """Pointer dereference '*ptr' must resolve pointee data, not pointer address."""
+    from ut_agent.generation.engine import _eval_expression_tree, _lookup
+    from ut_agent.ir import FunctionIR
+
+    env = {
+        "ptr": 1,
+        "ptr[0]": 255,
+        "*ptr": 255,
+        "@ptr[0]": 255,
+    }
+    # _lookup must find 255, not decay to 'ptr' (1)
+    assert _lookup(env, "*ptr") == 255
+
+    ir = FunctionIR(name="test_deref", file="test.c", line=1, ret_type="void")
+    tree = {
+        "kind": "unary",
+        "op": "*",
+        "operand": {"kind": "reference", "name": "ptr"},
+    }
+    assert _eval_expression_tree(ir, tree, env) == 255
+
+
+def test_global_array_element_control_var_mapping():
+    """Local control derived from global_array_element must map to array element input."""
+    from ut_agent.generation.boundary import control_candidates
+    from ut_agent.generation.engine import (
+        _control_env,
+        _domain_key_for,
+        _generic_inputs,
+        _remap_derived_candidates,
+    )
+    from ut_agent.generation.semantic import global_key
+    from ut_agent.ir import Atom, Branch, ControlVar, FunctionIR, GlobalObject, TypeInfo
+
+    u8 = TypeInfo(
+        canonical_type="unsigned char", kind="integer", bit_width=8,
+        signed=False, min_value=0, max_value=255,
+    )
+    b0 = Branch(
+        bid="b0", kind="if", line=1,
+        atoms=[Atom(
+            var="flag_local", var_type="unsigned char", op="==", boundary=1,
+            boundary_name="U1G_DAT_ABNORMAL", text="1 == flag_local", type_info=u8,
+        )],
+    )
+    cv = ControlVar(
+        name="flag_local", var="flag_local", source="local", type_info=u8,
+        branch_ids=["b0"],
+        value_origin={
+            "kind": "global_array_element",
+            "base": "g_flags",
+            "index": "idx",
+        },
+    )
+    g_obj = GlobalObject(
+        name="g_flags", read=True, write=False, array_sizes=[1],
+    )
+    ir = FunctionIR(
+        name="test_global_arr", file="test.c", line=1, ret_type="void",
+        branches=[b0],
+        control_vars=[cv],
+        global_objects=[g_obj],
+    )
+    candidates = control_candidates(ir)
+    _remap_derived_candidates(ir, candidates)
+    g_key = global_key("g_flags", (0,))
+    assert g_key in candidates
+
+    domains, fixed = _generic_inputs(ir)
+    assert g_key in domains
+    key = _domain_key_for(ir, "flag_local", domains)
+    assert key in {g_key, "g_flags[0]"}
+
+    env = _control_env({g_key: 1}, ir)
+    assert env["flag_local"] == 1
+
+
+def test_branch_target_atom_alternatives_for_and_false():
+    """Conjunctive branch requires testing all alternative children for False."""
+    from ut_agent.generation.engine import _branch_target_atom_alternatives
+    from ut_agent.ir import Atom, Branch, TypeInfo
+
+    u8 = TypeInfo(canonical_type="unsigned char", kind="integer", bit_width=8)
+    b = Branch(
+        bid="b0", kind="if", connective="&&", line=1,
+        atoms=[
+            Atom(var="a", var_type="unsigned char", op="==", boundary=1, boundary_name=None, text="a == 1", type_info=u8),
+            Atom(var="b", var_type="unsigned char", op="==", boundary=1, boundary_name=None, text="b == 1", type_info=u8),
+        ],
+        condition_tree={
+            "kind": "logical",
+            "op": "&&",
+            "children": [
+                {"kind": "atom", "index": 0},
+                {"kind": "atom", "index": 1},
+            ],
+        },
+    )
+    alts = _branch_target_atom_alternatives(b, False)
+    assert len(alts) == 2
+    assert [(0, False)] in alts
+    assert [(1, False)] in alts
+
+
+
