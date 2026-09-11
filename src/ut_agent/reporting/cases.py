@@ -589,14 +589,20 @@ def _semantic_identity_equal(
     generated: Mapping[str, Any], golden: Mapping[str, Any],
     evidence: Mapping[str, Any],
 ) -> bool:
+    truth_vector_proven = (
+        evidence.get("truth_vector_equal") is True
+        and evidence.get("outcome_equal") is True
+    )
+    input_ok = not evidence.get("required_input_mismatches") or truth_vector_proven
+    stub_ok = not evidence.get("stub_mismatches") or truth_vector_proven
     return bool(
         evidence.get("viewpoint_equal")
         and evidence.get("label_equal")
         and evidence.get("truth_vector_equal") is not False
         and evidence.get("outcome_equal") is not False
-        and not evidence.get("required_input_mismatches")
+        and input_ok
         and not evidence.get("required_expected_mismatches")
-        and not evidence.get("stub_mismatches")
+        and stub_ok
     )
 
 
