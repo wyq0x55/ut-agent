@@ -387,8 +387,8 @@ def test_approved_scenario_rule_is_validated_and_rendered_without_defaults(tmp_p
     result = generate_intents(_branch_ir(), load_rule_pack(path))
     assert result.status == VALIDATED
     text = render_intents_csv(_branch_ir(), result)
-    assert ";$L$,TRUE\r\n,0x1" in text
-    assert ";$L$,FALSE\r\n,0x0" in text
+    assert ";$L$,TRUE\r\n,1" in text
+    assert ";$L$,FALSE\r\n,0" in text
     assert "omitted_unvalidated" not in text
 
 

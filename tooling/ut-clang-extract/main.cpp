@@ -1774,6 +1774,50 @@ private:
     return Visitor.written();
   }
 
+  bool isHexBoundaryExpr(const Expr *BoundaryExpr,
+                         const std::string &BoundarySpelling) const {
+    if (llvm::StringRef(BoundarySpelling).starts_with_insensitive("0x"))
+      return true;
+    auto macroHasHex = [this](auto &self, const std::string &Name, int Depth) -> bool {
+      if (Depth > 10)
+        return false;
+      auto It = Macros.find(Name);
+      if (It == Macros.end())
+        return false;
+      const std::string &Val = It->second;
+      if (llvm::StringRef(Val).contains_insensitive("0x"))
+        return true;
+      std::string Token;
+      for (char C : Val) {
+        if (isalnum(C) || C == '_') {
+          Token += C;
+        } else {
+          if (!Token.empty()) {
+            if (self(self, Token, Depth + 1))
+              return true;
+            Token.clear();
+          }
+        }
+      }
+      if (!Token.empty() && self(self, Token, Depth + 1))
+        return true;
+      return false;
+    };
+    if (!BoundarySpelling.empty() && macroHasHex(macroHasHex, BoundarySpelling, 0))
+      return true;
+    if (const auto Macro = immediateMacro(SM, LangOpts,
+                                          BoundaryExpr ? BoundaryExpr->getBeginLoc() : SourceLocation())) {
+      if (macroHasHex(macroHasHex, *Macro, 0))
+        return true;
+    }
+    if (BoundaryExpr) {
+      std::string Exp = text(BoundaryExpr->getSourceRange(), false);
+      if (llvm::StringRef(Exp).contains_insensitive("0x"))
+        return true;
+    }
+    return false;
+  }
+
   llvm::json::Object atom(const BinaryOperator *Comparison) const {
     const Expr *Left = Comparison->getLHS();
     const Expr *Right = Comparison->getRHS();
@@ -1823,6 +1867,9 @@ private:
     llvm::json::Object Extensions;
     Extensions["canonical_var"] =
         View.Variable ? accessPath(View.Variable, Context) : std::string();
+    bool IsHex = isHexBoundaryExpr(BoundaryExpr, BoundarySpelling);
+    Extensions["is_hex"] = IsHex;
+    Extensions["radix"] = IsHex ? 16 : 10;
     llvm::json::Object Result{
         {"var", Variable ? jsonText(VariableSpelling)
                           : text(Left->getSourceRange(), true)},

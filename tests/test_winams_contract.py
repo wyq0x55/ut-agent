@@ -155,7 +155,7 @@ def test_static_pointer_pointee_column_uses_canonical_semantic_key():
         index for index, value in enumerate(comment) if value == "@data[0]"
     ]
     assert len(pointee_positions) == 2
-    assert data[pointee_positions[-1]] == "0x1"
+    assert data[pointee_positions[-1]] == "1"
 
 
 def test_indexed_pointer_write_is_output_only_and_uses_indexed_semantic_key():
@@ -188,7 +188,7 @@ def test_indexed_pointer_write_is_output_only_and_uses_indexed_semantic_key():
     data = next(row for row in rows if row and row[0] == "")
 
     assert comment.count("@data[26]") == 1
-    assert data[comment.index("@data[26]")] == "0x7"
+    assert data[comment.index("@data[26]")] == "7"
 
 
 def test_render_intents_includes_stub_declarations_and_columns():

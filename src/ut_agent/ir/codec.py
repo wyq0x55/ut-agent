@@ -465,19 +465,24 @@ def document_to_function_ir(document: Mapping[str, Any]) -> FunctionIR:
     value = functions[0]
     branches: list[Branch] = []
     for branch in value["branches"]:
-        atoms = [Atom(
-            var=atom["var"], var_type=atom["var_type"], op=atom["op"],
-            right=atom["right"],
-            boundary=atom["boundary"], boundary_name=atom["boundary_name"],
-            text=atom["text"], mask=atom["mask"],
-            cond_text_spelling=atom["cond_text_spelling"],
-            cond_text_expanded=atom["cond_text_expanded"],
-            type_spelling=atom["type_spelling"], canonical_type=atom["canonical_type"],
-            qualifiers=list(atom["qualifiers"]),
-            type_info=_read_type_info(atom["type_info"]),
-            provenance=_read_provenance(atom["provenance"]),
-            extensions=dict(atom["extensions"]),
-        ) for atom in branch["atoms"]]
+        atoms = []
+        for atom in branch["atoms"]:
+            ext = dict(atom["extensions"])
+            atom_is_hex = bool(ext["is_hex"]) if "is_hex" in ext else False
+            atoms.append(Atom(
+                var=atom["var"], var_type=atom["var_type"], op=atom["op"],
+                right=atom["right"],
+                boundary=atom["boundary"], boundary_name=atom["boundary_name"],
+                text=atom["text"], mask=atom["mask"],
+                cond_text_spelling=atom["cond_text_spelling"],
+                cond_text_expanded=atom["cond_text_expanded"],
+                type_spelling=atom["type_spelling"], canonical_type=atom["canonical_type"],
+                qualifiers=list(atom["qualifiers"]),
+                type_info=_read_type_info(atom["type_info"]),
+                provenance=_read_provenance(atom["provenance"]),
+                extensions=ext,
+                is_hex=atom_is_hex,
+            ))
         cases = [Case(
             label=case["label"], value=case["value"], is_default=case["is_default"],
             value_proof=case["value_proof"],

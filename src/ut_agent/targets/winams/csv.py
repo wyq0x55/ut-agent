@@ -28,7 +28,11 @@ from ut_agent.generation.semantic import (
 from ut_agent.generation.engine import (
     _control_env, evaluate_atom, evaluate_branch,
 )
-from ut_agent.targets.winams.projection import WinAMSProjection, pointer_address
+from ut_agent.targets.winams.projection import (
+    WinAMSProjection,
+    pointer_address,
+    pointer_blank_addresses,
+)
 
 
 _WINAMS_RTE_PORT_ORDER = (
@@ -1610,7 +1614,22 @@ def _ordered_logical_intents(branch, items: list[TestIntent], ir: FunctionIR) ->
 
 
 def _pointer_address_value(key: str | None, ir: FunctionIR) -> int | None:
-    if not key or not key.startswith("param:") or not key.endswith(":address"):
+    if not key or ir is None:
+        return None
+    if "[" in key or key.startswith("*"):
+        if "PTROUT" not in key:
+            return None
+    addrs = pointer_blank_addresses(ir)
+    if key in addrs:
+        return addrs[key]
+    clean = str(key).split("/")[-1].lstrip("@*")
+    if clean in addrs:
+        return addrs[clean]
+    if "@" in key:
+        tail = key.rsplit("@", 1)[-1]
+        if tail in addrs:
+            return addrs[tail]
+    if not key.startswith("param:") or not key.endswith(":address"):
         return None
     name = key[len("param:"):-len(":address")]
     pointer_index = 0
@@ -1711,6 +1730,10 @@ def _intent_value(
     dynamic_found, dynamic_value = _dynamic_global_value(values, key, ir)
     if dynamic_found:
         return dynamic_value
+    if key and key.startswith("param:") and ":pointee:" in key and ir is not None:
+        param_name = key[len("param:"):key.find(":pointee:")]
+        if f"*{param_name}" in values:
+            return values[f"*{param_name}"]
     candidates = [comment]
     if key:
         if key.startswith("global:"):
@@ -1731,28 +1754,105 @@ def _intent_value(
         semantic = candidate.split("/")[-1].lstrip("@*")
         if semantic in normalized:
             return normalized[semantic]
+    if "CALLCNT" in comment or (key and ":count" in key):
+        return 0
+    if ir is not None:
+        addr = _pointer_address_value(key, ir) or _pointer_address_value(comment, ir)
+        if addr is not None:
+            return addr
     raise ValueError(f"已验证用例缺少 WinAMS 列值: {comment}")
+
+
+def _is_hex_column(comment: str, key: str | None, ir: FunctionIR | None) -> bool:
+    if ir is None:
+        return False
+    addrs = pointer_blank_addresses(ir)
+    if key in addrs or comment in addrs:
+        return True
+    clean = comment.split("/")[-1]
+    if clean in addrs or clean.lstrip("@*") in addrs:
+        return True
+    if "@" in clean and clean.rsplit("@", 1)[-1] in addrs:
+        return True
+    if comment.startswith("@") and not comment.endswith("]"):
+        param_name = comment.lstrip("@")
+        if any(p.name == param_name and p.is_ptr for p in ir.params):
+            return True
+    if "PTROUT" in comment:
+        return True
+    if key and (key.endswith(":address") or ("param:" in key and ":address" in key)):
+        return True
+    if comment.endswith("@@"):
+        return ir.ret_type in ("u1", "uint8", "Std_ReturnType", "StatusType")
+    candidates = [comment, key or ""]
+    tail = comment.split("/")[-1]
+    candidates.extend([tail, tail.lstrip("@*")])
+    if "@" in tail:
+        candidates.append(tail.rsplit("@", 1)[-1])
+    norm_candidates = {"".join(c.split()) for c in candidates if c}
+    for branch in ir.branches:
+        for atom in branch.atoms:
+            atom_var_norm = "".join(atom.var.split())
+            if (atom_var_norm in norm_candidates
+                    or any(c.endswith(atom_var_norm) or atom_var_norm.endswith(c)
+                           for c in norm_candidates)):
+                if getattr(atom, "is_hex", False) or "0x" in atom.text.lower():
+                    return True
+    return False
 
 
 def _render_intent_value(
     value: object, *, comment: str = "", key: str | None = None,
-    ir: FunctionIR | None = None,
+    ir: FunctionIR | None = None, intent_values: dict[str, Any] | None = None,
 ) -> str:
     address = None
+    addrs = pointer_blank_addresses(ir) if ir is not None else {}
     if ir is not None:
         address = _pointer_address_value(key, ir)
+        if address is None and comment:
+            address = _pointer_address_value(comment, ir)
         if address is None and isinstance(value, str):
             address = _pointer_address_value(value, ir)
     if address is not None:
+        if "PTROUT" in comment:
+            if isinstance(value, str):
+                if value.startswith("param:") or value.endswith(":address") or value in addrs:
+                    val_addr = _pointer_address_value(value, ir)
+                    if val_addr is not None:
+                        return f"0x{val_addr:x}"
+                if not value.isdigit() and not value.startswith("0x"):
+                    return value
+            if isinstance(value, int) and value > 0 and value != 1:
+                return f"0x{value:x}"
+            if value == 0 or value == "0" or value == "0x0":
+                if "@" in comment and intent_values is not None:
+                    ptrout_part = comment.split("@")[-1]
+                    m = re.search(r"PTROUT\d+_([A-Za-z0-9_]+)\[(\d+)\]", ptrout_part)
+                    if m:
+                        callee, slot = m.group(1), int(m.group(2))
+                        cnt = intent_values.get(f"call:{callee}:count", intent_values.get(f"CALLCNT_{callee}"))
+                        if cnt is not None and slot < cnt:
+                            return "0x0"
+                return f"0x{address:x}"
+            return f"0x{address:x}"
         if value == 0 or value == "0" or value == "0x0":
             return "0x0"
+        if isinstance(value, str):
+            if value.startswith("param:") or value.endswith(":address") or value in addrs:
+                return f"0x{address:x}"
+            if not value.isdigit() and not value.startswith("0x"):
+                return value
+        if isinstance(value, int) and value > 0 and value != address and value != 1:
+            return f"0x{value:x}"
         return f"0x{address:x}"
     if value == "" or value is None:
         return ""
     if isinstance(value, bool):
         return "0x1" if value else "0x0"
     if isinstance(value, int):
-        return f"0x{value:x}" if value >= 0 else str(value)
+        if _is_hex_column(comment, key, ir):
+            return f"0x{value:x}" if value >= 0 else str(value)
+        return str(value)
     return str(value)
 
 
@@ -1925,7 +2025,7 @@ def render_intents_csv(ir: FunctionIR, result: GenerationResult, *,
             raw = intent.raw_expected.get(comment)
             values.append(raw if raw is not None else _render_intent_value(
                 _intent_value(intent.expected, comment, key, ir=ir),
-                comment=comment, key=key, ir=ir))
+                comment=comment, key=key, ir=ir, intent_values=intent.expected))
         return ",".join([""] + values)
 
     if ir.branches:

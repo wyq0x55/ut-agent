@@ -161,6 +161,7 @@ class Atom:
     type_info: Optional[TypeInfo] = None
     provenance: Optional[Provenance] = None
     extensions: dict[str, Any] = field(default_factory=dict)
+    is_hex: bool = False
 
 
 @dataclass

@@ -21,6 +21,42 @@ def pointer_address(index: int) -> int:
     return _POINTER_BASE + index * _POINTER_STRIDE
 
 
+def pointer_blank_addresses(ir) -> dict[str, int]:
+    """Assign deterministic blank target addresses to pointer parameters and stub pointer slots.
+
+    WinAMS allocates pointer buffers sequentially starting at 0x5400:
+    - Formal pointer parameters start at 0x5400, advancing by 0x100.
+    - Stub pointer argument slots start at the next available base (e.g. 0x5500 if pointer params exist, or 0x5400),
+      with each buffer slot advancing by 0x300.
+    """
+    addresses: dict[str, int] = {}
+    current = _POINTER_BASE
+    for param in ir.params:
+        if param.is_ptr:
+            addresses[param.name] = current
+            addresses[f"param:{param.name}:address"] = current
+            addresses[f"@{param.name}"] = current
+            current += _POINTER_STRIDE
+
+    for call in visible_stub_calls(ir):
+        if getattr(call, "callee_kind", "") == "memory_helper" or getattr(call, "ptr_call", False):
+            continue
+        callee = str(call.callee or "").strip()
+        capacity = stub_capacity(ir, call)
+        for p_idx, param in enumerate(call.params):
+            if not param.is_ptr:
+                continue
+            for slot in range(capacity):
+                addr = current
+                current += 0x300
+                key = f"call:{callee}:param:{p_idx}:{slot}"
+                addresses[key] = addr
+                col_name = f"AMSTB_SrcFile.c/AMSTB_{callee}@PTROUT{p_idx:02d}_{callee}[{slot}]"
+                addresses[col_name] = addr
+                addresses[f"PTROUT{p_idx:02d}_{callee}[{slot}]"] = addr
+    return addresses
+
+
 def visible_stub_calls(ir) -> list:
     """Return one target-tool stub record per visible callee."""
     calls = []
