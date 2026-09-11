@@ -4057,6 +4057,12 @@ def _targeted_branch_candidate(ir: FunctionIR,
                     and other.bid not in ancestors
                     and other.bid not in descendants
                     and other.kind not in {"switch", "for"}):
+                other_span = _source_span(other)
+                other_offset = other_span[0] if other_span else None
+                if branch_offset is not None and other_offset is not None and other_offset > branch_offset:
+                    if branch.kind == "for":
+                        _apply_branch_target(ir, domains, trial_raw, other, True)
+                    continue
                 _apply_branch_target(ir, domains, trial_raw, other, False)
         for parent, required in _ancestor_requirements(ir, branch):
             _apply_branch_target(ir, domains, trial_raw, parent, required)
@@ -4357,6 +4363,10 @@ def _targeted_generic_candidates(ir: FunctionIR,
                 ancestors = {parent.bid for parent, _ in _ancestor_requirements(ir, branch)}
                 for other in ir.branches:
                     if other.bid != branch.bid and other.bid not in ancestors and other.kind not in {"switch", "for"}:
+                        other_span = _source_span(other)
+                        other_offset = other_span[0] if other_span else None
+                        if branch_offset is not None and other_offset is not None and other_offset > branch_offset:
+                            continue
                         _apply_branch_target(ir, domains, trial, other, False)
                 for parent, required in _ancestor_requirements(ir, branch):
                     _apply_branch_target(ir, domains, trial, parent, required)

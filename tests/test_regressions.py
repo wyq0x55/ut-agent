@@ -412,6 +412,30 @@ def test_render_intent_value_preserves_numeric_ptrout():
     assert rendered_zero != "0x5400"
 
 
+def test_targeted_branch_candidate_preserves_downstream_true_for_loop():
+    """When targeting a loop branch, downstream branches without external calls should prefer TRUE."""
+    from ut_agent.generation.engine import _targeted_branch_candidate
+    from ut_agent.ir import Atom, Branch, ControlVar, FunctionIR, Provenance, SourceLocation, TypeInfo
+
+    u8 = TypeInfo(canonical_type="unsigned char", kind="integer", bit_width=8, signed=False, min_value=0, max_value=255)
+    sl_for = SourceLocation("test.c", 1, 1, 10, 20)
+    sl_if = SourceLocation("test.c", 2, 1, 30, 40)
+    loc_for = Provenance(spelling=sl_for, expansion=sl_for)
+    loc_if = Provenance(spelling=sl_if, expansion=sl_if)
+    b_for = Branch(bid="b_for", kind="for", line=1, atoms=[Atom(var="idx", var_type="u1", op="<", boundary=1, boundary_name="1", text="idx < 1", type_info=u8)], provenance=loc_for)
+    b_if = Branch(bid="b_if", kind="if", line=2, atoms=[Atom(var="flag", var_type="u1", op="==", boundary=1, boundary_name="1", text="flag == 1", type_info=u8)], provenance=loc_if)
+    cv_idx = ControlVar(name="idx", var="idx", source="local", type_info=u8, branch_ids=["b_for"])
+    cv_flag = ControlVar(name="flag", var="flag", source="global", type_info=u8, branch_ids=["b_if"])
+    ir = FunctionIR(name="test_fn", file="test.c", line=1, ret_type="void", branches=[b_for, b_if], control_vars=[cv_idx, cv_flag], globals_used=["flag"])
+    domains = {"idx": [0], "flag": [0, 1]}
+    fixed = {"idx": 0, "flag": 0}
+    cand = _targeted_branch_candidate(ir, domains, fixed, b_for, True)
+    assert cand is not None
+    # Downstream if branch flag==1 should be targeted to TRUE (flag=1)
+    assert cand.get("flag") == 1
+
+
+
 
 
 
