@@ -4067,6 +4067,13 @@ def _targeted_branch_candidate(ir: FunctionIR,
         for parent, required in _ancestor_requirements(ir, branch):
             _apply_branch_target(ir, domains, trial_raw, parent, required)
         _apply_branch_target(ir, domains, trial_raw, branch, outcome, target_atoms=target_alts)
+        if outcome:
+            branch_controls = {_norm(atom.var) for atom in branch.atoms}
+            for child in ir.branches:
+                if child.bid in descendants and child.kind not in {"switch", "for"}:
+                    child_controls = {_norm(atom.var) for atom in child.atoms}
+                    if not (child_controls & branch_controls):
+                        _apply_branch_target(ir, domains, trial_raw, child, True)
 
         env = _control_env(trial_raw, ir, before_offset=branch_offset)
         try:
@@ -4370,6 +4377,15 @@ def _targeted_generic_candidates(ir: FunctionIR,
                         _apply_branch_target(ir, domains, trial, other, False)
                 for parent, required in _ancestor_requirements(ir, branch):
                     _apply_branch_target(ir, domains, trial, parent, required)
+                is_atom_true = (atom.op == "==" and value == atom.boundary) or (atom.op != "==" and value != atom.boundary)
+                if is_atom_true:
+                    branch_controls = {_norm(a.var) for a in branch.atoms}
+                    descendants = _descendant_branch_ids(ir, branch)
+                    for child in ir.branches:
+                        if child.bid in descendants and child.kind not in {"switch", "for"}:
+                            child_controls = {_norm(a.var) for a in child.atoms}
+                            if not (child_controls & branch_controls):
+                                _apply_branch_target(ir, domains, trial, child, True)
                 trial[key] = value
                 env = _control_env(trial, ir, before_offset=branch_offset)
                 try:
