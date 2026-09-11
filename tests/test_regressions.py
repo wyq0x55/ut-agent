@@ -363,6 +363,41 @@ def test_derive_obligations_preserves_boundaries_for_global_array_element_locals
     assert 255 in boundary_points
 
 
+def test_repeated_or_variants_generates_multi_variable_boundary_variants():
+    """Multi-variable equality OR chain must emit boundary/endpoint variants across inputs on FALSE outcome."""
+    from ut_agent.baseline import load_baseline
+    from ut_agent.generation.engine import _repeated_or_variants
+    from ut_agent.generation.model import TestObligation
+    from ut_agent.ir import Atom, Branch, ControlVar, FunctionIR, TypeInfo
+
+    baseline = load_baseline("config/baselines/psd-rebuild/1.1.yaml")
+    u8 = TypeInfo(canonical_type="unsigned char", kind="integer", bit_width=8, signed=False, min_value=0, max_value=255)
+    atoms = [
+        Atom(var="sw1", var_type="u1", op="==", boundary=3, boundary_name="ON_ON", text="3 == sw1", type_info=u8),
+        Atom(var="sw2", var_type="u1", op="==", boundary=3, boundary_name="ON_ON", text="3 == sw2", type_info=u8),
+    ]
+    branch = Branch(bid="b0", kind="if", line=1, connective="||", atoms=atoms)
+    cv1 = ControlVar(name="sw1", var="sw1", source="global", type_info=u8, branch_ids=["b0"])
+    cv2 = ControlVar(name="sw2", var="sw2", source="global", type_info=u8, branch_ids=["b0"])
+    ir = FunctionIR(
+        name="test_fn", file="test.c", line=1, ret_type="void",
+        branches=[branch], control_vars=[cv1, cv2], globals_used=["sw1", "sw2"],
+    )
+    ob_false = TestObligation(
+        rule_id="psd.4.compare", source_fact="branch:b0", oid="b0:mcdc:1:F",
+        kind="mcdc", branch_id="b0", outcome=False, condition_index=1,
+    )
+    assignment = {"sw1": 0, "sw2": 0}
+    variants = _repeated_or_variants(ir, baseline, ob_false, assignment)
+    # Target values outside {3} for boundary 3: 2 (3-1), 4 (3+1), 255 (max)
+    assert len(variants) == 4
+    assert variants[0] == {"sw1": 0, "sw2": 0}
+    assert variants[1] == {"sw1": 2, "sw2": 2}
+    assert variants[2] == {"sw1": 4, "sw2": 4}
+    assert variants[3] == {"sw1": 255, "sw2": 255}
+
+
+
 
 
 

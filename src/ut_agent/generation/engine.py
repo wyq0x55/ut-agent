@@ -7,6 +7,7 @@ import re
 from typing import Any
 
 from ut_agent.generation.boundary import (
+    _domain, _maximum, _minimum,
     control_candidates, switch_default_points, typed_boundary_points,
     typed_status_points,
 )
@@ -1293,9 +1294,6 @@ def _repeated_or_variants(ir: FunctionIR, baseline: Any,
         if control is None:
             return None
         controls.append(control)
-    if not controls or any(_norm(item.name) != _norm(controls[0].name)
-                           for item in controls):
-        return None
     if any(atom.op != "==" or atom.boundary is None for atom in atoms):
         return None
     try:
@@ -1304,6 +1302,52 @@ def _repeated_or_variants(ir: FunctionIR, baseline: Any,
         return None
     if index < 0 or index >= len(atoms):
         return None
+
+    single_var = all(_norm(item.name) == _norm(controls[0].name) for item in controls)
+    if not single_var:
+        # Multi-variable equality OR chain (e.g. switch flag inputs).
+        # Keep canonical independent MC/DC witnesses for TRUE outcomes.
+        # On the common FALSE side, emit typed boundary/endpoint variants across
+        # the symmetric inputs only once (at the final condition index).
+        if obligation.outcome or index != len(atoms) - 1:
+            return (dict(assignment),)
+        literals = {atom.boundary for atom in atoms}
+        outside_values = set()
+        for atom in atoms:
+            b = atom.boundary
+            domain = _domain(atom.type_info)
+            if domain:
+                min_v = _minimum(domain)
+                max_v = _maximum(domain)
+                if b - 1 > min_v and (b - 1) not in literals:
+                    outside_values.add(b - 1)
+                if b + 1 <= max_v and (b + 1) not in literals:
+                    outside_values.add(b + 1)
+                if max_v not in literals:
+                    outside_values.add(max_v)
+        target_values = sorted(outside_values)
+        variants = [dict(assignment)]
+        branch_offset = getattr(getattr(getattr(branch, "provenance", None), "expansion", None), "offset", None)
+        try:
+            branch_offset = int(branch_offset)
+        except (TypeError, ValueError):
+            branch_offset = None
+        for value in target_values:
+            trial = dict(assignment)
+            for control in controls:
+                trial[control.name] = value
+            _clear_derived_bindings(trial, ir, {control.name for control in controls})
+            env = _control_env(trial, ir, before_offset=branch_offset)
+            try:
+                atom_values = [evaluate_atom(atom, env) for atom in atoms]
+                all_false = all(v is False for v in atom_values)
+                if all_false and evaluate_branch(branch, env) is False and branch_path_reachable(ir, branch, env) is True:
+                    trial.update(env)
+                    variants.append(trial)
+            except (KeyError, TypeError, ValueError):
+                continue
+        return tuple(variants)
+
 
     candidates = control_candidates(
         ir, boundary_policy=getattr(baseline, "boundary_policy", None),
