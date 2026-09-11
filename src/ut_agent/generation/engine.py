@@ -2100,13 +2100,24 @@ def _local_value(ir: FunctionIR, name: str, env: dict[str, Any],
         )
         if active is not True:
             continue
+        try:
+            offset = int(effect.get("source_offset", -1))
+        except (TypeError, ValueError):
+            offset = -1
+        rhs_env = dict(env)
+        if name not in rhs_env:
+            prev_val = _local_value(
+                ir, name, env, seen - {name},
+                before_offset=offset - 1 if offset >= 0 else None,
+            )
+            if prev_val is not None:
+                rhs_env[name] = prev_val
         constant = effect.get("constant_value")
-        expression = str(effect.get("value", "")).strip()
         if constant is not None:
             value = constant
         else:
             value = _effect_expression_value(
-                ir, effect, env, set(seen),
+                ir, effect, rhs_env, set(seen),
             )
         if value is None:
             continue

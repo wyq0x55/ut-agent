@@ -311,7 +311,7 @@ def derive_obligations(ir: FunctionIR, baseline: TestBaseline,
                         control.source == "stub"
                         or origin_kind in {"stub_return", "stub_param", "global_array_element"}
                         or (type_info and getattr(type_info, "is_const", False))
-                        or any(any(term in n.lower() for term in ("valid", "_flg", "_flag", "sts", "fail", "rsl", "mode", "cmd")) for n in all_names)
+                        or any(any(term in n.lower() for term in ("valid", "_flg", "_flag", "sts", "fail", "rsl", "mode", "cmd", "_min", "_max")) for n in all_names)
                     )
                 )
                 if is_status:

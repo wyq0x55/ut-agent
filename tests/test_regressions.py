@@ -435,6 +435,20 @@ def test_targeted_branch_candidate_preserves_downstream_true_for_loop():
     assert cand.get("flag") == 1
 
 
+def test_local_self_assignment_evaluates_previous_offset_value():
+    """A self-updating local assignment (e.g. x = -x) must resolve previous value before the assignment."""
+    from ut_agent.generation.engine import _local_value
+    from ut_agent.ir import Effect, FunctionIR, ValueOrigin
+
+    tree = {"kind": "unary", "op": "-", "operand": {"kind": "reference", "name": "val"}}
+    eff1 = Effect(name="val", constant_value=-127, source_offset=10)
+    eff2 = Effect(name="val", value="-val", source_offset=20, origin=ValueOrigin(kind="local", expression_tree=tree))
+    ir = FunctionIR(name="fn", file="test.c", line=1, ret_type="int", local_value_effects=[eff1, eff2])
+    res = _local_value(ir, "val", {})
+    assert res == 127
+
+
+
 
 
 
