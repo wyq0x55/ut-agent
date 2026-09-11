@@ -4027,6 +4027,19 @@ def _apply_branch_target(ir: FunctionIR, domains: dict[str, list[Any]],
             applied.append((atom, expected))
 
 
+def _branch_then_contains_calls(ir: FunctionIR, branch_id: str) -> bool:
+    """Return whether activating a branch outcome will invoke unmocked external calls."""
+    for call in ir.calls:
+        if _is_memory_helper(call) or call.ptr_call:
+            continue
+        guards = getattr(call, "guards", None) or []
+        for g in guards:
+            g_dict = g if isinstance(g, dict) else getattr(g, "__dict__", {})
+            if g_dict.get("bid") == branch_id and g_dict.get("then") is True:
+                return True
+    return False
+
+
 def _targeted_branch_candidate(ir: FunctionIR,
                                domains: dict[str, list[Any]],
                                fixed: dict[str, Any], branch: Branch,
@@ -4072,7 +4085,7 @@ def _targeted_branch_candidate(ir: FunctionIR,
             for child in ir.branches:
                 if child.bid in descendants and child.kind not in {"switch", "for"}:
                     child_controls = {_norm(atom.var) for atom in child.atoms}
-                    if not (child_controls & branch_controls):
+                    if not (child_controls & branch_controls) and not _branch_then_contains_calls(ir, child.bid):
                         _apply_branch_target(ir, domains, trial_raw, child, True)
 
         env = _control_env(trial_raw, ir, before_offset=branch_offset)
@@ -4384,7 +4397,7 @@ def _targeted_generic_candidates(ir: FunctionIR,
                     for child in ir.branches:
                         if child.bid in descendants and child.kind not in {"switch", "for"}:
                             child_controls = {_norm(a.var) for a in child.atoms}
-                            if not (child_controls & branch_controls):
+                            if not (child_controls & branch_controls) and not _branch_then_contains_calls(ir, child.bid):
                                 _apply_branch_target(ir, domains, trial, child, True)
                 trial[key] = value
                 env = _control_env(trial, ir, before_offset=branch_offset)
