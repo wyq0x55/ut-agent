@@ -1767,6 +1767,8 @@ def _intent_value(
             return normalized[semantic]
     if "CALLCNT" in comment or (key and ":count" in key):
         return 0
+    if comment.startswith("@") and "[" in comment:
+        return 0
     if ir is not None:
         addr = _pointer_address_value(key, ir) or _pointer_address_value(comment, ir)
         if addr is not None:

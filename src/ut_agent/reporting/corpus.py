@@ -926,7 +926,9 @@ def compare_function_semantics(
             project_evidence=project_evidence,
         )
         projection = dimensions.get("projection", {})
-        if projection.get("status") != "equal":
+        equiv = _case_equivalence(case_matching)
+        has_case_defects = bool(gaps) or equiv in {"MISSING_GENERATED", "EXTRA_GENERATED", "AMBIGUOUS_MATCH", "PARTIAL_MATCH"}
+        if projection.get("status") != "equal" and has_case_defects:
             gaps.append(_gap(
                 function=function, category="PROJECTION_GAP",
                 owner_layer=_CATEGORY_OWNERS["PROJECTION_GAP"],
