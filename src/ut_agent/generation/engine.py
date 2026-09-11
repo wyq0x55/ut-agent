@@ -3147,6 +3147,9 @@ def _generic_inputs(ir: FunctionIR,
         fixed[pointer_value_key(param.name)] = pointee_default
         fixed[pointer_value_key(param.name, f"{param.name}[0]")] = pointee_default
         fixed[pointer_value_key(param.name, f"*{param.name}")] = pointee_default
+        fixed[f"*{param.name}"] = pointee_default
+        fixed[f"{param.name}[0]"] = pointee_default
+        fixed[f"@{param.name}[0]"] = pointee_default
     for memory in ir.memory_vars:
         if memory.input_value is not None:
             fixed[memory.name] = memory.input_value
@@ -3836,42 +3839,18 @@ def _descendant_branch_ids(ir: FunctionIR, branch: Branch) -> set[str]:
     return descendants
 
 
-def _is_descendant_on_active_path(ir: FunctionIR, branch: Branch, outcome: bool, other: Branch) -> bool:
-    """Check whether descendant 'other' lies on the active path when 'branch' takes 'outcome'."""
-    by_id = {item.bid: item for item in ir.branches}
-    curr = other
-    visited: set[str] = set()
-    while curr.parent_bid:
-        if curr.bid in visited:
-            return False
-        visited.add(curr.bid)
-        parent = by_id.get(curr.parent_bid)
-        if parent is None:
-            return False
-        if curr.parent_bid == branch.bid:
-            return curr.parent_outcome is None or curr.parent_outcome == outcome
-        if curr.parent_outcome is not None and curr.parent_outcome is not False:
-            return False
-        curr = parent
-    return False
-
-
 def _apply_branch_target(ir: FunctionIR, domains: dict[str, list[Any]],
                          raw: dict[str, Any], branch: Branch,
                          outcome: bool,
-                         target_atoms: list[tuple[int, bool]] | None = None,
-                         preserve_scalar_params: bool = False) -> None:
+                         target_atoms: list[tuple[int, bool]] | None = None) -> None:
     """Apply a deterministic truth target without asserting full-path truth."""
     applied: list[tuple[Atom, bool]] = []
     targets = target_atoms if target_atoms is not None else _branch_target_atoms(branch, outcome)
-    scalar_params = {p.name for p in ir.params if not p.is_ptr}
     for atom_index, expected in targets:
         if atom_index < 0 or atom_index >= len(branch.atoms):
             continue
         atom = branch.atoms[atom_index]
         key = _domain_key_for(ir, atom.var, domains, branch=branch)
-        if preserve_scalar_params and key in scalar_params and key in raw:
-            continue
         if key is None:
             for guard_branch, guard_required in _local_guard_requirements(
                     ir, atom, expected):
@@ -3936,10 +3915,9 @@ def _targeted_branch_candidate(ir: FunctionIR,
         for other in ir.branches:
             if (other.bid != branch.bid
                     and other.bid not in ancestors
+                    and other.bid not in descendants
                     and other.kind not in {"switch", "for"}):
-                if other.bid in descendants and not _is_descendant_on_active_path(ir, branch, outcome, other):
-                    continue
-                _apply_branch_target(ir, domains, trial_raw, other, False, preserve_scalar_params=True)
+                _apply_branch_target(ir, domains, trial_raw, other, False)
         for parent, required in _ancestor_requirements(ir, branch):
             _apply_branch_target(ir, domains, trial_raw, parent, required)
         _apply_branch_target(ir, domains, trial_raw, branch, outcome, target_atoms=target_alts)
@@ -3985,10 +3963,9 @@ def _targeted_condition_candidate(ir: FunctionIR,
     for other in ir.branches:
         if (other.bid != branch.bid
                 and other.bid not in ancestors
+                and other.bid not in descendants
                 and other.kind not in {"switch", "for"}):
-            if other.bid in descendants and not _is_descendant_on_active_path(ir, branch, True, other):
-                continue
-            _apply_branch_target(ir, domains, raw, other, False, preserve_scalar_params=True)
+            _apply_branch_target(ir, domains, raw, other, False)
     for parent, required in _ancestor_requirements(ir, branch):
         _apply_branch_target(ir, domains, raw, parent, required)
     atom = branch.atoms[condition_index]
@@ -4092,10 +4069,9 @@ def _targeted_mcdc_candidate(ir: FunctionIR,
     for other in ir.branches:
         if (other.bid != branch.bid
                 and other.bid not in ancestors
+                and other.bid not in descendants
                 and other.kind not in {"switch", "for"}):
-            if other.bid in descendants and not _is_descendant_on_active_path(ir, branch, True, other):
-                continue
-            _apply_branch_target(ir, domains, raw, other, False, preserve_scalar_params=True)
+            _apply_branch_target(ir, domains, raw, other, False)
     applied: list[tuple[Any, bool]] = []
     failed_key: str | None = None
     for owner, atom, expected in requirements:
